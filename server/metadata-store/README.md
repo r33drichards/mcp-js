@@ -35,9 +35,14 @@ by the server. Namespace isolation is logical, not an authorization boundary.
 
 DynamoDB cannot be combined with `--cluster-port`: it already arbitrates shared
 metadata writes and is not a backend for the existing Raft log. Raft, scheduler
-checkpoints, HTTP-function definitions, execution registry and console output
-are **not migrated** by this change. This flag does not promise a completely
+checkpoints and HTTP-function definitions are **not migrated** by this change.
+Execution records, console pages, artifact records and upload grants use the
+`/runtime` namespace; values larger than 128 KiB require S3 blob storage.
+Completed records can be read by a fresh process, but running isolates and
+cancellation handles remain process-local. This flag does not promise a completely
 diskless runtime. FFI constructors keep their existing sled defaults.
+
+For deployment steps, see the [Lambda tutorial](../../site-docs/tutorials/lambda-dynamodb.md).
 
 ## Semantics and limits
 

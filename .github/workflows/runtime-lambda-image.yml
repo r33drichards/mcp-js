@@ -1,0 +1,45 @@
+name: Runtime Lambda image
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build exact checkout with Nix
+        run: nix build --extra-experimental-features 'nix-command flakes' .#default --out-link result
+      - name: Package Nix runtime closure
+        run: |
+          mkdir image
+          nix-store -qR ./result > image/closure.txt
+          tar -cf image/closure.tar --files-from=image/closure.txt
+          server=$(readlink -f result)/bin/server
+          binary_sha=$(sha256sum "$server" | cut -d' ' -f1)
+          printf '{"sourceSha":"%s","binarySha256":"%s","entrypoint":"%s"}\n' "$GITHUB_SHA" "$binary_sha" "$server" > provenance.json
+          cat > image/Dockerfile <<DOCKER
+          FROM debian:trixie-slim
+          ADD closure.tar /
+          ENV PORT=8080 MCP_V8_ALLOWED_HOSTS=* SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+          LABEL org.opencontainers.image.revision="$GITHUB_SHA"
+          LABEL org.opencontainers.image.version="runtime-$GITHUB_SHA"
+          LABEL io.mcp-js.binary-sha256="$binary_sha"
+          ENTRYPOINT ["$server"]
+          CMD []
+          DOCKER
+          docker build -t wholelottahoopla/mcp-js:runtime-$GITHUB_SHA image
+          docker run --rm -e PORT= wholelottahoopla/mcp-js:runtime-$GITHUB_SHA --version
+      - uses: docker/login-action@v3
+        with:
+          username: wholelottahoopla
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Publish exact-commit image (no latest or release aliases)
+        run: docker push wholelottahoopla/mcp-js:runtime-$GITHUB_SHA
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-image-provenance
+          path: provenance.json

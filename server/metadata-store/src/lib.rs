@@ -51,3 +51,6 @@ pub trait MetadataStore: Send + Sync {
     /// DynamoDB writes are durable on acknowledgement. Sled flushes locally.
     fn flush(&self) -> Result<()>;
 }
+
+pub mod runtime_tree;
+pub use runtime_tree::{RuntimeStore, RuntimeTree};

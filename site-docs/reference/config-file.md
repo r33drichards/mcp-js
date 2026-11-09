@@ -267,7 +267,7 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ### `dynamodb_table`
 
-Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode
+Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled. Covers sessions, heap tags, filesystem labels and runtime bookkeeping. Large runtime values require S3. Incompatible with cluster mode
 
 - CLI flag: `--dynamodb-table`
 - Environment: `MCP_V8_DYNAMODB_TABLE`

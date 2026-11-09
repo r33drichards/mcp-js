@@ -191,6 +191,8 @@ async fn dynamodb_contract(endpoint: String) {
         DynamoDbStore::new(client.clone(), &table, "test").unwrap(),
     ))
     .await;
+    let runtime_store = Arc::new(DynamoDbStore::new(client.clone(), &table, "runtime-test").unwrap());
+    tokio::task::spawn_blocking(move || runtime_contract(runtime_store)).await.unwrap();
     let reopened = DynamoDbStore::new(client.clone(), &table, "test").unwrap();
     assert!(reopened.get("heads", b"main").await.unwrap().is_some());
     let other = DynamoDbStore::new(client.clone(), &table, "test-other").unwrap();
@@ -244,4 +246,60 @@ async fn localstack_testcontainer_contract() {
     let port = container.get_host_port_ipv4(4566.tcp()).await.unwrap();
     dynamodb_contract(format!("http://127.0.0.1:{port}")).await;
     // Container lifecycle is owned by Testcontainers, including panic cleanup.
+}
+
+fn runtime_contract(store: Arc<dyn MetadataStore>) {
+    use mcp_metadata_store::RuntimeStore;
+    let runtime = RuntimeStore::new(store.clone()).unwrap();
+    let tree = runtime.tree("runtime-contract");
+    tree.insert(b"a", b"first").unwrap();
+    let reopened = RuntimeStore::new(store).unwrap().tree("runtime-contract");
+    assert_eq!(reopened.get(b"a").unwrap(), Some(b"first".to_vec()));
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let t = reopened.clone();
+        handles.push(std::thread::spawn(move || t.compare_and_swap(b"a", Some(b"first".to_vec()), Some(b"claimed".to_vec())).unwrap().is_ok()));
+    }
+    assert_eq!(handles.into_iter().map(|h| usize::from(h.join().unwrap())).sum::<usize>(), 1);
+    // A second value and a tombstone must not appear as a phantom scan row.
+    tree.insert(b"b", b"second").unwrap();
+    tree.remove(b"b").unwrap();
+    assert!(tree.get(b"b").unwrap().is_none());
+    assert_eq!(tree.iter().collect::<Result<Vec<_>,_>>().unwrap().len(), 1);
+    assert!(tree.compare_and_swap(b"b", None, Some(b"reborn".to_vec())).unwrap().is_ok());
+    assert_eq!(tree.get(b"b").unwrap(), Some(b"reborn".to_vec()));
+}
+
+#[test]
+fn runtime_sled_contract() {
+    let db = sled::Config::new().temporary(true).open().unwrap();
+    runtime_contract(Arc::new(SledStore(db)));
+}
+
+#[derive(Default)]
+struct TestBlobs(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+#[async_trait::async_trait]
+impl mcp_metadata_store::runtime_tree::RuntimeBlobs for TestBlobs {
+    async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> {
+        self.0.lock().unwrap().insert(name.into(), value.to_vec()); Ok(())
+    }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.0.lock().unwrap().get(name).cloned().ok_or("missing runtime blob".into())
+    }
+}
+#[tokio::test(flavor="current_thread")]
+async fn runtime_large_values_are_blob_references_and_missing_blobs_fail() {
+    use mcp_metadata_store::RuntimeStore;
+    let db = Arc::new(SledStore(sled::Config::new().temporary(true).open().unwrap()));
+    let blobs = Arc::new(TestBlobs::default());
+    let tree = RuntimeStore::new(db.clone()).unwrap().with_blobs(blobs.clone()).tree("large");
+    let value = vec![42; 500_000];
+    tree.insert(b"artifact", &value).unwrap();
+    assert_eq!(tree.get(b"artifact").unwrap(), Some(value.clone()));
+    let raw = db.get("large", b"artifact").await.unwrap().unwrap();
+    assert_eq!(raw[0], 2); assert!(raw.len() < 100);
+    let reopened = RuntimeStore::new(db).unwrap().with_blobs(blobs.clone()).tree("large");
+    assert_eq!(reopened.get(b"artifact").unwrap(), Some(value));
+    blobs.0.lock().unwrap().clear();
+    assert!(reopened.get(b"artifact").is_err());
 }

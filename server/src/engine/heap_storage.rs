@@ -435,3 +435,8 @@ impl HeapStorage for AnyHeapStorage {
         }
     }
 }
+#[async_trait]
+impl mcp_metadata_store::runtime_tree::RuntimeBlobs for S3HeapStorage {
+    async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> { HeapStorage::put(self, name, value).await }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> { HeapStorage::get(self, name).await }
+}

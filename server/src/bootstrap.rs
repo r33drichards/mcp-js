@@ -523,7 +523,7 @@ pub async fn build_storage_engine(
     let engine = attach_heap_tags(engine, &config, cluster_node.as_ref()).await?;
     let engine = attach_filesystem(engine, &config, cluster_node.as_ref()).await?;
     Ok(RuntimeBootstrap {
-        engine: attach_execution_registry(engine, &config),
+        engine: attach_execution_registry(engine, &config).await?,
         cluster_node,
     })
 }
@@ -706,7 +706,21 @@ async fn attach_filesystem(
     }
 }
 
-fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) -> Engine {
+async fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) -> Result<Engine> {
+    if let Some(table) = config.dynamodb_table.clone() {
+        let namespace = format!("{}/runtime", config.dynamodb_namespace);
+        let bucket = config.s3_bucket.clone();
+        let remote = mcp_metadata_store::RuntimeStore::from_factory(async move {
+            let sdk = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let store: Arc<dyn mcp_metadata_store::MetadataStore> = Arc::new(mcp_metadata_store::DynamoDbStore::new(aws_sdk_dynamodb::Client::new(&sdk), table, &namespace)?);
+            store.get("__probe", b"ready").await?;
+            let blobs: Option<Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs>> = match bucket {
+                Some(bucket) => Some(Arc::new(S3HeapStorage::new(bucket).await)), None => None,
+            };
+            Ok((store, blobs))
+        }).map_err(|e|anyhow!(e))?;
+        return Ok(engine.with_execution_registry(Arc::new(ExecutionRegistry::from_runtime(remote))));
+    }
     let path = config
         .execution_db_path
         .clone()
@@ -717,7 +731,7 @@ fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) ->
     match ExecutionRegistry::new(&path) {
         Ok(registry) => {
             tracing::info!("Execution registry opened at {}", path);
-            engine.with_execution_registry(Arc::new(registry))
+            Ok(engine.with_execution_registry(Arc::new(registry)))
         }
         Err(error) => {
             tracing::warn!(
@@ -725,7 +739,7 @@ fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) ->
                 path,
                 error
             );
-            engine
+            Ok(engine)
         }
     }
 }

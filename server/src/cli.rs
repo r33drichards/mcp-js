@@ -194,8 +194,8 @@ pub struct Cli {
     pub session_db_path: String,
 
     /// Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled.
-    /// Covers session history, heap tags and filesystem labels, not Raft or
-    /// the local execution registry. Incompatible with cluster mode.
+    /// Covers sessions, heap tags, filesystem labels and runtime bookkeeping.
+    /// Large runtime values require S3. Incompatible with cluster mode.
     #[arg(long, env = "MCP_V8_DYNAMODB_TABLE", conflicts_with = "cluster_port", help_heading = "Core")]
     pub dynamodb_table: Option<String>,
 
