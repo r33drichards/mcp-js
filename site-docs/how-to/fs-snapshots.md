@@ -53,10 +53,13 @@ tasks. The response includes `status`, `fs`, `execution_id`, and bounded console
 Keep the host's request timeout above the execution and storage deadlines.
 Waiting is bounded to 305 seconds; `wait_timed_out: true` preserves the original
 execution ID and is **not** permission to replay a possibly completed write.
-Execution IDs and console registries remain process-local: use the inline
-response and durable snapshot/session handles across cold starts, not a later
-request's ability to recover an old execution ID. For durable serverless files,
+With `--dynamodb-table`, completed execution records and console output can be
+read by a fresh process; running isolates and cancellation handles remain
+process-local. Without a shared metadata backend, do not rely on another
+process recovering an execution ID. For durable serverless files,
 combine `--fs-store s3` with `--dynamodb-table` and leave `--cache-dir` unset.
+See the [Lambda deployment tutorial](../tutorials/lambda-dynamodb.md) for image,
+IAM, invocation and recovery steps.
 
 ```json
 {"tool":"run_js","arguments":{"code":"console.log(await fs.readFile('/work/state.txt', 'utf8'))","wait":true}}
