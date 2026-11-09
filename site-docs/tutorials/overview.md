@@ -10,6 +10,9 @@ start with [Install](../install/overview.md).
 
 ## Available tutorials
 
+- [Deploy on Lambda with DynamoDB and S3](lambda-dynamodb.md) — package the
+  HTTP server with Lambda Web Adapter, configure durable metadata and virtual
+  filesystem storage, and verify recovery in another function.
 - [Run SQLite in WebAssembly](sqlite-wasm.md) — build the bundled SQLite `.wasm`
   module, load it into the server, and query an in-memory database from
   JavaScript.
