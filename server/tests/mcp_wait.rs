@@ -9,7 +9,7 @@ use std::{path::Path, sync::Arc};
 
 fn engine(dir: &Path) -> Arc<Engine> {
     let policy = dir.join("fs.rego");
-    std::fs::write(&policy, "package mcp.filesystem\ndefault allow = false\nallow if { startswith(input.path, \"/work/\") }\n").unwrap();
+    std::fs::write(&policy, "package mcp.filesystem\ndefault allow = false\nallow if { startswith(input.path, \"/workspace/\") }\n").unwrap();
     Engine::create(
         EngineConfigBuilder::new()
             .limits(
@@ -59,7 +59,7 @@ async fn wait_settles_execution_and_filesystem_before_reply() {
     initialize_v8();
     let dir = tempfile::tempdir().unwrap();
     let first = engine(dir.path());
-    let written = call(&first, json!({"wait":true,"code":"await new Promise(r => setTimeout(r, 50)); await fs.writeFile('/work/proof.txt', 'persisted'); console.log('written');"})).await;
+    let written = call(&first, json!({"wait":true,"code":"await new Promise(r => setTimeout(r, 50)); await fs.writeFile('/workspace/proof.txt', 'persisted'); console.log('written');"})).await;
     assert_eq!(written["status"], "completed", "{written}");
     assert!(written["output"].as_str().unwrap().contains("written"));
     assert_eq!(written["output_truncated"], false);
@@ -70,11 +70,18 @@ async fn wait_settles_execution_and_filesystem_before_reply() {
     let reopened = engine(dir.path());
     let read = call(
         &reopened,
-        json!({"wait":true,"code":"console.log(await fs.readFile('/work/proof.txt', 'utf8'));"}),
+        json!({"wait":true,"code":"console.log(await fs.readFile('/workspace/proof.txt', 'utf8'));"}),
     )
     .await;
     assert_eq!(read["status"], "completed", "{read}");
     assert!(read["output"].as_str().unwrap().contains("persisted"));
+    // Persistence belongs to the policy-approved virtual workspace, not host /tmp.
+    let outside = call(
+        &reopened,
+        json!({"wait":true,"code":"await fs.writeFile('/tmp/not-a-workspace-file', 'denied');"}),
+    )
+    .await;
+    assert_eq!(outside["status"], "failed", "{outside}");
     let output = reopened
         .get_execution_output(
             read["execution_id"].as_str().unwrap().into(),
@@ -97,7 +104,7 @@ async fn wait_settles_execution_and_filesystem_before_reply() {
             .unwrap()
             .contains("expected failure")
     );
-    let rejected = call(&reopened, json!({"wait":true,"file":"/work/proof.txt"})).await;
+    let rejected = call(&reopened, json!({"wait":true,"file":"/workspace/proof.txt"})).await;
     assert!(
         rejected["error"]
             .as_str()

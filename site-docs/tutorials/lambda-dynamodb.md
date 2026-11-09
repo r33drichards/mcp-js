@@ -1,7 +1,7 @@
 # Deploy mcp-js on Lambda with DynamoDB and S3
 
 Run short, request-scoped JavaScript on AWS Lambda, keep metadata in DynamoDB,
-and keep the virtual `/work` filesystem in S3. This walkthrough uses a private,
+and keep the virtual `/workspace` filesystem in S3. This walkthrough uses a private,
 IAM-authenticated Function URL and Lambda Web Adapter in front of mcp-js.
 
 **Validation status:** the commands below are a deployment recipe, not a record
@@ -19,7 +19,9 @@ Use a checkout containing the DynamoDB runtime changes from PR #306.
 
 `--fs-store s3` provides a **virtual filesystem through the JavaScript `fs`
 API**, not an EFS mount or a POSIX volume for host subprocesses. This tutorial
-does not attach EFS. JavaScript globals are not persisted because heap storage
+selects `/workspace` through the filesystem policy; the snapshot implementation
+stores absolute virtual paths and does not require the conventional `/work`
+prefix. It does not attach EFS. JavaScript globals are not persisted because heap storage
 is left disabled. In-flight isolates, cancellation handles, MCP transport
 sessions and task subscriptions remain process-local.
 
@@ -84,8 +86,8 @@ sha256sum "$SERVER_BIN" > lambda-image/binary.sha256
 cat > lambda-image/fs.rego <<'REGO'
 package mcp.filesystem
 default allow = false
-allow if { input.path == "/work" }
-allow if { startswith(input.path, "/work/") }
+allow if { input.path == "/workspace" }
+allow if { startswith(input.path, "/workspace/") }
 REGO
 
 cat > lambda-image/Dockerfile <<DOCKER
@@ -293,7 +295,7 @@ print(json.dumps(json.loads(result["content"][0]["text"]), indent=2))
 
 ```bash
 python3 invoke-mcp.py run_js \
-  '{"wait":true,"code":"await fs.writeFile(\"/work/proof.txt\", \"survived\"); console.log(\"stored\");"}' \
+  '{"wait":true,"code":"await fs.writeFile(\"/workspace/proof.txt\", \"survived\"); console.log(\"stored\");"}' \
   > write-result.json
 jq -e '.status == "completed" and (.fs | length == 64)' write-result.json
 export EXECUTION_ID=$(jq -r .execution_id write-result.json)
@@ -333,7 +335,7 @@ aws lambda wait function-updated-v2 --function-name "$PROBE_NAME"
 python3 invoke-mcp.py get_execution "$(jq -nc --arg id "$EXECUTION_ID" '{execution_id:$id}')"
 python3 invoke-mcp.py get_execution_output "$(jq -nc --arg id "$EXECUTION_ID" '{execution_id:$id}')"
 python3 invoke-mcp.py run_js \
-  '{"wait":true,"code":"console.log(await fs.readFile(\"/work/proof.txt\", \"utf8\"));"}'
+  '{"wait":true,"code":"console.log(await fs.readFile(\"/workspace/proof.txt\", \"utf8\"));"}'
 ```
 
 Grant the caller the same two invoke permissions on the recovery function before
@@ -356,10 +358,15 @@ adapter, JWT/JWKS enforcement, issuer/audience validation and client secret flow
 Do not replace its environment with this demo's `lambda-env.json`: Lambda's
 environment update replaces the whole map. Merge the DynamoDB table/namespace,
 S3 bucket and `--fs-store s3` settings into its declarative configuration, retain
-its `/work` policy and add the storage permissions to its existing execution
+its filesystem policy and add the storage permissions to its existing execution
 role. Keep the client on `wait: true` and stable session IDs. Validate a separate
 canary against the same authentication contract before promoting the image;
 using new storage starts with empty state unless you explicitly migrate old data.
+To adopt `/workspace`, update the allowlist and the agent's file paths together.
+Existing `/work` snapshot entries are not renamed automatically. Preserve them
+until an explicit copy/migration has been verified. Keep Lambda process scratch
+and `--session-db-path` under `/tmp`; moving those directories to a local
+`/workspace` would not provide persistence.
 
 - DynamoDB mode cannot be combined with Raft `--cluster-port`. Existing sled
   data is not migrated automatically. Scheduler checkpoints and HTTP-function
