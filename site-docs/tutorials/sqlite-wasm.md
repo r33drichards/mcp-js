@@ -119,28 +119,30 @@ db.close();
 JSON.stringify(result.rows);
 ```
 
-## Persisting the database (stateful mode)
+## Persistence limitations
 
-In stateless mode the database lives only for that one execution. To carry it
-across calls, run statefully and pass the returned `heap` key to the next
-`run_js`:
+This example's database lives only for one execution. **V8 heap snapshots cannot
+persist this SQLite WASM runtime or its in-memory database.** Heap persistence
+uses a V8 `SnapshotCreator` isolate that disables WebAssembly. The server rejects
+`--wasm-module`/`--wasm-config` together with `--heap-store dir` or
+`--heap-store s3`. Keep `--heap-store none` (the default) when using WASM.
 
-```bash
-mcp-v8 --directory-path /tmp/mcp-v8-heaps \
-  --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
-```
+Filesystem persistence (`--fs-store`) is separate from heap persistence and can
+be used with WASM, but it does not automatically save WASM linear memory or this
+example's database. The bundled SQLite build has no filesystem VFS and opens
+only `:memory:` databases. Durable database contents would require an explicit
+export/import workflow or a storage integration not provided by this example.
 
-The initialized SQLite runtime and its in-memory data are captured in the V8
-heap snapshot, so a later run that restores that heap continues with the same
-database. See [Stateful sessions & heap snapshots](../how-to/sessions-and-heaps.md).
+See [Filesystem snapshots](../how-to/fs-snapshots.md) for the separate filesystem
+persistence mechanism.
 
 ## Things to keep in mind
 
 - The example uses an in-memory database.
 - SQLite calls here are synchronous.
 - WASM linear memory is separate from the V8 heap limit; large datasets may need
-  a higher per-module cap (`--wasm-module name=...:64m`) and/or a higher
-  `--heap-memory-max` for the snapshot.
+  a higher per-module initial-memory cap (`--wasm-module name=...:64m`). This
+  cap checks declared initial memory; it is not a runtime growth limit.
 
 For the full source, see `examples/sqlite-wasm/example.js` and
 `examples/sqlite-wasm/build.sh`.
