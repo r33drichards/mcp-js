@@ -33,7 +33,9 @@ pub struct Stat {
 pub struct SessionMount {
     store: FsStore,
     base_id: Option<Hash>,          // pinned root hash at pull() time
-    upper: HashMap<PathBuf, Write>, // the only mutable state
+    upper: HashMap<PathBuf, Write>, // the only mutable filesystem state
+    // Execution-local scheduling only; never serialized into a snapshot.
+    pub(super) io_tasks: Option<std::sync::Arc<super::fs::FsIoTasks>>,
 }
 
 impl SessionMount {
@@ -43,6 +45,7 @@ impl SessionMount {
             store,
             base_id: Some(id),
             upper: HashMap::new(),
+            io_tasks: None,
         })
     }
 
@@ -51,6 +54,7 @@ impl SessionMount {
             store,
             base_id: None,
             upper: HashMap::new(),
+            io_tasks: None,
         }
     }
 
@@ -58,10 +62,9 @@ impl SessionMount {
         self.base_id
     }
 
-    /// Warm the node-local blob cache with this mount's entire base tree. Must
-    /// be called on the runtime that owns the blob backend's remote I/O (the
-    /// server's main runtime), before the isolate runs — see
-    /// [`FsStore::prefetch`]. No-op for an empty (fresh) mount.
+    /// Optionally prefetch the entire base tree. Normal execution stays lazy
+    /// and does not call this. See [`FsStore::prefetch`] for cost and cache
+    /// eviction caveats. No-op for an empty (fresh) mount.
     pub async fn warm(&self) -> anyhow::Result<()> {
         if let Some(id) = self.base_id {
             self.store.prefetch(*id.as_bytes()).await?;
@@ -149,10 +152,14 @@ impl SessionMount {
 
     /// Whether `p` names an existing file or (implicit) directory.
     pub async fn exists(&self, p: &Path) -> bool {
+        self.try_exists(p).await.unwrap_or(false)
+    }
+
+    async fn try_exists(&self, p: &Path) -> anyhow::Result<bool> {
         let comps = components_of(p);
         let key = path_of(&comps);
-        self.effective(&comps, &key).await.ok().flatten().is_some()
-            || self.is_implicit_dir(&comps, &key).await.unwrap_or(false)
+        Ok(self.effective(&comps, &key).await?.is_some()
+            || self.is_implicit_dir(&comps, &key).await?)
     }
 
     /// Remove a file, or a directory (recursively whiting out descendants).
@@ -213,7 +220,8 @@ impl SessionMount {
     /// so the symlink survives a `push` and round-trips through the content
     /// store like any other file.
     pub async fn symlink(&mut self, target: &Path, link: &Path) -> anyhow::Result<()> {
-        if self.exists(link).await {
+        // A storage failure is not evidence that the destination is absent.
+        if self.try_exists(link).await? {
             anyhow::bail!("EEXIST: {}", link.display());
         }
         let target_bytes = target.to_string_lossy().into_owned().into_bytes();

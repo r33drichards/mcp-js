@@ -30,12 +30,11 @@ pub trait HeapStorage: Send + Sync + 'static {
         Ok(self.get(name).await.is_ok())
     }
 
-    /// Ensure a blob is materialized in this backend's local layer so a later
-    /// `get` does not have to cross to a remote backend (or another tokio
-    /// runtime). On a write-through cache this populates the local cache from
-    /// the primary; on a purely-local backend it is a no-op. Pre-staging fs
-    /// blobs via `warm` on the main runtime is what lets the isolate's
-    /// current-thread ops read them without awaiting remote I/O.
+    /// Optional cache hint. A write-through cache fetches from its primary on
+    /// a miss; a purely-local backend can do nothing. The default fetches and
+    /// discards the bytes, and bounded caches can evict warmed data at any time.
+    /// This is not required for filesystem correctness: remote backends must
+    /// support on-demand reads from the isolate's current-thread runtime.
     async fn warm(&self, name: &str) -> Result<(), String> {
         self.get(name).await.map(|_| ())
     }
@@ -440,3 +439,6 @@ impl mcp_metadata_store::runtime_tree::RuntimeBlobs for S3HeapStorage {
     async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> { HeapStorage::put(self, name, value).await }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> { HeapStorage::get(self, name).await }
 }
+
+#[cfg(test)]
+mod lazy_fs_tests;
