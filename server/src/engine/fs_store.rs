@@ -167,14 +167,11 @@ impl FsStore {
         }
     }
 
-    /// Warm the node-local blob cache with every tree node and file chunk
-    /// reachable from `root`. Intended to run on the runtime that owns the blob
-    /// backend's remote I/O (the server's main runtime), BEFORE the isolate
-    /// executes: deno_core ops run on the isolate's own current-thread runtime
-    /// and cannot await remote I/O from another runtime, so a lazy in-op fetch
-    /// from S3 would deadlock. Pre-staging every reachable blob locally makes
-    /// the in-op reads pure local-cache hits. Already-local blobs are skipped
-    /// cheaply via `HeapStorage::contains`.
+    /// Optionally prefetch every tree node and file chunk reachable from `root`.
+    /// This is O(total snapshot), not a prerequisite for mounting: remote blob
+    /// backends bridge I/O to their owning runtime for cold on-demand reads.
+    /// A bounded cache may evict earlier blobs while this walk is still running;
+    /// callers must not rely on all reachable objects remaining local.
     pub async fn prefetch(&self, root: [u8; 32]) -> anyhow::Result<()> {
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
