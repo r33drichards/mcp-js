@@ -207,7 +207,7 @@ async fn main() -> Result<(), String> {
                 pulse?;
                 let status = node.status().await;
                 if status.role != Role::Leader { owner = None; continue; }
-                if owner.as_ref().is_none_or(|active| active.term() != status.term) {
+                if owner.as_ref().is_none_or(|active| !active.is_valid() || active.term() != status.term) {
                     match Replicated::acquire(node.clone(), config.limits.clone(), &config.schedules, contract.clone(), Utc::now()).await {
                         Ok(active) => owner = Some(active),
                         Err(error) => { eprintln!("acquisition unavailable: {error}"); continue; }
