@@ -1885,6 +1885,14 @@ mod session_view_tests {
 }
 
 struct ScheduledRuntime(Arc<Engine>);
+impl ScheduledRuntime {
+    fn new(engine: Arc<Engine>) -> Result<Self, String> {
+        if engine.heap_enabled() {
+            return Err("scheduled worker requires heap storage disabled: SnapshotCreator executions cannot be cancelled safely".into());
+        }
+        Ok(Self(engine))
+    }
+}
 impl crate::scheduled_worker::Runtime for ScheduledRuntime {
     fn submit(
         &self,
@@ -1921,12 +1929,43 @@ impl crate::scheduled_worker::Runtime for ScheduledRuntime {
     }
 }
 pub fn scheduled_router(runtime: Arc<Engine>) -> Result<Router, String> {
-    Ok(crate::scheduled_worker::from_environment()?.router(Arc::new(ScheduledRuntime(runtime))))
+    let runtime = ScheduledRuntime::new(runtime)?;
+    Ok(crate::scheduled_worker::from_environment()?.router(Arc::new(runtime)))
 }
 
 #[cfg(test)]
 mod scheduled_runtime_tests {
     use super::*;
+    fn scheduled_engine(dir: &std::path::Path) -> Arc<Engine> {
+        Engine::create(
+            crate::engine::ffi_config::EngineConfigBuilder::new()
+                .limits(
+                    crate::engine::ffi_config::ExecutionLimitsBuilder::new()
+                        .heap_memory_max_mb(64)
+                        .execution_timeout_secs(15)
+                        .build()
+                        .unwrap(),
+                )
+                .data_dir(dir.to_str().unwrap().to_string())
+                .build()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn heap_enabled_engine_is_rejected_before_scheduled_submission() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = session_view_tests::engine(dir.path());
+        assert!(engine.heap_enabled());
+        let error = match ScheduledRuntime::new(engine.clone()) {
+            Ok(_) => panic!("heap-enabled engine must not become a scheduled runtime"),
+            Err(error) => error,
+        };
+        assert!(error.contains("heap storage disabled"), "{error}");
+        engine.shutdown().await;
+    }
+
     #[tokio::test]
     async fn scheduled_cancellation_confirms_background_stop_including_startup_race() {
         use crate::scheduled_worker::Runtime;
@@ -1937,7 +1976,7 @@ mod scheduled_runtime_tests {
                     .heap_memory_max_mb(64).execution_timeout_secs(15).build().unwrap())
                 .data_dir(dir.path().to_str().unwrap().to_string())
                 .build().unwrap()).unwrap();
-            let runtime = ScheduledRuntime(engine.clone());
+            let runtime = ScheduledRuntime::new(engine.clone()).unwrap();
             let id = runtime.submit(crate::scheduled_protocol::Payload {
                 code: "while (true) { await new Promise(resolve => setTimeout(resolve, 10)); }".into(),
                 session: "scheduled-cancel-test".into(), heap_mb: 32,
@@ -1960,8 +1999,8 @@ mod scheduled_runtime_tests {
     async fn scheduled_launch_calls_real_engine() {
         use crate::scheduled_worker::Runtime;
         let dir = tempfile::tempdir().unwrap();
-        let engine = session_view_tests::engine(dir.path());
-        let runtime = ScheduledRuntime(engine.clone());
+        let engine = scheduled_engine(dir.path());
+        let runtime = ScheduledRuntime::new(engine.clone()).unwrap();
         let id = runtime
             .submit(crate::scheduled_protocol::Payload {
                 code: "1+1".into(),

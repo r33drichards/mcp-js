@@ -912,8 +912,8 @@ fn compile_source(
 //
 // Ops that need the server's multi-thread runtime don't run their I/O here: the
 // S3 client (heap + fs blobs) captures that runtime's Handle at construction and
-// bridges via `handle.spawn(...).await`, and cross-worker fs blobs are pre-staged
-// into the local cache by `build_fs_mount` before the isolate runs.
+// bridges via `handle.spawn(...).await`. That bridge also serves cold fs reads
+// and writes on demand; mounting does not prefetch unrelated file contents.
 fn isolate_runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1320,7 +1320,7 @@ pub fn execute_stateless(
             // Attach the session's overlay mount, if any, so fs ops operate on
             // the virtual filesystem (behind the same policy gate).
             if let Some(mount) = fs_mount.clone() {
-                runtime.op_state().borrow_mut().put(mount);
+                mount.attach(&mut runtime.op_state().borrow_mut())?;
             }
         }
 
@@ -1631,7 +1631,7 @@ pub fn execute_stateful(
             // Attach the session's overlay mount, if any, so fs ops operate on
             // the virtual filesystem (behind the same policy gate).
             if let Some(mount) = fs_mount.clone() {
-                runtime.op_state().borrow_mut().put(mount);
+                mount.attach(&mut runtime.op_state().borrow_mut())?;
             }
         }
 
@@ -2459,17 +2459,22 @@ impl Engine {
             }
         };
 
-        // Pre-stage the mounted tree's blobs into the node-local cache now, on
-        // this (main) runtime. The isolate runs on its own current-thread
-        // runtime and its fs ops cannot await the blob backend's remote I/O, so
-        // a lazy in-op fetch from S3 would deadlock; warming here makes those
-        // reads pure local-cache hits.
-        mount
-            .warm()
-            .await
-            .map_err(|e| format!("fs mount: warm {handle}: {e}"))?;
+        // Validate only the pinned root. File contents and descendant nodes
+        // are fetched on demand through the backend's runtime bridge, including
+        // cold S3 reads from an isolate. Walking the entire tree here makes
+        // every run scale with the accumulated dataset and can thrash a bounded
+        // cache before the script even starts.
+        if let Some(root) = mount.base_id() {
+            store
+                .get_node(root.as_bytes())
+                .await
+                .map_err(|e| format!("fs mount: root {handle}: {e}"))?;
+        }
 
-        Ok(Some(fs::FsMountHandle::new(mount)))
+        Ok(Some(fs::FsMountHandle::on_runtime(
+            mount,
+            tokio::runtime::Handle::current(),
+        )))
     }
 
     /// Resolve a `run_js` `file` parameter to source code, applying the
@@ -2708,6 +2713,13 @@ impl Engine {
             }
         };
 
+        // Retain the task tracker separately: finalization must not wait for
+        // the mount mutex, which a pending service operation may hold.
+        let fs_io = match &fs_mount {
+            Some(mount) => mount.io_tasks().await,
+            None => None,
+        };
+
         let max_bytes = heap_memory_max_mb
             .map(|mb| mb.max(MIN_HEAP_MEMORY_MB) * 1024 * 1024)
             .unwrap_or(
@@ -2828,6 +2840,13 @@ impl Engine {
                         Err("Execution timed out: script exceeded the time limit.".to_string())
                     }
                 };
+
+                // The isolate has stopped polling its ops. Abort and drain any
+                // service tasks before snapshotting or reporting any terminal
+                // outcome, including errors and cancellation.
+                if let Some(io) = &fs_io {
+                    io.finish().await;
+                }
 
                 // File whatever artifacts the script emitted before marking a
                 // terminal status, so a client that stops polling on the first
@@ -2957,6 +2976,13 @@ impl Engine {
                         Err("Execution timed out: script exceeded the time limit.".to_string())
                     }
                 };
+
+                // The isolate has stopped polling its ops. Abort and drain any
+                // service tasks before snapshotting or reporting any terminal
+                // outcome, including errors and cancellation.
+                if let Some(io) = &fs_io {
+                    io.finish().await;
+                }
 
                 // File whatever artifacts the script emitted before marking a
                 // terminal status, so a client that stops polling on the first
