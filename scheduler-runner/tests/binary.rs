@@ -54,6 +54,57 @@ async fn owner(runners: &mut [Runner], excluded: Option<usize>) -> usize {
     .await
     .expect("acquired leader")
 }
+// Only a definite ownership/leadership rejection is safe to reroute. Disable and
+// delete are idempotent; never retry create or an ambiguous transport failure.
+fn retryable_owner_error(response: &Value) -> bool {
+    matches!(
+        response.get("error").and_then(Value::as_str),
+        Some("no acquired leader; send command to current leader"
+            | "owner invalidated; reacquire"
+            | "leadership changed"
+            | "ownership compare failed")
+    )
+}
+
+async fn owner_mutation(runners: &mut [Runner], excluded: usize, action: &str, id: u64) {
+    // Bound leader rediscovery across elections; unknown errors are never retried.
+    for attempt in 0..3 {
+        let leader = owner(runners, Some(excluded)).await;
+        let response = runners[leader]
+            .request(json!({"action": action, "id": id}))
+            .await;
+        if response["ok"] == true {
+            return;
+        }
+        assert!(
+            retryable_owner_error(&response),
+            "{action} failed with non-ownership response on r{leader}: {response}"
+        );
+        assert!(attempt < 2, "{action} exhausted leadership retries: {response}");
+    }
+}
+
+#[test]
+fn owner_retries_only_explicit_leadership_errors() {
+    for error in [
+        "no acquired leader; send command to current leader",
+        "owner invalidated; reacquire",
+        "leadership changed",
+        "ownership compare failed",
+    ] {
+        assert!(retryable_owner_error(&json!({"error":error})), "{error}");
+    }
+    for response in [
+        json!({"error":"unknown schedule"}),
+        json!({"error":"quorum unavailable"}),
+        json!({"error":"commit uncertain"}),
+        json!({"error":"must establish old dispatcher cannot submit and in-flight work is resolved"}),
+        json!({"ok":true}),
+    ] {
+        assert!(!retryable_owner_error(&response), "{response}");
+    }
+}
+
 fn remote(url: &str) -> Value {
     json!({"url":url,"namespace":"binary-test","worker_id":"worker","bearer_env":"PATH","expires_at": Utc::now()+Delta::hours(1),"session":"test-operator","timeout_seconds":30,"heap_mb":32})
 }
@@ -158,43 +209,42 @@ async fn three_real_binaries_manage_dispatch_and_preserve_unknown_after_leader_d
         .unwrap();
     runners[killed].child.kill().await.unwrap();
     runners[killed].child.wait().await.unwrap();
-    let second = tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            for (i, runner) in runners.iter_mut().enumerate() {
-                if i == killed {
-                    continue;
-                }
-                let status = runner.request(json!({"action":"status"})).await;
-                if status["cluster"]["role"] != "Leader" || status["owner_acquired"] != true {
-                    continue;
-                }
-                let view = runner.request(json!({"action":"list"})).await;
-                if view["occurrences"].as_array().is_some_and(|occurrences| {
-                    occurrences
-                        .iter()
-                        .any(|o| o["id"] == occurrence_id && o["status"].get("Unknown").is_some())
-                }) {
-                    return i;
-                }
+            let leader = owner(&mut runners, Some(killed)).await;
+            let view = runners[leader].request(json!({"action":"list"})).await;
+            if view["occurrences"].as_array().is_some_and(|occurrences| {
+                occurrences
+                    .iter()
+                    .any(|o| o["id"] == occurrence_id && o["status"].get("Unknown").is_some())
+            }) {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
     .expect("takeover must recover the exact dispatched occurrence as Unknown");
-    assert_eq!(
-        runners[second]
-            .request(json!({"action":"disable","id":id}))
-            .await["ok"],
-        true
-    );
-    assert!(runners[second].request(json!({"action":"acknowledge_stopped","occurrence_id":1,"dispatcher_and_work_quiesced":false})).await.get("error").is_some());
-    assert_eq!(
-        runners[second]
-            .request(json!({"action":"delete","id":id}))
-            .await["ok"],
-        true
-    );
+    owner_mutation(&mut runners, killed, "disable", id).await;
+    // Validation occurs after owner lookup; route to an acquired leader and
+    // retry only a definite leadership rejection, never an arbitrary error.
+    for attempt in 0..3 {
+        let leader = owner(&mut runners, Some(killed)).await;
+        let ack = runners[leader]
+            .request(json!({"action":"acknowledge_stopped","occurrence_id":1,"dispatcher_and_work_quiesced":false}))
+            .await;
+        if retryable_owner_error(&ack) {
+            assert!(attempt < 2, "false acknowledgement exhausted leadership retries: {ack}");
+            continue;
+        }
+        assert_eq!(
+            ack["error"],
+            "must establish old dispatcher cannot submit and in-flight work is resolved",
+            "unexpected false acknowledgement response on r{leader}: {ack}"
+        );
+        break;
+    }
+    owner_mutation(&mut runners, killed, "delete", id).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(
         posts.load(Ordering::SeqCst),
