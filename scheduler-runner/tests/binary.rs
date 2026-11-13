@@ -59,10 +59,12 @@ async fn owner(runners: &mut [Runner], excluded: Option<usize>) -> usize {
 fn retryable_owner_error(response: &Value) -> bool {
     matches!(
         response.get("error").and_then(Value::as_str),
-        Some("no acquired leader; send command to current leader"
-            | "owner invalidated; reacquire"
-            | "leadership changed"
-            | "ownership compare failed")
+        Some(
+            "no acquired leader; send command to current leader"
+                | "owner invalidated; reacquire"
+                | "leadership changed"
+                | "ownership compare failed"
+        )
     )
 }
 
@@ -80,7 +82,10 @@ async fn owner_mutation(runners: &mut [Runner], excluded: usize, action: &str, i
             retryable_owner_error(&response),
             "{action} failed with non-ownership response on r{leader}: {response}"
         );
-        assert!(attempt < 2, "{action} exhausted leadership retries: {response}");
+        assert!(
+            attempt < 2,
+            "{action} exhausted leadership retries: {response}"
+        );
     }
 }
 
@@ -234,7 +239,10 @@ async fn three_real_binaries_manage_dispatch_and_preserve_unknown_after_leader_d
             .request(json!({"action":"acknowledge_stopped","occurrence_id":1,"dispatcher_and_work_quiesced":false}))
             .await;
         if retryable_owner_error(&ack) {
-            assert!(attempt < 2, "false acknowledgement exhausted leadership retries: {ack}");
+            assert!(
+                attempt < 2,
+                "false acknowledgement exhausted leadership retries: {ack}"
+            );
             continue;
         }
         assert_eq!(
