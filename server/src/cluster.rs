@@ -2007,6 +2007,24 @@ async fn route(
     Ok(response)
 }
 
+/// Serve one cluster HTTP connection over any Tokio-compatible transport.
+/// Production uses Tokio TCP; simulations can supply turmoil's TCP stream.
+pub async fn serve_cluster_connection<S>(
+    node: Arc<ClusterNode>,
+    stream: S,
+) -> Result<(), hyper::Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let service = hyper::service::service_fn(move |req| {
+        let node = node.clone();
+        async move { route(node, req).await }
+    });
+    hyper::server::conn::http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), service)
+        .await
+}
+
 pub async fn start_cluster_server(
     node: Arc<ClusterNode>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2031,15 +2049,8 @@ pub async fn start_cluster_server(
                 let (stream, _addr) = accept?;
                 let node = node.clone();
 
-                let service = hyper::service::service_fn(move |req| {
-                    let node = node.clone();
-                    async move { route(node, req).await }
-                });
-
                 tokio::spawn(async move {
-                    let conn = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), service);
-                    if let Err(err) = conn.await {
+                    if let Err(err) = serve_cluster_connection(node, stream).await {
                         tracing::warn!("Cluster HTTP connection error: {:?}", err);
                     }
                 });
