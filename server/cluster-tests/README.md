@@ -13,6 +13,21 @@ simulated TCP. It checks a healthy request, refusal during a network partition,
 and recovery after repair. Peer-to-peer Raft traffic still uses reqwest and is
 not simulated by this test.
 
+The `turmoil_fuzz` integration test explores 32 deterministic seeds by default,
+with 24 randomized network faults and HTTP requests per seed: partitions,
+one-way partitions, repairs, latency/loss, malformed RPCs, votes, and appends.
+It checks term and index bounds, keeps an already-committed receipt immutable,
+checks complete HTTP responses, and surfaces handler panics. A failed assertion
+prints its seed and step. Replay a single seed or expand the bounded search:
+
+```sh
+TURMOIL_FUZZ_SEED=123 cargo test --manifest-path server/cluster-tests/Cargo.toml --locked --test turmoil_fuzz
+TURMOIL_FUZZ_CASES=1000 cargo test --manifest-path server/cluster-tests/Cargo.toml --locked --test turmoil_fuzz
+```
+
+This is replayable, seeded fault-sequence fuzzing, not coverage-guided libFuzzer
+or full Raft network simulation: outbound peer RPCs still use reqwest.
+
 Before this patch both preserved reproducers failed: a proposal replaced by a
 new leader returned `Ok(true)`, and a rejected mismatched-prefix heartbeat
 truncated an already committed receipt. These are regression tests, not a formal
