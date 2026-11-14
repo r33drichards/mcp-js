@@ -1,7 +1,7 @@
 //! Three-node Raft simulations over turmoil TCP.
 #[path = "support/peer_sim.rs"]
 mod peer_sim;
-use peer_sim::{run_cluster, PORT};
+use peer_sim::{run_cluster, run_cluster_with_restart, PORT};
 use scheduler_raft_audit::cluster::PutRequest;
 use scheduler_raft_audit::cluster::Role;
 use std::time::Duration;
@@ -174,6 +174,56 @@ fn follower_forwards_client_write_over_simulated_tcp() {
                 if value.as_deref() == Some("via-follower") { break; }
                 assert!(tokio::time::Instant::now() < deadline,
                     "{name}: forwarded write must commit and replicate (last: {value:?})");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn node_restart_preserves_committed_data() {
+    run_cluster_with_restart(11, move |shared, restarts| async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let nodes = shared.borrow().clone();
+        assert_eq!(nodes.len(), 3, "missing simulation host");
+        // Baseline commit before the crash.
+        let mut statuses = Vec::new();
+        for name in ["n0", "n1", "n2"] { statuses.push((name, nodes[name].status().await)); }
+        let leader_name = statuses.iter().find(|(_, s)| s.role == Role::Leader)
+            .map(|(n, _)| *n).expect("exactly one leader");
+        nodes[leader_name].put("fuzz/crash-key".into(), "before-crash".into()).await
+            .expect("pre-crash put must commit");
+        let term_before = statuses.iter().find(|(n, _)| *n == leader_name)
+            .map(|(_, s)| s.term).expect("leader term");
+
+        // Crash the follower (any non-leader node). Drop our node handles
+        // first: they pin the old incarnation's sled file lock.
+        let victim = statuses.iter().find(|(_, s)| s.role == Role::Follower)
+            .map(|(n, _)| *n).expect("at least one follower");
+        drop(nodes);
+        drop(statuses);
+        restarts.borrow()[victim].send(()).expect("restart trigger");
+        // Give the host time to tear down and rebuild.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        // Fresh handle: the shared map now holds the restarted node.
+        let nodes2 = shared.borrow().clone();
+        let restarted = &nodes2[victim];
+        // The restarted node must have recovered its durable term.
+        assert!(restarted.status().await.term >= term_before,
+            "{victim}: restarted node lost durable term");
+
+        // The cluster still accepts writes and the restarted node converges.
+        nodes2[leader_name].put("fuzz/crash-key".into(), "after-crash".into()).await
+            .expect("post-crash put must commit");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        for name in ["n0", "n1", "n2"] {
+            loop {
+                let value = nodes2[name].get("fuzz/crash-key").await.expect("read");
+                if value.as_deref() == Some("after-crash") { break; }
+                assert!(tokio::time::Instant::now() < deadline,
+                    "{name}: post-restart write must converge (last: {value:?})");
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }

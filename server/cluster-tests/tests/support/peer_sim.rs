@@ -11,6 +11,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
+    sync::watch,
     task::JoinSet,
 };
 use turmoil::net::{TcpListener, TcpStream};
@@ -77,13 +78,42 @@ pub(crate) async fn exchange<Req: Serialize, Resp: DeserializeOwned>(
 }
 
 pub type Nodes = Rc<RefCell<HashMap<String, Arc<ClusterNode>>>>;
+/// Per-node restart triggers: sending makes the host process "crash" (tasks
+/// aborted, listener closed) and come back by reopening its durable sled path.
+pub type Restarts = Rc<RefCell<HashMap<String, watch::Sender<()>>>>;
 
 pub fn run_cluster<F, Fut>(seed: u64, test: F)
 where
-    F: FnOnce(Nodes) -> Fut,
+    F: FnOnce(Nodes) -> Fut + 'static,
+    Fut: Future<Output = turmoil::Result> + 'static,
+{
+    run_cluster_inner(seed, move |nodes, restarts| async move {
+        // Keep the restart senders alive for the whole simulation: a dropped
+        // watch sender makes every host's changed() fire spuriously.
+        let _keep_restarts_alive = restarts;
+        test(nodes).await
+    })
+}
+
+pub fn run_cluster_with_restart<F, Fut>(seed: u64, test: F)
+where
+    F: FnOnce(Nodes, Restarts) -> Fut,
+    Fut: Future<Output = turmoil::Result> + 'static,
+{
+    run_cluster_inner(seed, test)
+}
+
+fn run_cluster_inner<F, Fut>(seed: u64, test: F)
+where
+    F: FnOnce(Nodes, Restarts) -> Fut,
     Fut: Future<Output = turmoil::Result> + 'static,
 {
     let shared = Rc::new(RefCell::new(HashMap::<String, Arc<ClusterNode>>::new()));
+    let restarts = Rc::new(RefCell::new(HashMap::<String, watch::Sender<()>>::new()));
+    let run_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
     let mut sim = turmoil::Builder::new()
         .rng_seed(seed)
         .enable_random_order()
@@ -119,32 +149,75 @@ where
             learner: false,
         };
         let shared = shared.clone();
+        // Durable store: the same path is reopened after a crash, so committed
+        // state survives the restart like a real process restart would.
+        let db_path = std::env::temp_dir().join(format!("mcp-turmoil-{run_id}-{name}"));
+        let (tx, rx) = watch::channel(());
+        restarts.borrow_mut().insert(name.to_owned(), tx);
         sim.host(name, move || {
             let shared = shared.clone();
             let config = config.clone();
+            let db_path = db_path.clone();
+            let mut rx = rx.clone();
             async move {
-                let node = ClusterNode::new(config, sled::Config::new().temporary(true).open()?)
-                    .with_peer_rpc(Arc::new(SimRpc));
-                let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
-                shared.borrow_mut().insert(node.status().await.node_id.clone(), node.clone());
-                node.start_background_tasks().expect("start election and heartbeat loops");
-                let mut connections = JoinSet::new();
                 loop {
-                    tokio::select! {
-                        incoming = listener.accept() => {
-                            let (stream, _) = incoming?;
-                            let node = node.clone();
-                            connections.spawn(async move { serve_cluster_connection(node, stream).await });
+                    // After a crash the previous incarnation's tasks may still
+                    // hold the sled file lock for a few ticks; retry until the
+                    // teardown completes (bounded, so a stuck node fails loud).
+                    let db = {
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                        loop {
+                            match sled::Config::new().path(&db_path).open() {
+                                Ok(db) => break db,
+                                Err(e) if tokio::time::Instant::now() < deadline => {
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                    let _ = e;
+                                }
+                                Err(e) => return Err(e.into()),
+                            }
                         }
-                        done = connections.join_next(), if !connections.is_empty() => {
-                            if let Some(Err(panic)) = done { panic!("cluster handler panicked: {panic}"); }
+                    };
+                    let node =
+                        ClusterNode::new(config.clone(), db).with_peer_rpc(Arc::new(SimRpc));
+                    let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
+                    shared
+                        .borrow_mut()
+                        .insert(node.status().await.node_id.clone(), node.clone());
+                    node.start_background_tasks().expect("start election and heartbeat loops");
+                    let mut connections = JoinSet::new();
+                    loop {
+                        tokio::select! {
+                            incoming = listener.accept() => {
+                                let (stream, _) = incoming?;
+                                let node = node.clone();
+                                connections.spawn(async move {
+                                    serve_cluster_connection(node, stream).await
+                                });
+                            }
+                            done = connections.join_next(), if !connections.is_empty() => {
+                                if let Some(Err(panic)) = done {
+                                    panic!("cluster handler panicked: {panic}");
+                                }
+                            }
+                            _ = rx.changed() => {
+                                // Crash: stop everything this host is running.
+                                node.shutdown();
+                                connections.abort_all();
+                                drop(listener);
+                                // Drop the registry reference too, or it would
+                                // pin the old incarnation's sled file lock and
+                                // the restart could never reopen the store.
+                                shared.borrow_mut().remove(&name.to_owned());
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                                break;
+                            }
                         }
                     }
                 }
             }
         });
     }
-    sim.client("observer", test(shared));
+    sim.client("observer", test(shared, restarts));
     sim.run()
         .unwrap_or_else(|e| panic!("peer simulation seed={seed}: {e}"));
 }
