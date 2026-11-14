@@ -8,6 +8,11 @@ consensus regressions and the existing networked cluster/learner tests:
 cargo test --manifest-path server/cluster-tests/Cargo.toml --locked -- --test-threads=1
 ```
 
+The `turmoil_network` integration test drives the real cluster HTTP handler over
+simulated TCP. It checks a healthy request, refusal during a network partition,
+and recovery after repair. Peer-to-peer Raft traffic still uses reqwest and is
+not simulated by this test.
+
 Before this patch both preserved reproducers failed: a proposal replaced by a
 new leader returned `Ok(true)`, and a rejected mismatched-prefix heartbeat
 truncated an already committed receipt. These are regression tests, not a formal
