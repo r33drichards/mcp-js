@@ -12,6 +12,8 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
@@ -109,6 +111,114 @@ pub struct RequestVoteRequest {
 pub struct RequestVoteResponse {
     pub term: u64,
     pub vote_granted: bool,
+}
+
+/// Outbound Raft RPC transport. Production uses reqwest; simulations can
+/// provide a Tokio-compatible network without replacing the Raft handlers.
+pub type PeerRpcFuture<'a, T> = Pin<Box<dyn Future<Output = Option<T>> + Send + 'a>>;
+
+pub trait PeerRpc: Send + Sync {
+    fn request_vote<'a>(
+        &'a self,
+        peer: &'a str,
+        req: RequestVoteRequest,
+    ) -> PeerRpcFuture<'a, RequestVoteResponse>;
+
+    fn append_entries<'a>(
+        &'a self,
+        peer: &'a str,
+        req: AppendEntriesRequest,
+    ) -> PeerRpcFuture<'a, AppendEntriesResponse>;
+
+    /// Forward a client put to the leader over /data/put.
+    fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> PeerRpcFuture<'a, ForwardAck>;
+
+    /// Forward a client CAS to the leader over /data/cas.
+    fn forward_cas<'a>(&'a self, peer: &'a str, req: CasRequest)
+        -> PeerRpcFuture<'a, CasResponse>;
+
+    /// Forward a membership join to the leader over /raft/join.
+    fn forward_join<'a>(&'a self, peer: &'a str, req: JoinRequest)
+        -> PeerRpcFuture<'a, ForwardAck>;
+
+    /// Forward a membership leave to the leader over /raft/leave.
+    fn forward_leave<'a>(&'a self, peer: &'a str, req: LeaveRequest)
+        -> PeerRpcFuture<'a, ForwardAck>;
+}
+
+/// Acknowledgement body of forwarding endpoints that carry no payload
+/// ({"ok":true} deserializes into this; unknown fields are ignored).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForwardAck {}
+
+struct HttpPeerRpc {
+    client: reqwest::Client,
+}
+
+impl PeerRpc for HttpPeerRpc {
+    fn request_vote<'a>(
+        &'a self,
+        peer: &'a str,
+        req: RequestVoteRequest,
+    ) -> PeerRpcFuture<'a, RequestVoteResponse> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/raft/request-vote"))
+                .json(&req).send().await.ok()?
+                .json::<RequestVoteResponse>().await.ok()
+        })
+    }
+
+    fn append_entries<'a>(
+        &'a self,
+        peer: &'a str,
+        req: AppendEntriesRequest,
+    ) -> PeerRpcFuture<'a, AppendEntriesResponse> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/raft/append-entries"))
+                .json(&req).send().await.ok()?
+                .json::<AppendEntriesResponse>().await.ok()
+        })
+    }
+
+    fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/data/put"))
+                .json(&req).send().await.ok()?
+                .json::<ForwardAck>().await.ok()
+        })
+    }
+
+    fn forward_cas<'a>(
+        &'a self,
+        peer: &'a str,
+        req: CasRequest,
+    ) -> PeerRpcFuture<'a, CasResponse> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/data/cas"))
+                .json(&req).send().await.ok()?
+                .json::<CasResponse>().await.ok()
+        })
+    }
+
+    fn forward_join<'a>(&'a self, peer: &'a str, req: JoinRequest) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/raft/join"))
+                .json(&req).send().await.ok()?
+                .json::<ForwardAck>().await.ok()
+        })
+    }
+
+    fn forward_leave<'a>(
+        &'a self,
+        peer: &'a str,
+        req: LeaveRequest,
+    ) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/raft/leave"))
+                .json(&req).send().await.ok()?
+                .json::<ForwardAck>().await.ok()
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -320,6 +430,7 @@ pub struct ClusterNode {
     pub state: Arc<RwLock<RaftState>>,
     pub db: sled::Db,
     http_client: reqwest::Client,
+    peer_rpc: Arc<dyn PeerRpc>,
     heartbeat_notify: Arc<Notify>,
     commit_notify: Arc<Notify>,
     shutdown: CancellationToken,
@@ -456,6 +567,7 @@ impl ClusterNode {
             config,
             state: Arc::new(RwLock::new(raft_state)),
             db,
+            peer_rpc: Arc::new(HttpPeerRpc { client: http_client.clone() }),
             http_client,
             heartbeat_notify: Arc::new(Notify::new()),
             commit_notify: Arc::new(Notify::new()),
@@ -520,6 +632,13 @@ impl ClusterNode {
         Ok(node)
     }
 
+    /// Install a peer transport before sharing or starting the node.
+    /// The caller must preserve the cluster credential when using fixed voters.
+    pub fn with_peer_rpc(mut self: Arc<Self>, rpc: Arc<dyn PeerRpc>) -> Arc<Self> {
+        Arc::get_mut(&mut self).expect("install peer transport before sharing").peer_rpc = rpc;
+        self
+    }
+
     pub fn has_fixed_voters(&self) -> bool {
         self.fixed_voters.is_some()
     }
@@ -530,6 +649,7 @@ impl ClusterNode {
         let mut node = Self::new_fixed(config, db)?;
         let exclusive = Arc::get_mut(&mut node).expect("unshared new node");
         exclusive.rpc_bearer = Some(token);
+        exclusive.peer_rpc = Arc::new(HttpPeerRpc { client: client.clone() });
         exclusive.http_client = client;
         Ok(node)
     }
@@ -578,19 +698,25 @@ impl ClusterNode {
         self.await_commit(&entry).await
     }
 
-    /// Start background tasks (election timer, heartbeat sender) and the
-    /// cluster HTTP server.
-    pub async fn start(self: &Arc<Self>) {
+    /// Start Raft loops without binding an OS listener. Used by simulations
+    /// that serve the same HTTP handler over a different Tokio transport.
+    pub fn start_background_tasks(self: &Arc<Self>) -> Result<(), String> {
         if self.has_fixed_voters() && self.rpc_bearer.is_none() {
-            tracing::error!("fixed-voter networking requires a cluster credential");
-            return;
+            return Err("fixed-voter networking requires a cluster credential".into());
         }
         let node = self.clone();
         tokio::spawn(async move { node.run_election_timer().await });
-
         let node = self.clone();
         tokio::spawn(async move { node.run_heartbeat().await });
+        Ok(())
+    }
 
+    /// Start background tasks and the production cluster HTTP server.
+    pub async fn start(self: &Arc<Self>) {
+        if let Err(e) = self.start_background_tasks() {
+            tracing::error!("{e}");
+            return;
+        }
         let node = self.clone();
         tokio::spawn(async move {
             if let Err(e) = start_cluster_server(node).await {
@@ -820,12 +946,8 @@ impl ClusterNode {
                 last_log_index,
                 last_log_term,
             };
-            let client = self.http_client.clone();
-            let url = format!("http://{}/raft/request-vote", peer);
-            requests.push(async move {
-                client.post(&url).json(&req).send().await.ok()?
-                    .json::<RequestVoteResponse>().await.ok()
-            });
+            let rpc = self.peer_rpc.clone();
+            requests.push(async move { rpc.request_vote(peer, req).await });
         }
 
         while votes < majority {
@@ -1015,26 +1137,16 @@ impl ClusterNode {
             learner_addrs: Some(current_learners),
         };
 
-        let url = format!("http://{}/raft/append-entries", peer);
-        let resp = self.http_client.post(&url).json(&req).send().await;
-
-        match resp {
-            Ok(r) => {
-                if let Ok(ae_resp) = r.json::<AppendEntriesResponse>().await {
-                    self.accept_append_response(
-                        peer,
-                        term,
-                        prev_log_index,
-                        entries.last().map_or(prev_log_index, |e| e.index),
-                        ae_resp,
-                    )
-                    .await;
-                }
-            }
-            Err(_) => {
-                // Peer unreachable, will retry on next heartbeat
-            }
+        if let Some(ae_resp) = self.peer_rpc.append_entries(peer, req).await {
+            self.accept_append_response(
+                peer,
+                term,
+                prev_log_index,
+                entries.last().map_or(prev_log_index, |e| e.index),
+                ae_resp,
+            ).await;
         }
+        // An unreachable peer is retried on the next heartbeat.
     }
 
     async fn accept_append_response(
@@ -1416,20 +1528,10 @@ impl ClusterNode {
             Some(id) => {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
-                let url = format!("http://{}/data/put", leader_addr);
                 let req = PutRequest { key, value, extra };
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_put(&leader_addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward to leader".to_string()),
                 }
             }
             None => Err("no leader elected yet".to_string()),
@@ -1569,29 +1671,15 @@ impl ClusterNode {
             Some(id) => {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
-                let url = format!("http://{}/data/cas", leader_addr);
                 let req = CasRequest {
                     key,
                     expected,
                     new,
                     extra,
                 };
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward cas to leader: {}", e))?;
-                if resp.status().is_success() {
-                    let body: CasResponse = resp
-                        .json()
-                        .await
-                        .map_err(|e| format!("invalid cas response: {}", e))?;
-                    Ok(body.applied)
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_cas(&leader_addr, req).await {
+                    Some(resp) => Ok(resp.applied),
+                    None => Err("failed to forward cas to leader".to_string()),
                 }
             }
             None => Err("no leader elected yet".to_string()),
@@ -1734,19 +1822,9 @@ impl ClusterNode {
 
         match (leader_id, leader_addr) {
             (Some(_), Some(addr)) => {
-                let url = format!("http://{}/raft/join", addr);
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward join to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_join(&addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward join to leader".to_string()),
                 }
             }
             _ => Err("no leader elected yet".to_string()),
@@ -1777,19 +1855,9 @@ impl ClusterNode {
 
         match (leader_id, leader_addr) {
             (Some(_), Some(addr)) => {
-                let url = format!("http://{}/raft/leave", addr);
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward leave to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_leave(&addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward leave to leader".to_string()),
                 }
             }
             _ => Err("no leader elected yet".to_string()),
@@ -2007,6 +2075,24 @@ async fn route(
     Ok(response)
 }
 
+/// Serve one cluster HTTP connection over any Tokio-compatible transport.
+/// Production uses Tokio TCP; simulations can supply turmoil's TCP stream.
+pub async fn serve_cluster_connection<S>(
+    node: Arc<ClusterNode>,
+    stream: S,
+) -> Result<(), hyper::Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let service = hyper::service::service_fn(move |req| {
+        let node = node.clone();
+        async move { route(node, req).await }
+    });
+    hyper::server::conn::http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), service)
+        .await
+}
+
 pub async fn start_cluster_server(
     node: Arc<ClusterNode>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2031,15 +2117,8 @@ pub async fn start_cluster_server(
                 let (stream, _addr) = accept?;
                 let node = node.clone();
 
-                let service = hyper::service::service_fn(move |req| {
-                    let node = node.clone();
-                    async move { route(node, req).await }
-                });
-
                 tokio::spawn(async move {
-                    let conn = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), service);
-                    if let Err(err) = conn.await {
+                    if let Err(err) = serve_cluster_connection(node, stream).await {
                         tracing::warn!("Cluster HTTP connection error: {:?}", err);
                     }
                 });
