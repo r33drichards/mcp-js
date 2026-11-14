@@ -3,7 +3,7 @@
 import argparse, hashlib, json, pathlib, re, subprocess, tempfile
 ROOT = pathlib.Path(__file__).resolve().parent
 # Official v1.8.0 release asset, verified against GitHub's published SHA-256 digest.
-SHA = 'd15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f'
+SHA = 'e1f11b75c4b5bc4478ba0ac5cb6ae28e40a01b0016bc33e0aa97da22dfdbcd7f'
 p = argparse.ArgumentParser(); p.add_argument('--jar', required=True); p.add_argument('--out', default=str(ROOT/'generated')); p.add_argument('--deep', action='store_true'); args=p.parse_args()
 jar=pathlib.Path(args.jar).resolve(); assert hashlib.sha256(jar.read_bytes()).hexdigest()==SHA, 'Unexpected TLC binary: pin/check the tool before changing this checksum'
 out=pathlib.Path(args.out).resolve(); out.mkdir(parents=True,exist_ok=True)
