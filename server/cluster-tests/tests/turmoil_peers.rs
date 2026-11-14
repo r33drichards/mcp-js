@@ -1,7 +1,8 @@
 //! Three-node Raft simulations over turmoil TCP.
 #[path = "support/peer_sim.rs"]
 mod peer_sim;
-use peer_sim::run_cluster;
+use peer_sim::{run_cluster, PORT};
+use scheduler_raft_audit::cluster::PutRequest;
 use scheduler_raft_audit::cluster::Role;
 use std::time::Duration;
 
@@ -145,4 +146,37 @@ fn fuzz_input_drives_full_peer_network() {
     ] {
         peer_sim::run_fault_case(input);
     }
+}
+
+#[test]
+fn follower_forwards_client_write_over_simulated_tcp() {
+    run_cluster(9, move |shared| async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let nodes = shared.borrow().clone();
+        assert_eq!(nodes.len(), 3, "missing simulation host");
+        // Pick an actual follower: leadership ordering is scheduler-seeded.
+        let mut statuses = Vec::new();
+        for name in ["n0", "n1", "n2"] { statuses.push((name, nodes[name].status().await)); }
+        let pick = statuses.iter().find(|(_, s)| s.role == Role::Follower)
+            .map(|(n, _)| *n)
+            .expect("at least one follower must exist");
+        // A client write aimed at a follower must be forwarded to the leader
+        // over simulated TCP and commit everywhere.
+        let req = PutRequest { key: "fuzz/forwarded".into(), value: "via-follower".into(), extra: Vec::new() };
+        let addr = format!("{pick}:{PORT}");
+        let ack: Option<serde_json::Value> = peer_sim::exchange(&addr, "/data/put", &req).await;
+        ack.expect("follower must forward the write over simulated TCP");
+        // Followers apply the commit index on a subsequent heartbeat, so poll.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        for name in ["n0", "n1", "n2"] {
+            loop {
+                let value = nodes[name].get("fuzz/forwarded").await.expect("read");
+                if value.as_deref() == Some("via-follower") { break; }
+                assert!(tokio::time::Instant::now() < deadline,
+                    "{name}: forwarded write must commit and replicate (last: {value:?})");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        Ok(())
+    });
 }

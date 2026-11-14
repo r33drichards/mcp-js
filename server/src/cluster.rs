@@ -129,7 +129,27 @@ pub trait PeerRpc: Send + Sync {
         peer: &'a str,
         req: AppendEntriesRequest,
     ) -> PeerRpcFuture<'a, AppendEntriesResponse>;
+
+    /// Forward a client put to the leader over /data/put.
+    fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> PeerRpcFuture<'a, ForwardAck>;
+
+    /// Forward a client CAS to the leader over /data/cas.
+    fn forward_cas<'a>(&'a self, peer: &'a str, req: CasRequest)
+        -> PeerRpcFuture<'a, CasResponse>;
+
+    /// Forward a membership join to the leader over /raft/join.
+    fn forward_join<'a>(&'a self, peer: &'a str, req: JoinRequest)
+        -> PeerRpcFuture<'a, ForwardAck>;
+
+    /// Forward a membership leave to the leader over /raft/leave.
+    fn forward_leave<'a>(&'a self, peer: &'a str, req: LeaveRequest)
+        -> PeerRpcFuture<'a, ForwardAck>;
 }
+
+/// Acknowledgement body of forwarding endpoints that carry no payload
+/// ({"ok":true} deserializes into this; unknown fields are ignored).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForwardAck {}
 
 struct HttpPeerRpc {
     client: reqwest::Client,
@@ -157,6 +177,46 @@ impl PeerRpc for HttpPeerRpc {
             self.client.post(format!("http://{peer}/raft/append-entries"))
                 .json(&req).send().await.ok()?
                 .json::<AppendEntriesResponse>().await.ok()
+        })
+    }
+
+    fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/data/put"))
+                .json(&req).send().await.ok()?
+                .json::<ForwardAck>().await.ok()
+        })
+    }
+
+    fn forward_cas<'a>(
+        &'a self,
+        peer: &'a str,
+        req: CasRequest,
+    ) -> PeerRpcFuture<'a, CasResponse> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/data/cas"))
+                .json(&req).send().await.ok()?
+                .json::<CasResponse>().await.ok()
+        })
+    }
+
+    fn forward_join<'a>(&'a self, peer: &'a str, req: JoinRequest) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/raft/join"))
+                .json(&req).send().await.ok()?
+                .json::<ForwardAck>().await.ok()
+        })
+    }
+
+    fn forward_leave<'a>(
+        &'a self,
+        peer: &'a str,
+        req: LeaveRequest,
+    ) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.client.post(format!("http://{peer}/raft/leave"))
+                .json(&req).send().await.ok()?
+                .json::<ForwardAck>().await.ok()
         })
     }
 }
@@ -1468,20 +1528,10 @@ impl ClusterNode {
             Some(id) => {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
-                let url = format!("http://{}/data/put", leader_addr);
                 let req = PutRequest { key, value, extra };
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_put(&leader_addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward to leader".to_string()),
                 }
             }
             None => Err("no leader elected yet".to_string()),
@@ -1621,29 +1671,15 @@ impl ClusterNode {
             Some(id) => {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
-                let url = format!("http://{}/data/cas", leader_addr);
                 let req = CasRequest {
                     key,
                     expected,
                     new,
                     extra,
                 };
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward cas to leader: {}", e))?;
-                if resp.status().is_success() {
-                    let body: CasResponse = resp
-                        .json()
-                        .await
-                        .map_err(|e| format!("invalid cas response: {}", e))?;
-                    Ok(body.applied)
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_cas(&leader_addr, req).await {
+                    Some(resp) => Ok(resp.applied),
+                    None => Err("failed to forward cas to leader".to_string()),
                 }
             }
             None => Err("no leader elected yet".to_string()),
@@ -1786,19 +1822,9 @@ impl ClusterNode {
 
         match (leader_id, leader_addr) {
             (Some(_), Some(addr)) => {
-                let url = format!("http://{}/raft/join", addr);
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward join to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_join(&addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward join to leader".to_string()),
                 }
             }
             _ => Err("no leader elected yet".to_string()),
@@ -1829,19 +1855,9 @@ impl ClusterNode {
 
         match (leader_id, leader_addr) {
             (Some(_), Some(addr)) => {
-                let url = format!("http://{}/raft/leave", addr);
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward leave to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_leave(&addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward leave to leader".to_string()),
                 }
             }
             _ => Err("no leader elected yet".to_string()),
