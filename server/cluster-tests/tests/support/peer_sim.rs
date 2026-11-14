@@ -1,6 +1,7 @@
 //! Real three-node elections over turmoil TCP, not reqwest's OS sockets.
 use scheduler_raft_audit::cluster::{
-    AppendEntriesRequest, AppendEntriesResponse, ClusterConfig, ClusterNode, PeerRpc,
+    AppendEntriesRequest, AppendEntriesResponse, CasRequest, CasResponse, ClusterConfig,
+    ClusterNode, ForwardAck, JoinRequest, LeaveRequest, PeerRpc, PutRequest,
     RequestVoteRequest, RequestVoteResponse, Role, serve_cluster_connection,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -14,7 +15,7 @@ use tokio::{
 };
 use turmoil::net::{TcpListener, TcpStream};
 
-const PORT: u16 = 4000;
+pub(crate) const PORT: u16 = 4000;
 type RpcFuture<'a, T> = Pin<Box<dyn Future<Output = Option<T>> + Send + 'a>>;
 
 struct SimRpc;
@@ -33,9 +34,21 @@ impl PeerRpc for SimRpc {
     ) -> RpcFuture<'a, AppendEntriesResponse> {
         Box::pin(async move { exchange(peer, "/raft/append-entries", &req).await })
     }
+    fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> RpcFuture<'a, ForwardAck> {
+        Box::pin(async move { exchange(peer, "/data/put", &req).await })
+    }
+    fn forward_cas<'a>(&'a self, peer: &'a str, req: CasRequest) -> RpcFuture<'a, CasResponse> {
+        Box::pin(async move { exchange(peer, "/data/cas", &req).await })
+    }
+    fn forward_join<'a>(&'a self, peer: &'a str, req: JoinRequest) -> RpcFuture<'a, ForwardAck> {
+        Box::pin(async move { exchange(peer, "/raft/join", &req).await })
+    }
+    fn forward_leave<'a>(&'a self, peer: &'a str, req: LeaveRequest) -> RpcFuture<'a, ForwardAck> {
+        Box::pin(async move { exchange(peer, "/raft/leave", &req).await })
+    }
 }
 
-async fn exchange<Req: Serialize, Resp: DeserializeOwned>(
+pub(crate) async fn exchange<Req: Serialize, Resp: DeserializeOwned>(
     peer: &str,
     path: &str,
     req: &Req,
