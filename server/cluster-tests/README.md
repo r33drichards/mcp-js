@@ -10,8 +10,16 @@ cargo test --manifest-path server/cluster-tests/Cargo.toml --locked -- --test-th
 
 The `turmoil_network` integration test drives the real cluster HTTP handler over
 simulated TCP. It checks a healthy request, refusal during a network partition,
-and recovery after repair. Peer-to-peer Raft traffic still uses reqwest and is
-not simulated by this test.
+and recovery after repair.
+
+The `turmoil_peers` integration test runs a full three-node Raft network inside
+turmoil: outbound vote and append RPCs traverse `turmoil::net::TcpStream`
+through the injectable `PeerRpc` transport, while the production path still uses
+`HttpPeerRpc`/reqwest. It checks election over simulated peer connections,
+commit replication, leader isolation with a majority re-election, and
+convergence after links are repaired. Remaining seam: follower forwarding of
+put/CAS/join/leave still uses the reqwest-shaped production path; only votes
+and appends are simulated.
 
 The `turmoil_fuzz` integration test explores 32 deterministic seeds by default,
 with 24 randomized network faults and HTTP requests per seed: partitions,
@@ -25,8 +33,28 @@ TURMOIL_FUZZ_SEED=123 cargo test --manifest-path server/cluster-tests/Cargo.toml
 TURMOIL_FUZZ_CASES=1000 cargo test --manifest-path server/cluster-tests/Cargo.toml --locked --test turmoil_fuzz
 ```
 
-This is replayable, seeded fault-sequence fuzzing, not coverage-guided libFuzzer
-or full Raft network simulation: outbound peer RPCs still use reqwest.
+This is replayable, seeded fault-sequence fuzzing, not coverage-guided libFuzzer.
+
+Coverage-guided fuzzing lives in `cluster-tests/fuzz/`. The `peer_network`
+libFuzzer target runs the same three-node simulated Raft network as
+`turmoil_peers` (real peer RPCs over turmoil TCP): the first eight input bytes
+seed the scheduler and the rest select partitions, one-way partitions, repairs
+and client proposals, capped at twelve actions. After every action it asserts
+term monotonicity, index bounds, one-leader-per-term, and immutability of an
+already-committed prefix; after repairing all links it requires a majority to
+commit and every node to converge. A crashing input is saved as a libFuzzer
+artifact and replayed with:
+
+    cd server/cluster-tests
+    cargo +nightly fuzz run peer_network fuzz/artifacts/peer_network/<artifact> -- -runs=1
+
+A bounded CI-style session:
+
+    cd server/cluster-tests
+    cargo +nightly fuzz run peer_network -- -max_total_time=120 -max_len=32 -timeout=25
+
+Coverage-guided fuzzing requires a nightly toolchain with LLVM sanitizer
+support; see https://rust-fuzz.github.io/book/cargo-fuzz/setup.html.
 
 Before this patch both preserved reproducers failed: a proposal replaced by a
 new leader returned `Ok(true)`, and a rejected mismatched-prefix heartbeat
