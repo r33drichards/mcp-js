@@ -6,7 +6,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use server::cluster::{
     AppendEntriesRequest, AppendEntriesResponse, CasRequest, CasResponse, ClusterConfig,
     ClusterNode, ForwardAck, JoinRequest, LeaveRequest, PeerRpc, PeerRpcFuture, PutRequest,
@@ -20,8 +20,11 @@ use server::engine::fs_labels::LabelStore;
 use server::engine::fs_store::FsStore;
 use server::engine::opa::{EvalMode, PolicyChain};
 use server::engine::parse_ca_hex;
-use std::{cell::RefCell, collections::HashMap, future::Future, pin::Pin, rc::Rc, sync::Arc, time::Duration};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, task::JoinSet};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    task::JoinSet,
+};
 use turmoil::net::{TcpListener, TcpStream};
 
 const PORT: u16 = 4200;
@@ -29,10 +32,18 @@ type RpcFuture<'a, T> = PeerRpcFuture<'a, T>;
 
 struct SimRpc;
 impl PeerRpc for SimRpc {
-    fn request_vote<'a>(&'a self, peer: &'a str, req: RequestVoteRequest) -> RpcFuture<'a, RequestVoteResponse> {
+    fn request_vote<'a>(
+        &'a self,
+        peer: &'a str,
+        req: RequestVoteRequest,
+    ) -> RpcFuture<'a, RequestVoteResponse> {
         Box::pin(async move { exchange(peer, "/raft/request-vote", &req).await })
     }
-    fn append_entries<'a>(&'a self, peer: &'a str, req: AppendEntriesRequest) -> RpcFuture<'a, AppendEntriesResponse> {
+    fn append_entries<'a>(
+        &'a self,
+        peer: &'a str,
+        req: AppendEntriesRequest,
+    ) -> RpcFuture<'a, AppendEntriesResponse> {
         Box::pin(async move { exchange(peer, "/raft/append-entries", &req).await })
     }
     fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> RpcFuture<'a, ForwardAck> {
@@ -49,7 +60,11 @@ impl PeerRpc for SimRpc {
     }
 }
 
-async fn exchange<Req: Serialize, Resp: DeserializeOwned>(peer: &str, path: &str, req: &Req) -> Option<Resp> {
+async fn exchange<Req: Serialize, Resp: DeserializeOwned>(
+    peer: &str,
+    path: &str,
+    req: &Req,
+) -> Option<Resp> {
     tokio::time::timeout(Duration::from_millis(150), async {
         let (name, port) = peer.rsplit_once(':')?;
         let port: u16 = port.parse().ok()?;
@@ -99,7 +114,10 @@ fn temp_sled(tag: &str) -> sled::Db {
     let dir = std::env::temp_dir().join(format!(
         "mcp-fuzz-js-sled-{tag}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     sled::Config::new().path(dir).open().expect("sled")
 }
@@ -128,7 +146,7 @@ async fn run_js_to_fs(engine: &Engine, code: &str) -> Option<String> {
 fn safe_payload(bytes: &[u8]) -> String {
     bytes
         .iter()
-        .filter(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_' || *b == b'.')
+        .filter(|b| b.is_ascii_alphanumeric() || **b == b'-' || **b == b'_' || **b == b'.')
         .map(|b| *b as char)
         .collect()
 }
@@ -139,35 +157,53 @@ fn js_write_file(n: usize, payload: &str) -> String {
 
 /// A partitioned push must fail and must not move the head; a repaired push
 /// commits and every node converges on it.
-async fn push_and_check(store: &LabelStore, expect_success: bool, ca_id: CaId, label: &str) {
+async fn push_and_check(
+    store: &LabelStore,
+    expect_success: bool,
+    ca_id: CaId,
+    label: &str,
+) -> bool {
     let cas = store.cas(label, None, ca_id, None).await;
+    let applied = matches!(&cas, Ok(true));
     if expect_success {
-        assert!(matches!(&cas, Ok(true)), "{label}: push must succeed (got {cas:?})");
+        assert!(applied, "{label}: push must succeed (got {cas:?})");
     } else {
-        assert!(cas.is_err(), "{label}: partitioned push must fail (got {cas:?})");
+        assert!(
+            cas.is_err(),
+            "{label}: partitioned push must fail (got {cas:?})"
+        );
         assert!(
             store.resolve(label).await.ok().flatten().is_none(),
             "{label}: partitioned push must not move the head"
         );
     }
+    applied
 }
 
-async fn converge_all(nodes: &Nodes, head: CaId) {
+async fn converge_all(nodes: &HashMap<String, Arc<ClusterNode>>, head: CaId) {
     for name in ["n0", "n1", "n2"] {
-        let s = Arc::new(LabelStore::in_memory().with_cluster(nodes.borrow()[name].clone()));
+        let s = Arc::new(LabelStore::in_memory().with_cluster(nodes[name].clone()));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if s.resolve("main").await.ok().flatten() == Some(head) { break; }
-            assert!(tokio::time::Instant::now() < deadline, "{name}: head never converged");
+            if s.resolve("main").await.ok().flatten() == Some(head) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{name}: head never converged"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 9 { return; }
+    if data.len() < 9 {
+        return;
+    }
     let seed = u64::from_le_bytes(data[..8].try_into().unwrap());
     let actions: Vec<u8> = data[8..].iter().copied().take(12).collect();
+    let data_owned: Vec<u8> = data.to_vec();
 
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
@@ -194,7 +230,11 @@ fuzz_target!(|data: &[u8]| {
             .filter(|p| *p != name)
             .map(|p| (p.to_owned(), format!("{p}:{PORT}")))
             .collect();
-        let timeout = match i { 0 => 70, 1 => 180, _ => 300 };
+        let timeout = match i {
+            0 => 70,
+            1 => 180,
+            _ => 300,
+        };
         let config = ClusterConfig {
             node_id: name.to_owned(),
             peers,
@@ -211,7 +251,8 @@ fuzz_target!(|data: &[u8]| {
             let shared = shared.clone();
             let config = config.clone();
             async move {
-                let node = ClusterNode::new(config, temp_sled(name)).with_peer_rpc(Arc::new(SimRpc));
+                let node =
+                    ClusterNode::new(config, temp_sled(name)).with_peer_rpc(Arc::new(SimRpc));
                 let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
                 shared.borrow_mut().insert(name.to_owned(), node.clone());
                 node.start_background_tasks().expect("start loops");
@@ -237,14 +278,23 @@ fuzz_target!(|data: &[u8]| {
         tokio::time::sleep(Duration::from_millis(600)).await;
         let nodes = shared.borrow().clone();
         let mut statuses = Vec::new();
-        for name in ["n0", "n1", "n2"] { statuses.push((name, nodes[name].status().await)); }
-        let leader = statuses.iter().find(|(_, s)| s.role == Role::Leader)
-            .map(|(n, _)| *n).expect("leader elected");
-        let follower = statuses.iter().find(|(_, s)| s.role == Role::Follower)
-            .map(|(n, _)| *n).expect("follower exists");
+        for name in ["n0", "n1", "n2"] {
+            statuses.push((name, nodes[name].status().await));
+        }
+        let leader = statuses
+            .iter()
+            .find(|(_, s)| s.role == Role::Leader)
+            .map(|(n, _)| *n)
+            .expect("leader elected");
+        let follower = statuses
+            .iter()
+            .find(|(_, s)| s.role == Role::Follower)
+            .map(|(n, _)| *n)
+            .expect("follower exists");
 
         let leader_engine = engine_with_cluster(nodes[leader].clone(), "leader");
-        let follower_store = Arc::new(LabelStore::in_memory().with_cluster(nodes[follower].clone()));
+        let follower_store =
+            Arc::new(LabelStore::in_memory().with_cluster(nodes[follower].clone()));
 
         // The observer host hosts the client code: turmoil attributes sockets
         // to the opening host, so partitioning the observer from the leader is
@@ -258,15 +308,22 @@ fuzz_target!(|data: &[u8]| {
             match opcode {
                 // Run generated JS and push the resulting head from the follower.
                 0 => {
-                    let payload = safe_payload(&data[8 + i * 3..(8 + i * 3 + 3).min(data.len())]);
+                    let payload =
+                        safe_payload(&data_owned[8 + i * 3..(8 + i * 3 + 3).min(data_owned.len())]);
                     let code = js_write_file(runs, &payload);
                     runs += 1;
                     let Some(ca_hex) = run_js_to_fs(&leader_engine, &code).await else {
                         continue;
                     };
                     let ca_id: CaId = parse_ca_hex(&ca_hex).expect("valid ca hex");
-                    push_and_check(&follower_store, !partitioned.contains("leader"), ca_id, "push").await;
-                    if cas_ok(&follower_store, ca_id).await {
+                    let applied = push_and_check(
+                        &follower_store,
+                        !partitioned.contains("leader"),
+                        ca_id,
+                        "push",
+                    )
+                    .await;
+                    if applied {
                         committed = Some(ca_id);
                     }
                 }
@@ -275,13 +332,17 @@ fuzz_target!(|data: &[u8]| {
                     let (a, b) = pair(pick, leader, follower);
                     turmoil::partition(a, b);
                     partitioned.insert(a.to_string());
-                    if b == leader { partitioned.insert("leader".to_string()); }
+                    if b == leader {
+                        partitioned.insert("leader".to_string());
+                    }
                 }
                 // Repair a pair chosen from the input.
                 2 => {
                     let (a, b) = pair(pick, leader, follower);
                     turmoil::repair(a, b);
-                    if b == leader { partitioned.clear(); }
+                    if b == leader {
+                        partitioned.clear();
+                    }
                 }
                 // Invariant: the committed head is visible on every node.
                 3 => {
@@ -292,7 +353,9 @@ fuzz_target!(|data: &[u8]| {
                 // Run raw arbitrary JS; failures are tolerated, only panics
                 // inside the engine count as crashes.
                 _ => {
-                    let code = String::from_utf8_lossy(&data[8 + i * 2..(8 + i * 2 + 24).min(data.len())]);
+                    let code = String::from_utf8_lossy(
+                        &data_owned[8 + i * 2..(8 + i * 2 + 24).min(data_owned.len())],
+                    );
                     let _ = run_js_to_fs(&leader_engine, &code).await;
                 }
             }
@@ -301,7 +364,9 @@ fuzz_target!(|data: &[u8]| {
         // Final repair and convergence on the last committed head.
         for a in ["n0", "n1", "n2"] {
             for b in ["n0", "n1", "n2"] {
-                if a != b { turmoil::repair(a, b); }
+                if a != b {
+                    turmoil::repair(a, b);
+                }
             }
         }
         partitioned.clear();
@@ -309,7 +374,7 @@ fuzz_target!(|data: &[u8]| {
             converge_all(&nodes, head).await;
         } else {
             // No successful push happened; a final push must succeed.
-            let payload = safe_payload(&data[data.len().saturating_sub(4)..]);
+            let payload = safe_payload(&data_owned[data_owned.len().saturating_sub(4)..]);
             let code = js_write_file(runs + 1000, &payload);
             if let Some(ca_hex) = run_js_to_fs(&leader_engine, &code).await {
                 let ca_id: CaId = parse_ca_hex(&ca_hex).expect("valid ca hex");
@@ -321,12 +386,6 @@ fuzz_target!(|data: &[u8]| {
     });
     sim.run().expect("turmoil simulation");
 });
-
-fn cas_ok(store: &LabelStore, _ca: CaId) -> bool {
-    // push_and_check already guarantees the applied state; kept as a hook for
-    // future stronger assertions.
-    true
-}
 
 fn pair<'a>(pick: u8, leader: &'a str, follower: &'a str) -> (&'a str, &'a str) {
     match pick % 6 {
