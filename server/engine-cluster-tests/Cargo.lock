@@ -4766,7 +4766,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "turmoil",
  "uniffi",
  "uniffi-builder-derive",
  "url",
