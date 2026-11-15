@@ -1,0 +1,361 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -93,7 +93,13 @@
+ [dev-dependencies.zerocopy]
+ version = "0.3.0"
+ 
++[dependencies.turmoil]
++version = "=0.7.2"
++features = ["unstable-fs"]
++optional = true
++
+ [features]
++turmoil-fs = ["dep:turmoil"]
+ compression = ["zstd"]
+ default = ["no_metrics"]
+ docs = []
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -1,7 +1,5 @@
+ use std::{
+     collections::HashMap,
+-    fs,
+-    fs::File,
+     io,
+     io::{BufRead, BufReader, ErrorKind, Read, Seek, Write},
+     ops::Deref,
+@@ -11,6 +9,7 @@
+ 
+ use crate::pagecache::{arr_to_u32, u32_to_arr, Lsn};
+ use crate::*;
++use crate::fs::{self, File};
+ 
+ const DEFAULT_PATH: &str = "default.sled";
+ 
+@@ -520,6 +519,12 @@
+ 
+     // panics if config options are outside of advised range
+     fn validate(&self) -> Result<()> {
++        #[cfg(feature = "turmoil-fs")]
++        {
++            supported!(self.flush_every_ms.is_none(), "turmoil-fs requires flush_every_ms(None)");
++            supported!(!self.temporary, "turmoil-fs requires an explicit persistent path");
++            supported!(self.path.is_absolute(), "turmoil-fs requires an absolute path");
++        }
+         supported!(
+             self.segment_size.count_ones() == 1,
+             "segment_size should be a power of 2"
+@@ -556,7 +561,7 @@
+     fn open_file(&self) -> Result<File> {
+         let blob_dir: PathBuf = self.get_path().join("blobs");
+ 
+-        if !blob_dir.exists() {
++        if !fs::exists(&blob_dir) {
+             fs::create_dir_all(blob_dir)?;
+         }
+ 
+@@ -577,8 +582,12 @@
+     }
+ 
+     fn try_lock(&self, file: File) -> Result<File> {
++        // The experimental Turmoil backend has no OS descriptor/lock API.
++        // Its supported slice is one live opener per host/path; lock contention
++        // is not modeled. Production retains the original fs2 locking below.
+         #[cfg(all(
+             not(miri),
++            not(feature = "turmoil-fs"),
+             any(windows, target_os = "linux", target_os = "macos")
+         ))]
+         {
+@@ -773,7 +782,7 @@
+     pub fn truncate_corrupt(&self, new_len: u64) {
+         self.event_log.reset();
+         let path = self.db_path();
+-        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
++        let f = crate::fs::OpenOptions::new().write(true).open(path).unwrap();
+         f.set_len(new_len).expect("should be able to truncate");
+     }
+ }
+@@ -848,11 +857,11 @@
+ 
+         let snap_dir = Path::new(&absolute_path).parent().unwrap();
+ 
+-        if !snap_dir.exists() {
++        if !fs::exists(snap_dir) {
+             fs::create_dir_all(snap_dir)?;
+         }
+ 
+-        Ok(snap_dir.read_dir()?.filter_map(filter).collect())
++        Ok(fs::read_dir(snap_dir)?.filter_map(filter).collect())
+     }
+ }
+ 
+--- /dev/null
++++ b/src/fs.rs
+@@ -0,0 +1,50 @@
++//! Compile-time filesystem boundary. The default backend is the original std I/O.
++//! The experimental backend must only run synchronously inside a Turmoil host.
++#[cfg(not(feature = "turmoil-fs"))]
++pub(crate) use std::fs::*;
++#[cfg(feature = "turmoil-fs")]
++pub(crate) use turmoil::fs::shim::std::fs::*;
++
++#[cfg(not(feature = "turmoil-fs"))]
++pub(crate) fn exists(path: &std::path::Path) -> bool {
++    path.exists()
++}
++
++// Preserve sled's Linux writeback behavior exactly for the production backend.
++#[cfg(all(target_os = "linux", not(feature = "turmoil-fs")))]
++#[allow(unsafe_code)]
++pub(crate) fn sync_range(
++    file: &File,
++    offset: u64,
++    len: usize,
++) -> std::io::Result<()> {
++    use std::convert::TryFrom;
++    use std::os::unix::io::AsRawFd;
++    let ret = unsafe {
++        libc::sync_file_range(
++            file.as_raw_fd(),
++            i64::try_from(offset).unwrap(),
++            i64::try_from(len).unwrap(),
++            libc::SYNC_FILE_RANGE_WAIT_BEFORE
++                | libc::SYNC_FILE_RANGE_WRITE
++                | libc::SYNC_FILE_RANGE_WAIT_AFTER,
++        )
++    };
++    if ret < 0 {
++        let error = std::io::Error::last_os_error();
++        if error.raw_os_error() == Some(libc::ENOSYS) {
++            file.sync_all()
++        } else {
++            Err(error)
++        }
++    } else {
++        Ok(())
++    }
++}
++
++// Turmoil has no raw fd / sync_file_range. Model a successful log write as
++// a whole-file sync; this is intentionally stronger than Linux writeback.
++#[cfg(any(not(target_os = "linux"), feature = "turmoil-fs"))]
++pub(crate) fn sync_range(file: &File, _: u64, _: usize) -> std::io::Result<()> {
++    file.sync_all()
++}
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -183,6 +183,9 @@
+ mod batch;
+ mod binary_search;
+ mod concurrency_control;
++#[cfg(all(feature = "turmoil-fs", any(not(unix), feature = "io_uring")))]
++compile_error!("turmoil-fs supports Unix without io_uring only");
++mod fs;
+ mod config;
+ mod context;
+ mod db;
+@@ -216,6 +219,7 @@
+ pub mod doc;
+ 
+ #[cfg(any(
++    feature = "turmoil-fs",
+     miri,
+     not(any(
+         windows,
+@@ -243,6 +247,7 @@
+ }
+ 
+ #[cfg(all(
++    not(feature = "turmoil-fs"),
+     not(miri),
+     any(
+         windows,
+--- a/src/pagecache/blob_io.rs
++++ b/src/pagecache/blob_io.rs
+@@ -6,7 +6,7 @@
+     config: &Config,
+ ) -> Result<(MessageKind, Vec<u8>)> {
+     let path = config.blob_path(blob_ptr);
+-    let f_res = std::fs::OpenOptions::new().read(true).open(&path);
++    let f_res = crate::fs::OpenOptions::new().read(true).open(&path);
+ 
+     if let Err(e) = &f_res {
+         debug!("failed to open file for blob read at {}: {:?}", blob_ptr, e);
+@@ -70,7 +70,7 @@
+ ) -> Result<()> {
+     let path = config.blob_path(id);
+     let mut f =
+-        std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
++        crate::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+ 
+     let kind_buf = &[kind.into()];
+ 
+@@ -102,7 +102,7 @@
+     let mut base_dir = config.get_path();
+     base_dir.push("blobs");
+     let blob_dir = base_dir;
+-    let blobs = std::fs::read_dir(blob_dir)?;
++    let blobs = crate::fs::read_dir(blob_dir)?;
+ 
+     debug!("gc_blobs removing any blob with an lsn above {}", stable_lsn);
+ 
+@@ -138,7 +138,7 @@
+     }
+ 
+     for path in to_remove {
+-        std::fs::remove_file(&path)?;
++        crate::fs::remove_file(&path)?;
+     }
+ 
+     Ok(())
+@@ -146,7 +146,7 @@
+ 
+ pub(crate) fn remove_blob(id: Lsn, config: &Config) -> Result<()> {
+     let path = config.blob_path(id);
+-    if let Err(e) = std::fs::remove_file(&path) {
++    if let Err(e) = crate::fs::remove_file(&path) {
+         debug!("removing blob at {:?} failed: {}", path, e);
+     } else {
+         trace!("successfully removed blob at {:?}", path);
+--- a/src/pagecache/iobuf.rs
++++ b/src/pagecache/iobuf.rs
+@@ -729,31 +729,7 @@
+             let f = &self.config.file;
+             pwrite_all(f, data, log_offset)?;
+             if !self.config.temporary {
+-                #[cfg(target_os = "linux")]
+-                {
+-                    use std::os::unix::io::AsRawFd;
+-                    let ret = unsafe {
+-                        libc::sync_file_range(
+-                            f.as_raw_fd(),
+-                            i64::try_from(log_offset).unwrap(),
+-                            i64::try_from(total_len).unwrap(),
+-                            libc::SYNC_FILE_RANGE_WAIT_BEFORE
+-                                | libc::SYNC_FILE_RANGE_WRITE
+-                                | libc::SYNC_FILE_RANGE_WAIT_AFTER,
+-                        )
+-                    };
+-                    if ret < 0 {
+-                        let err = std::io::Error::last_os_error();
+-                        if let Some(libc::ENOSYS) = err.raw_os_error() {
+-                            f.sync_all()?;
+-                        } else {
+-                            return Err(err.into());
+-                        }
+-                    }
+-                }
+-
+-                #[cfg(not(target_os = "linux"))]
+-                f.sync_all()?;
++                crate::fs::sync_range(f, log_offset, total_len)?;
+             }
+         }
+         io_fail!(self, "buffer write post");
+--- a/src/pagecache/logger.rs
++++ b/src/pagecache/logger.rs
+@@ -1,4 +1,4 @@
+-use std::fs::File;
++use crate::fs::File;
+ 
+ use super::{
+     arr_to_lsn, arr_to_u32, assert_usize, bump_atomic_lsn, header, iobuf,
+--- a/src/pagecache/mod.rs
++++ b/src/pagecache/mod.rs
+@@ -1401,7 +1401,7 @@
+         let blob_dir = stable.parent().expect(
+             "should be able to determine the parent for the blob directory",
+         );
+-        let blob_files = std::fs::read_dir(blob_dir)?;
++        let blob_files = crate::fs::read_dir(blob_dir)?;
+ 
+         for blob_file in blob_files {
+             let blob_file = if let Ok(bf) = blob_file {
+@@ -1420,7 +1420,7 @@
+             // workaround to avoid missing `dirfd` shim
+             #[cfg(miri)]
+             {
+-                size += std::fs::metadata(blob_file.path())
++                size += crate::fs::metadata(blob_file.path())
+                     .map(|m| m.len())
+                     .unwrap_or(0);
+             }
+--- a/src/pagecache/parallel_io_polyfill.rs
++++ b/src/pagecache/parallel_io_polyfill.rs
+@@ -1,4 +1,4 @@
+-use std::fs::File;
++use crate::fs::File;
+ use std::io::{self, Read, Seek, Write};
+ 
+ use parking_lot::Mutex;
+--- a/src/pagecache/parallel_io_unix.rs
++++ b/src/pagecache/parallel_io_unix.rs
+@@ -1,5 +1,5 @@
+ use std::convert::TryFrom;
+-use std::fs::File;
++use crate::fs::File;
+ use std::io;
+ use std::os::unix::fs::FileExt;
+ 
+--- a/src/pagecache/parallel_io_windows.rs
++++ b/src/pagecache/parallel_io_windows.rs
+@@ -1,5 +1,5 @@
+ use std::convert::TryFrom;
+-use std::fs::File;
++use crate::fs::File;
+ use std::io;
+ use std::os::windows::fs::FileExt;
+ 
+--- a/src/pagecache/snapshot.rs
++++ b/src/pagecache/snapshot.rs
+@@ -465,7 +465,7 @@
+     candidates.sort();
+     let path = candidates.pop().unwrap();
+ 
+-    let mut f = std::fs::OpenOptions::new().read(true).open(&path)?;
++    let mut f = crate::fs::OpenOptions::new().read(true).open(&path)?;
+ 
+     let mut buf = vec![];
+     let _read = f.read_to_end(&mut buf)?;
+@@ -541,9 +541,9 @@
+     path_2.push(path_2_suffix);
+ 
+     let parent = path_1.parent().unwrap();
+-    std::fs::create_dir_all(parent)?;
++    crate::fs::create_dir_all(parent)?;
+     let mut f =
+-        std::fs::OpenOptions::new().write(true).create(true).open(&path_1)?;
++        crate::fs::OpenOptions::new().write(true).create(true).open(&path_1)?;
+ 
+     // write the snapshot bytes, followed by a crc64 checksum at the end
+     io_fail!(config, "snap write");
+@@ -558,7 +558,7 @@
+     trace!("wrote snapshot to {}", path_1.to_string_lossy());
+ 
+     io_fail!(config, "snap write mv");
+-    std::fs::rename(&path_1, &path_2)?;
++    crate::fs::rename(&path_1, &path_2)?;
+     io_fail!(config, "snap write mv post");
+ 
+     trace!("renamed snapshot to {}", path_2.to_string_lossy());
+@@ -572,7 +572,7 @@
+ 
+             io_fail!(config, "snap write rm old");
+ 
+-            if let Err(e) = std::fs::remove_file(&path) {
++            if let Err(e) = crate::fs::remove_file(&path) {
+                 // TODO should this just be a try return?
+                 warn!(
+                     "failed to remove old snapshot file, maybe snapshot race? {}",
+--- a/tests/test_tree.rs
++++ b/tests/test_tree.rs
+@@ -497,7 +497,7 @@
+         let barrier = barrier.clone();
+         let thread = std::thread::spawn(move || {
+             barrier.wait();
+-            let sub = db.watch_prefix(b"k1");
++            let mut sub = db.watch_prefix(b"k1");
+             drop(db);
+ 
+             while sub.next_timeout(Duration::from_millis(100)).is_ok() {}
