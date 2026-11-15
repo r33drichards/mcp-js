@@ -183,8 +183,36 @@ async fn push_and_check(
     applied
 }
 
-async fn converge_all(nodes: &HashMap<String, Arc<ClusterNode>>, label: &str, head: CaId) {
+/// After a storage failure the cluster re-elects from the survivors; pushes
+/// retry until the new leader serves them. Expect always tracks the current
+/// head so a retry never conflicts with an earlier successful push.
+async fn push_with_retry(store: &LabelStore, label: &str, ca_id: CaId) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let expect = store.resolve(label).await.ok().flatten();
+        match store.cas(label, expect, ca_id, None).await {
+            Ok(true) => return true,
+            Ok(false) => return false,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+async fn converge_all(
+    nodes: &HashMap<String, Arc<ClusterNode>>,
+    label: &str,
+    head: CaId,
+    exclude: &[String],
+) {
     for name in ["n0", "n1", "n2"] {
+        if exclude.contains(&name.to_string()) {
+            // A node stopped by an injected storage failure keeps its durable
+            // state; it is checked separately, not converged.
+            continue;
+        }
         let s = Arc::new(LabelStore::in_memory().with_cluster(nodes[name].clone()));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -304,6 +332,9 @@ fuzz_target!(|data: &[u8]| {
         // part of every partition action.
         let mut partitioned = std::collections::HashSet::new();
         let mut committed: Option<CaId> = None;
+        // Nodes stopped by an injected storage failure, with the head they
+        // durably hold (frozen at failure time).
+        let mut failed: Vec<(String, Option<CaId>)> = Vec::new();
         let mut runs = 0usize;
 
         for (i, action) in actions.iter().enumerate() {
@@ -319,13 +350,17 @@ fuzz_target!(|data: &[u8]| {
                         continue;
                     };
                     let ca_id: CaId = parse_ca_hex(&ca_hex).expect("valid ca hex");
-                    let applied = push_and_check(
-                        &follower_store,
-                        !partitioned.contains("leader"),
-                        ca_id,
-                        "push",
-                    )
-                    .await;
+                    let applied = if failed.is_empty() {
+                        push_and_check(
+                            &follower_store,
+                            !partitioned.contains("leader"),
+                            ca_id,
+                            "push",
+                        )
+                        .await
+                    } else {
+                        push_with_retry(&follower_store, "push", ca_id).await
+                    };
                     if applied {
                         committed = Some(ca_id);
                         for name in ["n0", "n1", "n2"] {
@@ -357,7 +392,17 @@ fuzz_target!(|data: &[u8]| {
                 // Invariant: the committed head is visible on every node.
                 3 => {
                     if let Some(head) = committed {
-                        converge_all(&nodes, "push", head).await;
+                        let names: Vec<String> = failed.iter().map(|(n, _)| n.clone()).collect();
+                        converge_all(&nodes, "push", head, &names).await;
+                    }
+                }
+                // Inject an fs fault: the leader's next durable write fails
+                // and the node stops itself. The committed head must stay
+                // durable and the survivors must keep committing.
+                4 => {
+                    if failed.iter().all(|(n, _)| n != leader) {
+                        failed.push((leader.to_string(), committed.clone()));
+                        nodes[leader].sim_storage_failure(true);
                     }
                 }
                 // Run raw arbitrary JS; failures are tolerated, only panics
@@ -381,16 +426,42 @@ fuzz_target!(|data: &[u8]| {
         }
         partitioned.clear();
         if let Some(head) = committed {
-            converge_all(&nodes, "push", head).await;
+            let names: Vec<String> = failed.iter().map(|(n, _)| n.clone()).collect();
+            converge_all(&nodes, "push", head, &names).await;
         } else {
             // No successful push happened; a final push must succeed.
             let payload = safe_payload(&data_owned[data_owned.len().saturating_sub(4)..]);
             let code = js_write_file(runs + 1000, &payload);
             if let Some(ca_hex) = run_js_to_fs(&leader_engine, &code).await {
                 let ca_id: CaId = parse_ca_hex(&ca_hex).expect("valid ca hex");
-                push_and_check(&follower_store, true, ca_id, "final").await;
-                converge_all(&nodes, "final", ca_id).await;
+                let applied = if failed.is_empty() {
+                    push_and_check(&follower_store, true, ca_id, "final").await
+                } else {
+                    push_with_retry(&follower_store, "final", ca_id).await
+                };
+                assert!(
+                    applied || !failed.is_empty(),
+                    "final push must succeed when no storage failure occurred"
+                );
+                if applied {
+                    let names: Vec<String> = failed.iter().map(|(n, _)| n.clone()).collect();
+                    converge_all(&nodes, "final", ca_id, &names).await;
+                }
             }
+        }
+        // A node stopped by an injected storage failure must hold exactly the
+        // head it had at failure time: durable, frozen, never fabricated.
+        for (name, expected) in &failed {
+            let got = LabelStore::in_memory()
+                .with_cluster(nodes[name].clone())
+                .resolve("push")
+                .await
+                .ok()
+                .flatten();
+            assert_eq!(
+                got, *expected,
+                "{name}: durable head changed after storage failure"
+            );
         }
         Ok(())
     });
