@@ -62,7 +62,6 @@ swc_core = { version = "54", features = [
     "ecma_visit",
 ] }
 sled = "0.34"
-turmoil = "0.7.2"
 chrono = { version = "0.4", features = ["serde"] }
 hyper = { version = "1.5.2", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
@@ -128,7 +127,6 @@ futures = "0.3"
 tempfile = "3"
 chrono = { version = "0.4", features = ["serde"] }
 sled = "0.34"
-turmoil = "0.7.2"
 
 [patch.crates-io]
 url = { path = "vendor/url" }
