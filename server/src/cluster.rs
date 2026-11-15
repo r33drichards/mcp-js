@@ -155,6 +155,25 @@ struct HttpPeerRpc {
     client: reqwest::Client,
 }
 
+impl HttpPeerRpc {
+    async fn post<Req: Serialize, Resp: serde::de::DeserializeOwned>(
+        &self,
+        peer: &str,
+        path: &str,
+        req: &Req,
+    ) -> Option<Resp> {
+        let response = self.client.post(format!("http://{peer}{path}"))
+            .json(req)
+            .send().await.ok()?;
+        // Match the RPC handlers and simulated transport: only HTTP 200 is an
+        // acknowledgement. Error JSON can deserialize into ForwardAck too.
+        if response.status() != reqwest::StatusCode::OK {
+            return None;
+        }
+        response.json().await.ok()
+    }
+}
+
 impl PeerRpc for HttpPeerRpc {
     fn request_vote<'a>(
         &'a self,
@@ -162,9 +181,7 @@ impl PeerRpc for HttpPeerRpc {
         req: RequestVoteRequest,
     ) -> PeerRpcFuture<'a, RequestVoteResponse> {
         Box::pin(async move {
-            self.client.post(format!("http://{peer}/raft/request-vote"))
-                .json(&req).send().await.ok()?
-                .json::<RequestVoteResponse>().await.ok()
+            self.post(peer, "/raft/request-vote", &req).await
         })
     }
 
@@ -174,17 +191,13 @@ impl PeerRpc for HttpPeerRpc {
         req: AppendEntriesRequest,
     ) -> PeerRpcFuture<'a, AppendEntriesResponse> {
         Box::pin(async move {
-            self.client.post(format!("http://{peer}/raft/append-entries"))
-                .json(&req).send().await.ok()?
-                .json::<AppendEntriesResponse>().await.ok()
+            self.post(peer, "/raft/append-entries", &req).await
         })
     }
 
     fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> PeerRpcFuture<'a, ForwardAck> {
         Box::pin(async move {
-            self.client.post(format!("http://{peer}/data/put"))
-                .json(&req).send().await.ok()?
-                .json::<ForwardAck>().await.ok()
+            self.post(peer, "/data/put", &req).await
         })
     }
 
@@ -194,17 +207,13 @@ impl PeerRpc for HttpPeerRpc {
         req: CasRequest,
     ) -> PeerRpcFuture<'a, CasResponse> {
         Box::pin(async move {
-            self.client.post(format!("http://{peer}/data/cas"))
-                .json(&req).send().await.ok()?
-                .json::<CasResponse>().await.ok()
+            self.post(peer, "/data/cas", &req).await
         })
     }
 
     fn forward_join<'a>(&'a self, peer: &'a str, req: JoinRequest) -> PeerRpcFuture<'a, ForwardAck> {
         Box::pin(async move {
-            self.client.post(format!("http://{peer}/raft/join"))
-                .json(&req).send().await.ok()?
-                .json::<ForwardAck>().await.ok()
+            self.post(peer, "/raft/join", &req).await
         })
     }
 
@@ -214,9 +223,7 @@ impl PeerRpc for HttpPeerRpc {
         req: LeaveRequest,
     ) -> PeerRpcFuture<'a, ForwardAck> {
         Box::pin(async move {
-            self.client.post(format!("http://{peer}/raft/leave"))
-                .json(&req).send().await.ok()?
-                .json::<ForwardAck>().await.ok()
+            self.post(peer, "/raft/leave", &req).await
         })
     }
 }

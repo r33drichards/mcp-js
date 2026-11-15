@@ -789,3 +789,140 @@ async fn replication_reply_and_heartbeat_tick_do_not_deadlock_on_state_lock() {
     tokio::time::timeout(Duration::from_millis(250), heartbeat).await
         .expect("lock contention must not strand heartbeat shutdown").unwrap();
 }
+
+// Exercise the production transport against real HTTP responses: even a body
+// that deserializes successfully must not turn an HTTP failure into an RPC ack.
+async fn http_peer_rpc_results(status: u16, body: &'static str) -> [bool; 6] {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move {
+        for path in [
+            "/raft/request-vote",
+            "/raft/append-entries",
+            "/data/put",
+            "/data/cas",
+            "/raft/join",
+            "/raft/leave",
+        ] {
+            let (stream, _) = listener.accept().await.unwrap();
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    hyper::service::service_fn(
+                        move |req: hyper::Request<hyper::body::Incoming>| async move {
+                            assert_eq!(req.method(), hyper::Method::POST);
+                            assert_eq!(req.uri().path(), path);
+                            use http_body_util::BodyExt;
+                            req.into_body().collect().await.unwrap();
+                            Ok::<_, std::convert::Infallible>(
+                                hyper::Response::builder()
+                                    .status(status)
+                                    .header("connection", "close")
+                                    .header("content-type", "application/json")
+                                    .body(http_body_util::Full::new(
+                                        hyper::body::Bytes::from_static(body.as_bytes()),
+                                    ))
+                                    .unwrap(),
+                            )
+                        },
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let rpc = HttpPeerRpc {
+        client: rpc_client(None).unwrap(),
+    };
+    let results = [
+        rpc.request_vote(
+            &peer,
+            RequestVoteRequest {
+                term: 1,
+                candidate_id: "candidate".into(),
+                last_log_index: 0,
+                last_log_term: 0,
+            },
+        )
+        .await
+        .is_some(),
+        rpc.append_entries(&peer, append(1, 0, 0, vec![], 0))
+            .await
+            .is_some(),
+        rpc.forward_put(
+            &peer,
+            PutRequest {
+                key: "k".into(),
+                value: "v".into(),
+                extra: vec![],
+            },
+        )
+        .await
+        .is_some(),
+        rpc.forward_cas(
+            &peer,
+            CasRequest {
+                key: "k".into(),
+                expected: None,
+                new: "v".into(),
+                extra: vec![],
+            },
+        )
+        .await
+        .is_some(),
+        rpc.forward_join(
+            &peer,
+            JoinRequest {
+                node_id: "joining".into(),
+                addr: "127.0.0.1:4000".into(),
+                as_learner: false,
+            },
+        )
+        .await
+        .is_some(),
+        rpc.forward_leave(
+            &peer,
+            LeaveRequest {
+                node_id: "leaving".into(),
+            },
+        )
+        .await
+        .is_some(),
+    ];
+    server.await.unwrap();
+    results
+}
+
+const RPC_RESPONSE_BODY: &str =
+    r#"{"term":1,"vote_granted":true,"success":true,"applied":true,"ok":true}"#;
+
+#[tokio::test]
+async fn http_peer_rpc_rejects_error_json() {
+    for status in [401, 409, 500, 503] {
+        assert_eq!(
+            http_peer_rpc_results(status, r#"{"error":"unavailable"}"#).await,
+            [false; 6],
+            "HTTP {status}: vote, append, put, cas, join, leave"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_peer_rpc_rejects_non_200_with_valid_bodies() {
+    for status in [201, 302, 307, 400, 500, 503] {
+        assert_eq!(
+            http_peer_rpc_results(status, RPC_RESPONSE_BODY).await,
+            [false; 6],
+            "HTTP {status}: vote, append, put, cas, join, leave"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_peer_rpc_accepts_200_and_rejects_malformed_json() {
+    assert_eq!(
+        http_peer_rpc_results(200, RPC_RESPONSE_BODY).await,
+        [true; 6]
+    );
+    assert_eq!(http_peer_rpc_results(200, "not JSON").await, [false; 6]);
+}
