@@ -163,7 +163,10 @@ async fn push_and_check(
     ca_id: CaId,
     label: &str,
 ) -> bool {
-    let cas = store.cas(label, None, ca_id, None).await;
+    // Repeat pushes must build on the current head; a blind expect=None
+    // would falsely conflict with the label this target created earlier.
+    let expect = store.resolve(label).await.ok().flatten();
+    let cas = store.cas(label, expect, ca_id, None).await;
     let applied = matches!(&cas, Ok(true));
     if expect_success {
         assert!(applied, "{label}: push must succeed (got {cas:?})");
@@ -180,17 +183,17 @@ async fn push_and_check(
     applied
 }
 
-async fn converge_all(nodes: &HashMap<String, Arc<ClusterNode>>, head: CaId) {
+async fn converge_all(nodes: &HashMap<String, Arc<ClusterNode>>, label: &str, head: CaId) {
     for name in ["n0", "n1", "n2"] {
         let s = Arc::new(LabelStore::in_memory().with_cluster(nodes[name].clone()));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if s.resolve("main").await.ok().flatten() == Some(head) {
+            if s.resolve(label).await.ok().flatten() == Some(head) {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "{name}: head never converged"
+                "{label}: head never converged on {name}"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -325,6 +328,13 @@ fuzz_target!(|data: &[u8]| {
                     .await;
                     if applied {
                         committed = Some(ca_id);
+                        for name in ["n0", "n1", "n2"] {
+                            let st = nodes[name].status().await;
+                            eprintln!(
+                                "PUSHCHK {name}: role={:?} term={} commit={} applied={} loglen={}",
+                                st.role, st.term, st.commit_index, st.last_applied, st.log_length
+                            );
+                        }
                     }
                 }
                 // Partition a pair chosen from the input.
@@ -347,7 +357,7 @@ fuzz_target!(|data: &[u8]| {
                 // Invariant: the committed head is visible on every node.
                 3 => {
                     if let Some(head) = committed {
-                        converge_all(&nodes, head).await;
+                        converge_all(&nodes, "push", head).await;
                     }
                 }
                 // Run raw arbitrary JS; failures are tolerated, only panics
@@ -371,7 +381,7 @@ fuzz_target!(|data: &[u8]| {
         }
         partitioned.clear();
         if let Some(head) = committed {
-            converge_all(&nodes, head).await;
+            converge_all(&nodes, "push", head).await;
         } else {
             // No successful push happened; a final push must succeed.
             let payload = safe_payload(&data_owned[data_owned.len().saturating_sub(4)..]);
@@ -379,7 +389,7 @@ fuzz_target!(|data: &[u8]| {
             if let Some(ca_hex) = run_js_to_fs(&leader_engine, &code).await {
                 let ca_id: CaId = parse_ca_hex(&ca_hex).expect("valid ca hex");
                 push_and_check(&follower_store, true, ca_id, "final").await;
-                converge_all(&nodes, ca_id).await;
+                converge_all(&nodes, "final", ca_id).await;
             }
         }
         Ok(())
