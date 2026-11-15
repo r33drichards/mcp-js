@@ -342,8 +342,11 @@ fuzz_target!(|data: &[u8]| {
             match opcode {
                 // Run generated JS and push the resulting head from the follower.
                 0 => {
+                    // The tail can be shorter than the action-indexed payload
+                    // offsets imply, so clamp both ends before slicing.
+                    let start = (8 + i * 3).min(data_owned.len());
                     let payload =
-                        safe_payload(&data_owned[8 + i * 3..(8 + i * 3 + 3).min(data_owned.len())]);
+                        safe_payload(&data_owned[start..(start + 3).min(data_owned.len())]);
                     let code = js_write_file(runs, &payload);
                     runs += 1;
                     let Some(ca_hex) = run_js_to_fs(&leader_engine, &code).await else {
@@ -408,8 +411,9 @@ fuzz_target!(|data: &[u8]| {
                 // Run raw arbitrary JS; failures are tolerated, only panics
                 // inside the engine count as crashes.
                 _ => {
+                    let start = (8 + i * 2).min(data_owned.len());
                     let code = String::from_utf8_lossy(
-                        &data_owned[8 + i * 2..(8 + i * 2 + 24).min(data_owned.len())],
+                        &data_owned[start..(start + 24).min(data_owned.len())],
                     );
                     let _ = run_js_to_fs(&leader_engine, &code).await;
                 }
