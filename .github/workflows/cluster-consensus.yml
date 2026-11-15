@@ -6,6 +6,7 @@ on:
       - 'server/tests/cluster*'
       - 'server/cluster-tests/**'
       - '.github/actions/**'
+      - 'server/engine-cluster-tests/**'
       - '.github/workflows/cluster-consensus.yml'
   push:
     branches: [main]
@@ -14,6 +15,7 @@ on:
       - 'server/tests/cluster*'
       - 'server/cluster-tests/**'
       - '.github/actions/**'
+      - 'server/engine-cluster-tests/**'
       - '.github/workflows/cluster-consensus.yml'
 # New commits supersede older PR runs; independent branch pushes stay independent.
 concurrency:
@@ -28,5 +30,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           shared-key: native-cluster
-          workspaces: server/cluster-tests -> target
+          workspaces: |
+            server/cluster-tests -> target
+            server/engine-cluster-tests -> target
       - run: cargo test --manifest-path server/cluster-tests/Cargo.toml --locked -- --test-threads=1
+      - run: cargo test --manifest-path server/engine-cluster-tests/Cargo.toml --locked -- --test-threads=1
