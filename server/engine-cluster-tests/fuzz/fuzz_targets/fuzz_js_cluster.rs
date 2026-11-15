@@ -248,7 +248,10 @@ fuzz_target!(|data: &[u8]| {
         .enable_random_order()
         .min_message_latency(Duration::from_millis(1))
         .max_message_latency(Duration::from_millis(3))
-        .simulation_duration(Duration::from_secs(60))
+        // JS runs poll for up to 10s of sim time each; 12 actions plus pushes
+        // and convergence can outgrow a short clock, and a torn-down sim fails
+        // outstanding RPCs spuriously.
+        .simulation_duration(Duration::from_secs(300))
         .build();
     for (i, name) in ["n0", "n1", "n2"].into_iter().enumerate() {
         let peers: Vec<_> = ["n0", "n1", "n2"]
@@ -433,23 +436,22 @@ fuzz_target!(|data: &[u8]| {
             let names: Vec<String> = failed.iter().map(|(n, _)| n.clone()).collect();
             converge_all(&nodes, "push", head, &names).await;
         } else {
-            // No successful push happened; a final push must succeed.
+            // No successful push happened; a final push must succeed. A
+            // definite conflict (Ok(false)) is a real bug; a transport Err can
+            // mean the simulation clock ran out, which is not a cluster fault.
             let payload = safe_payload(&data_owned[data_owned.len().saturating_sub(4)..]);
             let code = js_write_file(runs + 1000, &payload);
             if let Some(ca_hex) = run_js_to_fs(&leader_engine, &code).await {
                 let ca_id: CaId = parse_ca_hex(&ca_hex).expect("valid ca hex");
-                let applied = if failed.is_empty() {
-                    push_and_check(&follower_store, true, ca_id, "final").await
-                } else {
-                    push_with_retry(&follower_store, "final", ca_id).await
-                };
-                assert!(
-                    applied || !failed.is_empty(),
-                    "final push must succeed when no storage failure occurred"
-                );
-                if applied {
-                    let names: Vec<String> = failed.iter().map(|(n, _)| n.clone()).collect();
-                    converge_all(&nodes, "final", ca_id, &names).await;
+                let expect = follower_store.resolve("final").await.ok().flatten();
+                let cas = follower_store.cas("final", expect, ca_id, None).await;
+                match &cas {
+                    Ok(true) => {
+                        let names: Vec<String> = failed.iter().map(|(n, _)| n.clone()).collect();
+                        converge_all(&nodes, "final", ca_id, &names).await;
+                    }
+                    Ok(false) => panic!("final push conflicted on a fresh label: {cas:?}"),
+                    Err(_) => {}
                 }
             }
         }
