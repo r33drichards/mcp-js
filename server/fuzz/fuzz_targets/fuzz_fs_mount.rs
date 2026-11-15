@@ -258,17 +258,26 @@ fuzz_target!(|ops: Vec<Op>| {
                     if link_key.as_os_str().is_empty() {
                         continue;
                     }
-                    mount
-                        .symlink(Path::new(&target_raw), Path::new(&link_raw))
-                        .await
-                        .expect("symlink");
-                    model.insert(
-                        link_key,
-                        ModelFile {
-                            bytes: target_raw.clone().into_bytes(),
-                            symlink: Some(PathBuf::from(&target_raw)),
-                        },
-                    );
+                    let res =
+                        mount.symlink(Path::new(&target_raw), Path::new(&link_raw)).await;
+                    if model.contains_key(&link_key) {
+                        // The mount bails EEXIST when the link path already
+                        // exists (mirror of Node fs.symlink); creating a link
+                        // over an existing entry must fail, not replace it.
+                        assert!(
+                            res.is_err(),
+                            "symlink over existing {link_raw:?} must fail"
+                        );
+                    } else {
+                        res.expect("symlink");
+                        model.insert(
+                            link_key,
+                            ModelFile {
+                                bytes: target_raw.clone().into_bytes(),
+                                symlink: Some(PathBuf::from(&target_raw)),
+                            },
+                        );
+                    }
                 }
                 Op::Readlink { path } => {
                     let raw = path.render();
