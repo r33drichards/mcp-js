@@ -443,7 +443,9 @@ pub struct ClusterNode {
     shutdown: CancellationToken,
     fixed_voters: Option<HashMap<String, String>>,
     rpc_bearer: Option<String>,
-    #[cfg(test)]
+    /// Fault-injection hook for simulation and fuzz harnesses: when set,
+    /// every durable write fails and the node stops itself. Never set in
+    /// production.
     fail_flush: std::sync::atomic::AtomicBool,
 }
 
@@ -581,7 +583,6 @@ impl ClusterNode {
             shutdown: CancellationToken::new(),
             fixed_voters,
             rpc_bearer: None,
-            #[cfg(test)]
             fail_flush: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -765,8 +766,7 @@ impl ClusterNode {
     pub(crate) async fn sim_commit(self: &Arc<Self>) {
         self.update_commit_index().await;
     }
-    #[cfg(test)]
-    pub(crate) fn sim_storage_failure(&self, fail: bool) {
+    pub fn sim_storage_failure(&self, fail: bool) {
         self.fail_flush
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
@@ -786,7 +786,6 @@ impl ClusterNode {
     }
 
     fn durable<T>(&self, result: sled::Result<T>) -> Result<T, String> {
-        #[cfg(test)]
         let result = if self.fail_flush.load(std::sync::atomic::Ordering::SeqCst) {
             Err(sled::Error::Unsupported("injected flush failure".into()))
         } else {
