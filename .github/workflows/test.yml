@@ -26,9 +26,28 @@ jobs:
       - name: Cache Nix development shell
         uses: nix-community/cache-nix-action@d8cff2f74b9341e0d90fbf3c0c0212a161ceaef6 # v6
         with:
-          primary-key: nix-shell-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'shell.nix') }}
-          restore-prefixes-first-match: nix-shell-${{ runner.os }}-
+          primary-key: nix-shell-v2-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'shell.nix') }}
+          restore-prefixes-first-match: nix-shell-v2-${{ runner.os }}-
           gc-max-store-size-linux: 3G
+
+      # nix develop alone leaves the environment collectible after the command
+      # exits. Keep a profile root until the cache action's post-job GC/save.
+      - name: Root the Nix development shell and verify its closure
+        shell: bash
+        run: |
+          nix develop --profile "$RUNNER_TEMP/mcp-js-devshell" --command bash -c '
+            rustc_path=$(readlink -f "$(command -v rustc)")
+            [[ "$rustc_path" == /nix/store/* ]] || exit 1
+            [[ "${RUSTY_V8_ARCHIVE:-}" == /nix/store/* ]] || exit 1
+            printf "%s\n" "$rustc_path" "$RUSTY_V8_ARCHIVE" > "$RUNNER_TEMP/mcp-js-nix-paths"
+          '
+          nix-store --gc --print-live > "$RUNNER_TEMP/mcp-js-nix-live-paths"
+          while IFS= read -r store_path; do
+            grep -Fxq -- "$store_path" "$RUNNER_TEMP/mcp-js-nix-live-paths" || {
+              echo "Required Nix path is not protected from GC: $store_path" >&2
+              exit 1
+            }
+          done < <(sed -n 's#^\(/nix/store/[^/]*\).*#\1#p' "$RUNNER_TEMP/mcp-js-nix-paths")
 
       - name: Cache Cargo dependencies with the Nix toolchain
         uses: ./.github/actions/rust-cache

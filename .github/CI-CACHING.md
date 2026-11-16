@@ -40,9 +40,14 @@ fallback and Cargo rebuilds what changed. Incompatible toolchains still miss.
 The main Test workflow keeps Nix. Its Cargo cache identifies Rust through
 `nix develop --command {0}`, with a distinct key including the Nix shell inputs,
 so runner Rust and Nix Rust artifacts cannot accidentally share a cache. The
-Nix store has its own commit-pinned cache action; its key tracks flake.lock,
-flake.nix and shell.nix, with a 3 GiB pre-save GC target (not a hard cache size
-limit when live roots exceed it).
+Nix store has its own commit-pinned cache action; its versioned key tracks
+flake.lock, flake.nix and shell.nix. Before using the shell, `nix develop --profile`
+creates a GC root under RUNNER_TEMP that lives through the cache action's post-job
+save. CI verifies that the actual rustc and rusty_v8 store paths are in Nix's live
+set. Without this profile, pre-save GC can delete the shell and Rust toolchain,
+leaving a successfully uploaded but ineffective cache. The v2 key excludes those
+older incomplete cache entries. The 3 GiB pre-save GC target is not a hard cache
+size limit when the rooted shell closure exceeds it.
 
 Caches are scoped by GitHub's branch/PR rules. The first run is cold; main runs
 seed caches that PRs can restore. Caches created inside one PR are not generally
