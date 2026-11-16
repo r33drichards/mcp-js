@@ -38,7 +38,16 @@ as their default.
 ```sh
 cargo test -p mcp-metadata-store --test contract sqlite
 cargo test -p server --test metadata_backends sqlite_consumers
+cargo test -p server --test sqlite_integration --locked -- --test-threads=1
 ```
+
+The real-server integration suite spawns the compiled server binary with isolated
+local data. It executes JavaScript, persists heap references and restores session files after process
+restart, reads heap tags through MCP, checks session histories and label reflogs
+through HTTP, and verifies rejected label CAS writes no reflog entry. It also
+checks CLI/environment/config selection against the actual SQLite rows and
+invalid-path startup failure without sled fallback. These tests need neither
+Docker nor an external database and run in the SQLite metadata CI workflow.
 
 ## Server configuration
 
