@@ -545,6 +545,7 @@ impl Engine {
         };
         let storage = StorageBootstrapConfig {
             dynamodb_table: None,
+            sqlite_path: None,
             dynamodb_namespace: "mcp-v8".into(),
             heap_store: heap.kind,
             heap_dir: heap.dir,

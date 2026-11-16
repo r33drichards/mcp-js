@@ -58,7 +58,7 @@
   dynamodb_table = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode. Config-file key for the `--dynamodb-table` flag. Environment variable: `MCP_V8_DYNAMODB_TABLE`.";
+    description = "Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode. Config-file key for the `--dynamodb-table` flag. Environment variable: `MCP_V8_DYNAMODB_TABLE`.";
   };
   election_timeout_max = lib.mkOption {
     type = lib.types.nullOr lib.types.ints.unsigned;
@@ -264,6 +264,11 @@
     type = lib.types.nullOr lib.types.str;
     default = null;
     description = "Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins. Config-file key for the `--session-id` flag. Environment variable: `MCP_V8_SESSION_ID`.";
+  };
+  sqlite_path = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "SQLite metadata file for session history, heap tags and filesystem labels. Parent directory must exist. Does not replace the Raft log or execution registry. Config-file key for the `--sqlite-path` flag. Environment variable: `MCP_V8_SQLITE_PATH`.";
   };
   sse_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;

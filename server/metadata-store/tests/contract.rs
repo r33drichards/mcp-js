@@ -3,7 +3,7 @@ use aws_sdk_dynamodb::{
     config::{Credentials, Region},
     types::{AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType},
 };
-use mcp_metadata_store::{DynamoDbStore, MetadataStore, SledStore, Write};
+use mcp_metadata_store::{DynamoDbStore, MetadataStore, SledStore, SqliteStore, Write};
 use std::sync::Arc;
 
 async fn contract(store: Arc<dyn MetadataStore>) {
@@ -117,6 +117,118 @@ async fn sled_contract() {
     // Durable reopen, not just a second handle to memory.
     let reopened = SledStore(sled::open(dir.path()).unwrap());
     assert!(reopened.get("heads", b"main").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn sqlite_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite");
+    contract(Arc::new(SqliteStore::open(&path, "test").unwrap())).await;
+    let reopened = SqliteStore::open(&path, "test").unwrap();
+    assert!(reopened.get("heads", b"main").await.unwrap().is_some());
+    let id = reopened.generate_id().await.unwrap();
+    drop(reopened);
+    assert!(
+        SqliteStore::open(&path, "test")
+            .unwrap()
+            .generate_id()
+            .await
+            .unwrap()
+            > id
+    );
+    let other = SqliteStore::open(&path, "other").unwrap();
+    assert_eq!(other.get("heads", b"main").await.unwrap(), None);
+    assert!(other.tree_names().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sqlite_independent_connections_serialize_cas_and_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite");
+    let stores: Vec<_> = (0..8)
+        .map(|_| SqliteStore::open(&path, "test").unwrap())
+        .collect();
+    let mut tasks = Vec::new();
+    for (n, store) in stores.into_iter().enumerate() {
+        tasks.push(tokio::spawn(async move {
+            let won = store
+                .compare_and_swap(
+                    Write::new("heads", b"key", vec![n as u8]),
+                    None,
+                    vec![Write::new("log", vec![n as u8], b"won")],
+                )
+                .await
+                .unwrap();
+            (won, store.generate_id().await.unwrap())
+        }));
+    }
+    let mut wins = 0;
+    let mut ids = std::collections::BTreeSet::new();
+    for task in tasks {
+        let (won, id) = task.await.unwrap();
+        wins += usize::from(won);
+        assert!(ids.insert(id));
+    }
+    assert_eq!(wins, 1);
+    let store = SqliteStore::open(&path, "test").unwrap();
+    assert_eq!(store.scan("log", b"", false, None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn sqlite_binary_prefix_boundaries_and_storage_error_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite");
+    let store = SqliteStore::open(&path, "test").unwrap();
+    for key in [
+        vec![],
+        vec![0],
+        vec![0, 255],
+        vec![1],
+        vec![255],
+        vec![255, 0],
+        vec![255, 255],
+    ] {
+        store
+            .put(Write::new("binary", key, b"value"))
+            .await
+            .unwrap();
+    }
+    for prefix in [vec![], vec![0], vec![0, 255], vec![255], vec![255, 255]] {
+        let all = store.scan("binary", b"", false, None).await.unwrap();
+        let expected: Vec<_> = all
+            .into_iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .collect();
+        assert_eq!(
+            store.scan("binary", &prefix, false, None).await.unwrap(),
+            expected
+        );
+        let reversed: Vec<_> = expected.into_iter().rev().take(1).collect();
+        assert_eq!(
+            store.scan("binary", &prefix, true, Some(1)).await.unwrap(),
+            reversed
+        );
+    }
+    // Force a real SQLite error after the primary write, verifying rollback.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_log BEFORE INSERT ON metadata
+        WHEN NEW.tree='fail' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        store
+            .compare_and_swap(
+                Write::new("heads", b"main", b"new"),
+                None,
+                vec![Write::new("fail", b"entry", b"bad")]
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(store.get("heads", b"main").await.unwrap(), None);
+    assert!(SqliteStore::open(dir.path().join("missing").join("db"), "test").is_err());
 }
 
 async fn dynamodb_contract(endpoint: String) {

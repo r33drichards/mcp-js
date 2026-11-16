@@ -313,6 +313,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             cache_dir: cli.cache_dir.clone(),
             session_db_path: cli.session_db_path.clone(),
             dynamodb_table: cli.dynamodb_table.clone(),
+            sqlite_path: cli.sqlite_path.clone(),
             dynamodb_namespace: cli.dynamodb_namespace.clone(),
             http_port: cli.http_port,
             execution_db_path: None,

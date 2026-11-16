@@ -206,10 +206,17 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ### `--dynamodb-table`
 
-Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode
+Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode
 
 - Environment: `MCP_V8_DYNAMODB_TABLE`
 - Value: `DYNAMODB_TABLE`
+
+### `--sqlite-path`
+
+SQLite metadata file for session history, heap tags and filesystem labels. Parent directory must exist. Does not replace the Raft log or execution registry
+
+- Environment: `MCP_V8_SQLITE_PATH`
+- Value: `SQLITE_PATH`
 
 ### `--dynamodb-namespace`
 
