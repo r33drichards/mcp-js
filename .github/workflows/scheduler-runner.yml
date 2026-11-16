@@ -1,11 +1,17 @@
 name: Apalis replicated runner
 on:
   pull_request:
-    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/src/api.rs', 'server/src/main.rs', 'server/src/engine/**', 'server/Cargo.*', 'Cargo.*', '.github/workflows/scheduler-runner.yml']
+    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/src/api.rs', 'server/src/main.rs', 'server/src/engine/**', 'server/Cargo.*', 'Cargo.*', '.github/actions/rust-cache/**', '.github/workflows/scheduler-runner.yml']
   push:
-    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/src/api.rs', 'server/src/main.rs', 'server/src/engine/**', 'server/Cargo.*', 'Cargo.*', '.github/workflows/scheduler-runner.yml']
+    branches: [main]
+    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/src/api.rs', 'server/src/main.rs', 'server/src/engine/**', 'server/Cargo.*', 'Cargo.*', '.github/actions/rust-cache/**', '.github/workflows/scheduler-runner.yml']
 permissions:
   contents: read
+# New commits supersede older PR runs; independent branch pushes stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   runner:
     runs-on: ubuntu-latest
@@ -14,6 +20,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
+      - uses: ./.github/actions/rust-cache
+        with:
+          shared-key: native-scheduler-runner
+          workspaces: scheduler-runner -> target
       - run: cargo fmt --manifest-path scheduler-runner/Cargo.toml --check
       - run: cargo test --manifest-path scheduler-runner/Cargo.toml --locked
       - run: cargo clippy --manifest-path scheduler-runner/Cargo.toml --locked --all-targets -- -D warnings
@@ -26,6 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/rust-cache
+        with:
+          shared-key: native-server
       - run: cargo test --locked -p server --lib scheduled_runtime_tests -- --nocapture
       - run: cargo test --locked -p server --lib execution_activity_tests -- --nocapture
       - run: cargo check --locked -p server --bin server

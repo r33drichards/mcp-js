@@ -1,11 +1,17 @@
 name: Dynamic HTTP functions
 on:
   pull_request:
-    paths: ['server/src/**', 'server/tests/jwks_auth_e2e.rs', 'server/tests/http_function_management_e2e.rs', '.github/workflows/http-functions.yml']
+    paths: ['server/src/**', 'server/tests/jwks_auth_e2e.rs', 'server/tests/http_function_management_e2e.rs', '.github/actions/rust-cache/**', '.github/workflows/http-functions.yml']
   push:
-    paths: ['server/src/**', 'server/tests/jwks_auth_e2e.rs', 'server/tests/http_function_management_e2e.rs', '.github/workflows/http-functions.yml']
+    branches: [main]
+    paths: ['server/src/**', 'server/tests/jwks_auth_e2e.rs', 'server/tests/http_function_management_e2e.rs', '.github/actions/rust-cache/**', '.github/workflows/http-functions.yml']
 permissions:
   contents: read
+# New commits supersede older PR runs; independent branch pushes stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   functions:
     runs-on: ubuntu-latest
@@ -17,6 +23,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt
+      - uses: ./.github/actions/rust-cache
+        with:
+          shared-key: native-server
       - run: rustfmt --edition 2024 --check server/src/http_functions.rs
       - run: cargo test --locked -p server --lib http_functions -- --test-threads=1
       - run: cargo test --locked -p server --test jwks_auth_e2e --test http_function_management_e2e -- --test-threads=1

@@ -7,6 +7,11 @@ on:
     # Also gate pngjs's stacked PR before the Node compatibility branch lands.
     branches: [ main, claude/branch-status-xnlqaq ]
 
+# New commits supersede older PR runs; independent branch pushes stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Run Tests
@@ -18,12 +23,29 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/flake-checker-action@main
-      - name: Build server
-        run: nix develop --command bash -c "cd server && cargo build"
+      - name: Cache Nix development shell
+        uses: nix-community/cache-nix-action@d8cff2f74b9341e0d90fbf3c0c0212a161ceaef6 # v6
+        with:
+          primary-key: nix-shell-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'shell.nix') }}
+          restore-prefixes-first-match: nix-shell-${{ runner.os }}-
+          gc-max-store-size-linux: 3G
 
+      - name: Cache Cargo dependencies with the Nix toolchain
+        uses: ./.github/actions/rust-cache
+        with:
+          shared-key: nix-server-${{ hashFiles('flake.lock', 'flake.nix', 'shell.nix') }}
+          cmd-format: nix develop --command {0}
+
+      # cargo test builds the server binary and all test targets itself.
+      # Cargo already prints captured output for failures; don't rerun the suite.
       - name: Run tests
-        run: nix develop --command bash -c "cd server && cargo test -- --test-threads=1"
+        shell: bash
+        run: nix develop --command cargo test --locked -p server -- --test-threads=1 2>&1 | tee test-results.log
 
-      - name: Run tests with output
-        run: nix develop --command bash -c "cd server && cargo test -- --nocapture --test-threads=1"
+      - name: Preserve failure output
         if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-test-output-${{ github.run_attempt }}
+          path: test-results.log
+          if-no-files-found: ignore
