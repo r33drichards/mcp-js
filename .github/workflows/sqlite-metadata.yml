@@ -35,5 +35,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - name: Storage contracts (SQLite and sled)
         run: cargo test --locked -p mcp-metadata-store --test contract
-      - name: SQLite consumers and real-server restart integration
-        run: cargo test --locked -p server --test metadata_backends --test sqlite_integration sqlite -- --test-threads=1
+      - name: SQLite consumers
+        run: cargo test --locked -p server --test metadata_backends sqlite -- --test-threads=1
+      - name: SQLite integration and heap restore with both metadata backends
+        run: cargo test --locked -p server --test sqlite_integration -- --test-threads=1
