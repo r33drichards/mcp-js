@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 pub mod dynamodb;
 pub mod sled_store;
+pub mod sqlite;
+pub use sqlite::SqliteStore;
 pub use dynamodb::DynamoDbStore;
 pub use sled_store::SledStore;
 pub type Result<T> = std::result::Result<T, String>;
@@ -48,6 +50,6 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<bool>;
     async fn generate_id(&self) -> Result<u64>;
     async fn tree_names(&self) -> Result<Vec<String>>;
-    /// DynamoDB writes are durable on acknowledgement. Sled flushes locally.
+    /// DynamoDB and SQLite writes are durable on acknowledgement. Sled flushes locally.
     fn flush(&self) -> Result<()>;
 }

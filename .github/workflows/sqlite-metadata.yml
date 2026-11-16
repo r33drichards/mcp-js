@@ -1,0 +1,39 @@
+name: SQLite metadata integration
+on:
+  pull_request:
+    paths:
+      - 'server/src/**'
+      - 'server/metadata-store/**'
+      - 'server/tests/sqlite_integration.rs'
+      - 'server/tests/metadata_backends.rs'
+      - 'server/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/sqlite-metadata.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'server/src/**'
+      - 'server/metadata-store/**'
+      - 'server/tests/sqlite_integration.rs'
+      - 'server/tests/metadata_backends.rs'
+      - 'server/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/sqlite-metadata.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Storage contracts (SQLite and sled)
+        run: cargo test --locked -p mcp-metadata-store --test contract
+      - name: SQLite consumers and real-server restart integration
+        run: cargo test --locked -p server --test metadata_backends --test sqlite_integration sqlite -- --test-threads=1

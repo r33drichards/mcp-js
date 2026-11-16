@@ -193,11 +193,16 @@ pub struct Cli {
     )]
     pub session_db_path: String,
 
-    /// Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled.
+    /// Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled.
     /// Covers session history, heap tags and filesystem labels, not Raft or
     /// the local execution registry. Incompatible with cluster mode.
     #[arg(long, env = "MCP_V8_DYNAMODB_TABLE", conflicts_with = "cluster_port", help_heading = "Core")]
     pub dynamodb_table: Option<String>,
+
+    /// SQLite metadata file for session history, heap tags and filesystem labels.
+    /// Parent directory must exist. Does not replace the Raft log or execution registry.
+    #[arg(long, env = "MCP_V8_SQLITE_PATH", conflicts_with_all = ["dynamodb_table", "cluster_port"], help_heading = "Core")]
+    pub sqlite_path: Option<String>,
 
     /// Isolation namespace within the DynamoDB metadata table.
     #[arg(long, env = "MCP_V8_DYNAMODB_NAMESPACE", default_value = "mcp-v8", help_heading = "Core")]
@@ -1207,6 +1212,15 @@ mod port_env_tests {
 mod dynamodb_cli_tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn sqlite_is_explicit_and_conflicts_with_other_metadata_modes() {
+        let cli = Cli::try_parse_from(["server", "--sqlite-path", "metadata.sqlite"]).unwrap();
+        assert_eq!(cli.sqlite_path.as_deref(), Some("metadata.sqlite"));
+        assert!(Cli::try_parse_from(["server", "--sqlite-path", "db", "--dynamodb-table", "table"]).is_err());
+        assert!(Cli::try_parse_from(["server", "--sqlite-path", "db", "--cluster-port", "4000"]).is_err());
+        assert!(Cli::try_parse_from(["server"]).unwrap().sqlite_path.is_none());
+    }
 
     #[test]
     fn dynamodb_is_explicit_and_conflicts_with_raft() {

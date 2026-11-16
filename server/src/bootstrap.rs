@@ -469,6 +469,7 @@ pub struct StorageBootstrapConfig {
     pub cache_dir: Option<String>,
     pub session_db_path: String,
     pub dynamodb_table: Option<String>,
+    pub sqlite_path: Option<String>,
     pub dynamodb_namespace: String,
     pub http_port: Option<u16>,
     pub execution_db_path: Option<String>,
@@ -493,6 +494,9 @@ pub async fn build_storage_engine(
     config: StorageBootstrapConfig,
     cluster_node: Option<Arc<ClusterNode>>,
 ) -> Result<RuntimeBootstrap> {
+    if config.sqlite_path.is_some() && (config.dynamodb_table.is_some() || cluster_node.is_some()) {
+        bail!("SQLite metadata cannot be combined with DynamoDB metadata or Raft cluster mode");
+    }
     if config.dynamodb_table.is_some() && cluster_node.is_some() {
         bail!("DynamoDB metadata and Raft cluster mode cannot be combined");
     }
@@ -561,7 +565,15 @@ async fn build_heap_storage(config: &StorageBootstrapConfig) -> Result<AnyHeapSt
     }
 }
 
-async fn dynamodb_metadata(config: &StorageBootstrapConfig, domain: &str) -> Result<Option<Arc<dyn mcp_metadata_store::MetadataStore>>> {
+async fn configured_metadata(config: &StorageBootstrapConfig, domain: &str) -> Result<Option<Arc<dyn mcp_metadata_store::MetadataStore>>> {
+    if let Some(path) = &config.sqlite_path {
+        let path = path.clone();
+        let namespace = domain.to_owned();
+        let store = tokio::task::spawn_blocking(move ||
+            mcp_metadata_store::SqliteStore::open(path, &namespace)
+        ).await?.map_err(|e| anyhow!(e))?;
+        return Ok(Some(Arc::new(store)));
+    }
     let Some(table) = &config.dynamodb_table else { return Ok(None); };
     let sdk = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let namespace = format!("{}/{domain}", config.dynamodb_namespace);
@@ -581,7 +593,7 @@ async fn attach_session_log(
     if !config.heap_enabled() && !config.fs_enabled() {
         return Ok(engine);
     }
-    let log = match if let Some(store) = dynamodb_metadata(config, "sessions").await? {
+    let log = match if let Some(store) = configured_metadata(config, "sessions").await? {
         Ok(SessionLog::from_store(store))
     } else { SessionLog::new(&config.session_db_path) } {
         Ok(log) => log,
@@ -594,7 +606,7 @@ async fn attach_session_log(
             return Ok(engine);
         }
     };
-    tracing::info!("Session log backend: {}", config.dynamodb_table.as_deref().unwrap_or(&config.session_db_path));
+    tracing::info!("Session log backend: {}", config.sqlite_path.as_deref().or(config.dynamodb_table.as_deref()).unwrap_or(&config.session_db_path));
     let log = if let Some(cluster_node) = cluster_node {
         tracing::info!("Session log will use Raft cluster for replication");
         log.with_cluster(cluster_node.clone())
@@ -616,11 +628,11 @@ async fn attach_heap_tags(
         return Ok(engine);
     }
     let path = format!("{}/heap-tags", config.session_db_path);
-    match if let Some(store) = dynamodb_metadata(config, "tags").await? {
+    match if let Some(store) = configured_metadata(config, "tags").await? {
         Ok(HeapTagStore::from_store(store))
     } else { HeapTagStore::new(&path) } {
         Ok(store) => {
-            tracing::info!("Heap tag backend: {}", config.dynamodb_table.as_deref().unwrap_or(&path));
+            tracing::info!("Heap tag backend: {}", config.sqlite_path.as_deref().or(config.dynamodb_table.as_deref()).unwrap_or(&path));
             let store = if let Some(cluster_node) = cluster_node {
                 store.with_cluster(cluster_node.clone())
             } else {
@@ -678,14 +690,14 @@ async fn attach_filesystem(
         Arc::new(FileHeapStorage::new(&store_dir))
     };
     let store = Arc::new(FsStore::new(backend));
-    match if let Some(store) = dynamodb_metadata(config, "labels").await? {
+    match if let Some(store) = configured_metadata(config, "labels").await? {
         Ok(LabelStore::from_store(store))
     } else { LabelStore::new(&labels_db) } {
         Ok(labels) => {
             tracing::info!(
                 "FS snapshots: ENABLED (blobs at {}, labels at {})",
                 store_dir,
-                config.dynamodb_table.as_deref().unwrap_or(&labels_db)
+                config.sqlite_path.as_deref().or(config.dynamodb_table.as_deref()).unwrap_or(&labels_db)
             );
             let labels = if let Some(cluster_node) = cluster_node {
                 tracing::info!("FS label writes will route through the Raft cluster leader");
@@ -772,6 +784,7 @@ mod tests {
             cache_dir: None,
             session_db_path: data_dir.to_string_lossy().into_owned(),
             dynamodb_table: None,
+            sqlite_path: None,
             dynamodb_namespace: "mcp-v8".into(),
             http_port: None,
             execution_db_path: None,

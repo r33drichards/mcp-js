@@ -1,5 +1,5 @@
 //! Application-level contract for the actual session/tag/label consumers.
-use mcp_metadata_store::{DynamoDbStore, MetadataStore, SledStore};
+use mcp_metadata_store::{DynamoDbStore, MetadataStore, SledStore, SqliteStore};
 use server::engine::{
     fs_labels::LabelStore,
     heap_tags::HeapTagStore,
@@ -112,6 +112,19 @@ async fn exercise(
         reopened.list().await.unwrap(),
         vec![("main".into(), [42; 32])]
     );
+}
+
+#[tokio::test]
+async fn sqlite_consumers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite");
+    let db = |namespace| -> Arc<dyn MetadataStore> {
+        Arc::new(SqliteStore::open(&path, namespace).unwrap())
+    };
+    exercise(db("sessions"), db("tags"), db("labels")).await;
+    let labels = LabelStore::from_store(db("labels"));
+    assert!(labels.resolve("main").await.unwrap().is_some());
+    assert_eq!(db("sessions").get("fs_label_heads", b"main").await.unwrap(), None);
 }
 
 #[tokio::test]

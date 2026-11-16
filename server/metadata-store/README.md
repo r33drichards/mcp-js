@@ -3,7 +3,51 @@
 `MetadataStore` is the asynchronous, binary-safe persistence boundary for
 mcp-js session histories, heap tags, and filesystem label heads/reflogs.
 `SledStore` preserves existing sled tree names/key/value encodings and remains
-the default. `DynamoDbStore` is an additional shared backend, not a replacement.
+the default. `SqliteStore` adds embedded SQLite and `DynamoDbStore` adds shared
+DynamoDB metadata.
+
+## SQLite configuration
+
+```sh
+mkdir -p ./data
+mcp-v8 --http-port 3000 --sqlite-path ./data/metadata.sqlite --fs-store dir
+```
+
+`MCP_V8_SQLITE_PATH` or `sqlite_path` in a TOML/JSON config file selects the same
+backend. The parent directory must exist; the database and schema are created
+on first use by an enabled persistence axis (`--heap-store` or `--fs-store`).
+Sessions, tags and labels use separate namespaces inside one database file.
+An open/schema error aborts startup instead of falling back to sled.
+
+SQLite uses a bundled library, WAL journaling, `synchronous=FULL`, and a five-second
+busy timeout. Async operations run on Tokio's blocking pool. CAS reserves the
+writer before comparing and commits the primary and companions in one transaction,
+including across independent connections. Binary BLOB keys preserve byte ordering.
+IDs are durable, namespace-scoped increasing positive integers up to `i64::MAX`;
+exhaustion is an error. Successful writes are already durable, so `flush` is a no-op.
+
+This is embedded, local SQLite, not rqlite. `--sqlite-path` conflicts with
+`--dynamodb-table` and `--cluster-port`; it does not change the app's sled-backed
+Raft log. Use a local filesystem that supports SQLite locking, and include the
+WAL in live backups or use SQLite's backup API. No automatic migration from sled
+is performed. The execution registry, console output, artifacts, scheduler and
+HTTP-function definitions still use their existing stores. Snapshot blobs still
+use the separately selected directory or S3 backend. FFI constructors retain sled
+as their default.
+
+```sh
+cargo test -p mcp-metadata-store --test contract sqlite
+cargo test -p server --test metadata_backends sqlite_consumers
+cargo test -p server --test sqlite_integration --locked -- --test-threads=1
+```
+
+The real-server integration suite spawns the compiled server binary with isolated
+local data. It executes JavaScript, persists heap references and restores session files after process
+restart, reads heap tags through MCP, checks session histories and label reflogs
+through HTTP, and verifies rejected label CAS writes no reflog entry. It also
+checks CLI/environment/config selection against the actual SQLite rows and
+invalid-path startup failure without sled fallback. These tests need neither
+Docker nor an external database and run in the SQLite metadata CI workflow.
 
 ## Server configuration
 

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1"
 sled = "0.34"
+rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 aws-sdk-dynamodb = "1"
 hex = "0.4"

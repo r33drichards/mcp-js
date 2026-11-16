@@ -401,3 +401,11 @@ heap tags, and filesystem label/reflog metadata. Sled remains the default;
 snapshot content stays in the independently selected S3/directory backend. See
 [metadata backends and integration tests](server/metadata-store/README.md) for table
 schema, IAM, limits, and LocalStack/Testcontainers setup.
+
+### Optional SQLite metadata backend
+
+Use `--sqlite-path ./data/metadata.sqlite` (or `MCP_V8_SQLITE_PATH`) for embedded
+SQLite session histories, heap tags, and filesystem labels/reflogs. Create the
+parent directory first and enable heap or filesystem persistence. This mode
+cannot be combined with `--cluster-port` or `--dynamodb-table`; other local stores
+still use sled. See [metadata backend configuration](server/metadata-store/README.md).
