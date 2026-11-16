@@ -58,6 +58,7 @@ impl Server {
             .arg("--fs-dir")
             .arg(dir.join("blobs"));
         match selection {
+            "sled" => {}
             "flag" => {
                 command.arg("--sqlite-path").arg(&database);
             }
@@ -100,18 +101,20 @@ impl Server {
         })
         .await
         .expect("server startup deadline");
-        assert!(
-            database.is_file(),
-            "bootstrap must create the selected database"
-        );
-        assert!(
-            !dir.join("local/heap-tags").exists(),
-            "tags must not fall back to sled"
-        );
-        assert!(
-            !dir.join("local/fs-labels").exists(),
-            "labels must not fall back to sled"
-        );
+        if selection != "sled" {
+            assert!(
+                database.is_file(),
+                "bootstrap must create the selected database"
+            );
+            assert!(
+                !dir.join("local/heap-tags").exists(),
+                "tags must not fall back to sled"
+            );
+            assert!(
+                !dir.join("local/fs-labels").exists(),
+                "labels must not fall back to sled"
+            );
+        }
         server
     }
 
@@ -190,6 +193,19 @@ impl Server {
             "{reply}"
         );
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn stop_for_restart(mut self) {
+        // Let sled close and flush its buffered metadata. This regression is
+        // about module identities across restart, not unflushed crash recovery.
+        let pid = self.child.id().expect("live child") as libc::pid_t;
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+        let status = timeout(Duration::from_secs(10), self.child.wait())
+            .await
+            .expect("graceful shutdown deadline")
+            .unwrap();
+        assert!(status.success(), "graceful server shutdown: {status}");
     }
 
     async fn stop(mut self) {
@@ -390,4 +406,61 @@ async fn sqlite_open_failure_aborts_server_without_sled_fallback() {
         !dir.path().join("local").exists(),
         "failed explicit selection must not open sled"
     );
+}
+
+// The process-local entry-module counter used to reset to main_0.js on each
+// restart, colliding with an entry already present in the saved module map.
+#[cfg(unix)]
+async fn heap_restore_roundtrip(selection: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start(dir.path(), selection).await;
+    let first = server
+        .execute(json!({"session":"roundtrip", "fs":"main",
+        "code":"globalThis.counter = 41; await fs.writeFile('/note.txt', 'heap-roundtrip');"}))
+        .await;
+    assert!(first["heap"].is_string(), "{first}");
+    server.stop_for_restart().await;
+
+    let server = Server::start(dir.path(), selection).await;
+    // Explicit handle after process restart, then implicit session restore in
+    // the same process. Every call takes another snapshot of the restored heap.
+    for (expected, explicit) in [(41, true), (42, false)] {
+        let mut body = json!({"session":"roundtrip", "code": format!(
+            "if (counter !== {expected}) throw new Error('counter lost: ' + counter); \
+             if (await fs.readFile('/note.txt', 'utf8') !== 'heap-roundtrip') throw new Error('fs lost'); \
+             counter++; export const __mcp_http_result = JSON.stringify({{ counter }});"
+        )});
+        if explicit {
+            body["heap"] = first["heap"].clone();
+        }
+        let result = server.execute(body).await;
+        let value: Value = serde_json::from_str(result["result"].as_str().unwrap()).unwrap();
+        assert_eq!(value["counter"], expected + 1);
+        assert!(result["heap"].is_string());
+    }
+    server.stop_for_restart().await;
+
+    let server = Server::start(dir.path(), selection).await;
+    let last = server.execute(json!({"session":"roundtrip", "code":
+        "if (counter !== 43) throw new Error('second restart lost counter'); counter++; export const __mcp_http_result = JSON.stringify({ counter });"})).await;
+    let value: Value = serde_json::from_str(last["result"].as_str().unwrap()).unwrap();
+    assert_eq!(value["counter"], 44);
+    let history = server.get("/api/sessions/roundtrip/snapshots").await;
+    assert_eq!(history.as_array().unwrap().len(), 4);
+    for pair in history.as_array().unwrap().windows(2) {
+        assert_eq!(pair[1]["input_heap"], pair[0]["output_heap"]);
+    }
+    server.stop_for_restart().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sqlite_heap_restore_survives_repeated_server_restarts() {
+    heap_restore_roundtrip("flag").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sled_heap_restore_survives_repeated_server_restarts() {
+    heap_restore_roundtrip("sled").await;
 }

@@ -127,3 +127,13 @@ DYNAMODB_TEST_ENDPOINT=http://127.0.0.1:8000 \
 
 The backend test crate does not link V8. It follows the disposable-emulator
 approach described in [AWS Builder's LocalStack/Testcontainers guide](https://builder.aws.com/content/2dxWQAZsdc3dk5uCILAmNqEME2e/testing-dynamodb-interactions-using-localstack-and-testcontainers).
+
+### Heap restoration regression
+
+The real-server suite also restores V8 heaps with both SQLite and default sled
+metadata. On Unix, each backend crosses two graceful process restarts, uses an explicit heap handle
+and automatic session resolution, checks accumulated JavaScript state and mounted
+file contents, and verifies the recorded input/output heap chain. Generated entry
+module URLs must remain unique across processes because their module registrations
+are retained in the heap snapshot. The CI command runs this entire test binary,
+including the sled regression.

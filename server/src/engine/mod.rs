@@ -811,10 +811,6 @@ pub fn inject_wasm_modules(
 // `run_js` for async timeout via `tokio::select!`).
 // Tests and fuzz targets pass a no-op handle.
 
-/// Global counter for unique module URLs, avoiding conflicts when restoring
-/// from a V8 heap snapshot that already has a registered module.
-static MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
 #[derive(Clone, Copy, Debug)]
 pub enum CompileMode {
     CommonJs,
@@ -939,7 +935,10 @@ fn execute_module(
         ModuleSpecifier::parse(specifier)
             .map_err(|e| format!("invalid main module specifier: {}", e))?
     } else {
-        let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Snapshots retain the module map across process restarts and hosts.
+        // A process-local counter can reuse a saved entry's URL, corrupting
+        // deno_core's name/handle mapping when the next snapshot is taken.
+        let id = uuid::Uuid::new_v4();
         ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
             .map_err(|e| format!("internal specifier error: {}", e))?
     };
