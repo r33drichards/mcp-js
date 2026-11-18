@@ -33,12 +33,13 @@ use rmcp::service::Peer;
 
 /// Authentication configuration for HTTP-based MCP server connections.
 ///
-/// Only available via `--mcp-config` JSON file (too complex for CLI flags).
-/// HTTP and SSE connections fail closed until OAuth runtime support is added;
-/// stdio connections continue to use their existing process transport.
+/// Available via structured JSON/TOML configuration, not compact CLI flags.
+/// Bearer file references and browser OAuth are supported for HTTP transport.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpServerAuth {
+    /// Read a bearer token from an existing secret mount at connection time.
+    Bearer { token_file: String },
     /// Interactive browser OAuth 2.1 authorization-code flow configuration.
     OauthBrowser {
         #[serde(default)]
@@ -57,6 +58,10 @@ pub enum McpServerAuth {
 impl std::fmt::Debug for McpServerAuth {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Bearer { token_file } => formatter
+                .debug_struct("Bearer")
+                .field("token_file", token_file)
+                .finish(),
             Self::OauthBrowser {
                 scope,
                 client_id,
@@ -108,8 +113,18 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
-    /// Reject auth-bearing network transports until their OAuth runtime exists.
+    /// Validate transport/auth compatibility without reading secret contents.
     pub fn validate_for_connection(&self) -> Result<(), String> {
+        if let Some(McpServerAuth::Bearer { token_file }) = &self.auth {
+            let McpServerTransport::Http { url } = &self.transport else {
+                return Err(format!(
+                    "MCP server '{}': bearer auth requires HTTP transport",
+                    self.name
+                ));
+            };
+            return super::mcp_bearer::validate_reference(&self.name, url, token_file);
+        }
+
         if self.auth.is_none() {
             return Ok(());
         }
@@ -707,6 +722,39 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             })
         }
         McpServerTransport::Http { url } => {
+            if let Some(McpServerAuth::Bearer { token_file }) = &config.auth {
+                use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+                let client =
+                    super::mcp_bearer::BearerHttpClient::from_file(&config.name, url, token_file)?;
+                // Never put token bytes in the transport config: its Debug
+                // implementation includes auth_header verbatim.
+                let transport = rmcp::transport::StreamableHttpClientTransport::with_client(
+                    client,
+                    StreamableHttpClientTransportConfig::with_uri(url.clone()),
+                );
+                let service: rmcp::service::RunningService<RoleClient, ()> =
+                    ().serve(transport).await.map_err(|_| {
+                        format!(
+                            "MCP server '{}': bearer-authenticated handshake failed",
+                            config.name
+                        )
+                    })?;
+                let peer = service.peer().clone();
+                let tools = peer.list_all_tools().await.map_err(|_| {
+                    format!(
+                        "MCP server '{}': bearer-authenticated tool listing failed",
+                        config.name
+                    )
+                })?;
+                let keep_alive = tokio::spawn(async move {
+                    let _ = service.waiting().await;
+                });
+                return Ok(ConnectedMcpServer {
+                    peer,
+                    tools,
+                    _keep_alive: keep_alive.abort_handle(),
+                });
+            }
             let oauth = match &config.auth {
                 Some(McpServerAuth::OauthBrowser {
                     scope,
@@ -721,7 +769,7 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                     *redirect_port,
                     token_cache.as_deref(),
                 )),
-                None => None,
+                Some(McpServerAuth::Bearer { .. }) | None => None,
             };
             let mut retried_unauthorized = false;
 

@@ -21,6 +21,7 @@ pub mod heap_storage;
 pub mod heap_tags;
 pub mod hooks;
 pub mod http2;
+mod mcp_bearer;
 pub mod mcp_client;
 pub mod mcp_oauth;
 pub mod module_loader;

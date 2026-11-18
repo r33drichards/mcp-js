@@ -474,7 +474,7 @@ through `mcp.callTool()` and `mcp.listTools()`. Configure it with
 ]
 ```
 
-`type` must be `oauth_browser`. Every other `auth` property is optional:
+For browser OAuth, `type` is `oauth_browser`. Every other `auth` property is optional:
 
 - `scope` is an array of requested OAuth scopes.
 - `client_id` and `client_secret` select a pre-registered client. Omitting
@@ -518,6 +518,24 @@ reauthorization; successful authorization may replace the cache securely. To
 disconnect and revoke access, revoke the grant at the authorization provider
 and delete `token_cache` (or its default path). The next connection requires
 authorization again.
+
+### Bearer authentication from a mounted secret
+
+For non-interactive HTTP downstreams, configure
+`"auth": {"type":"bearer","token_file":"/var/run/secrets/weechat/token"}`.
+The path is absolute and references an existing readable regular file; projected
+Kubernetes Secret symlinks are supported. Only the path is serialized, never the
+token bytes. The file must hold one RFC 6750 token, without a `Bearer ` prefix,
+optionally followed by one LF/CRLF, and no more than 64 KiB. Read failures or
+invalid contents fail closed before connecting. Tokens reload on connection or
+reconnect, not on every request. Use a read-only mount and restart/reconnect
+after rotation. No Kubernetes API access or secret creation is performed.
+
+This auth mode requires HTTP transport. Redirects are never followed, even to
+the same origin. Explicit internal HTTP Service URLs are allowed but send the
+token in plaintext; use HTTPS outside trusted networks. Userinfo and fragments
+in endpoint URLs are rejected. See the [root README](../README.md#bearer-tokens-from-secret-files)
+for a complete configuration example.
 
 ### Claude for Desktop
 
