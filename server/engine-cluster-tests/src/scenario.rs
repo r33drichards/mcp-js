@@ -847,8 +847,10 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
         let deadline = tokio::time::Instant::now()
             + Duration::from_millis(sc.recovery.deadline_ms.min(3000));
         for retry in 0..5 {
+            eprintln!("[SCENARIO_PROBE] pre retry={retry} now={} deadline={} budget={}", now_ms(start), deadline.duration_since(tokio::time::Instant::now()).as_millis(), sc.recovery.deadline_ms);
             if retry > 0 {
                 tokio::time::sleep(Duration::from_millis(200)).await;
+                eprintln!("[SCENARIO_PROBE] post-sleep now={} deadline={}", now_ms(start), deadline.duration_since(tokio::time::Instant::now()).as_millis());
                 if tokio::time::Instant::now() >= deadline { break; }
             }
             let iteration = sc.workload.count + retry;
@@ -898,6 +900,7 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
                 _ => {}
             }
             events.push(ScenarioEvent::Respond { at_ms: now_ms(start), op_id, node: target.clone(), outcome });
+            eprintln!("[SCENARIO_PROBE] exit retry={retry} acked={fresh_write_acked} terminal={terminal_failure}");
             if fresh_write_acked || terminal_failure { break; }
         }
     }
