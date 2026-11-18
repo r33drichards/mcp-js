@@ -59,3 +59,12 @@ The root-path discovery regression passed with Rust 1.93.1; removing the
 implementation while retaining the regression made it fail at the missing
 patched-source assertion. Final result JSON is also printed in job logs so
 measurements remain reviewable when artifact downloads are unavailable.
+
+A local native-resolution audit with Rust/Cargo 1.93.1 found the same 595
+server-reachable packages but different feature sets: the plugin additionally
+enables reqwest 0.12.28 `blocking` and schemars 0.8.22 `chrono`/`uuid1`;
+Cargo additionally reports chrono 0.4.44 `js-sys`/`wasm-bindgen`/`windows-link`.
+The CI-produced resolver graph and Crane's build-time tree remain the final
+comparison evidence. Timings for these workloads are diagnostic and cannot
+establish a framework-only speed difference. No feature-semantics patch is
+applied to conceal these differences.

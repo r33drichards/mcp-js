@@ -1,7 +1,7 @@
-diff --git a/rust/src/lockfile_resolve/manifest.rs b/rust/src/lockfile_resolve/manifest.rs
+diff --git a/src/lockfile_resolve/manifest.rs b/src/lockfile_resolve/manifest.rs
 index 7f91d63..8202797 100644
---- a/rust/src/lockfile_resolve/manifest.rs
-+++ b/rust/src/lockfile_resolve/manifest.rs
+--- a/src/lockfile_resolve/manifest.rs
++++ b/src/lockfile_resolve/manifest.rs
 @@ -233,6 +233,17 @@ pub(super) fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest
      for m in &members {
          enqueue(&mut queue, m);
