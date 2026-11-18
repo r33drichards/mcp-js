@@ -2,7 +2,7 @@
 //! back to the MCP client: images, audio, CSVs, JSON, arbitrary binary.
 //!
 //! JS calls `artifact(key, mime, bytes)` to store (or overwrite) an artifact
-//! under a caller-chosen key. Server registries store artifact payloads in S3,
+//! under a caller-chosen key. Server registries store artifact payloads in S3 or files,
 //! with references in the runtime tree (`"artifacts"`), so they can be fetched
 //! later with the `get_artifact` MCP tool. The flow also runs the other way:
 //! a client asks the `get_artifact_upload_url` MCP tool for a one-time URL,

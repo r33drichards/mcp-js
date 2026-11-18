@@ -497,7 +497,7 @@ Remove `globalThis.SharedArrayBuffer` + `globalThis.Atomics` — the high-resolu
 
 ### `s3_bucket`
 
-S3 bucket for artifact and console payloads, and snapshot axes selecting `s3`. Required to persist artifacts or console output, or use `--heap-store s3` / `--fs-store s3`
+S3 bucket for artifact and console payloads (otherwise stored on disk), and snapshot axes selecting `s3`. Required for `--heap-store s3` or `--fs-store s3`
 
 - CLI flag: `--s3-bucket`
 - Environment: `MCP_V8_S3_BUCKET`

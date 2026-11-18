@@ -14,7 +14,7 @@ Use a checkout containing the DynamoDB runtime changes from PR #306.
 | Storage | Contents |
 | --- | --- |
 | DynamoDB | Session history, filesystem labels, heap tags, execution records, console pages, artifact records and upload grants |
-| S3 | Content-addressed filesystem snapshots; all artifact and console payloads; heap snapshots if separately enabled |
+| S3 | Content-addressed filesystem snapshots; artifact and console payloads when S3 is configured; heap snapshots if separately enabled |
 | Lambda `/tmp` | Disposable process-local files; never the source of truth |
 
 `--fs-store s3` provides a **virtual filesystem through the JavaScript `fs`
