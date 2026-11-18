@@ -12,6 +12,11 @@ on:
       - 'server/src/**'
       - 'server/tests/**'
   workflow_dispatch:
+    inputs:
+      measure_source_rebuild:
+        description: Measure source invalidation (always run the complete tests)
+        type: boolean
+        default: true
 permissions:
   contents: read
 concurrency:
@@ -56,6 +61,7 @@ jobs:
       - name: Measure artifact builds, test coverage and invalidation
         env:
           STORE_CACHE_RESTORED: ${{ steps.cache.outputs.restored-key }}
+          MEASURE_SOURCE_REBUILD: ${{ github.event_name != 'workflow_dispatch' || inputs.measure_source_rebuild }}
         run: python3 scripts/ci/compare-nix-builds.py --implementation crane --results "$RUNNER_TEMP/build-comparison"
       - name: Preserve valid dependency builds after an integration failure
         if: failure()
