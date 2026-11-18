@@ -6,6 +6,15 @@ artifact/console payloads from their database references. This document does not
 implement new formats, change configuration, enable SQLite-backed Raft, or claim
 stronger consistency than the existing cluster provides.
 
+## Implementation progress
+
+The first implementation extracts `metadata_store::blob::BlobStorage`, keeps
+`HeapStorage` and `RuntimeBlobs` as compatibility names, shares backend
+construction across storage domains, and adds immutable-write contracts for
+memory/directory/S3 plus authoritative-first cache writes. Existing object keys
+and reference formats are unchanged. Content IDs, publication semantics and the
+Raft metadata adapter follow in dependent changes.
+
 ## Problem and direction
 
 Heap snapshots, filesystem snapshots, and runtime payloads share a useful write
