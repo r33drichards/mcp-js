@@ -96,6 +96,12 @@
           }.${system};
         };
 
+        cargoNixBenchmark = import ./nix/experiments/cargo-nix.nix {
+          inherit system rustToolchain rustyV8Archive;
+          source = ./.;
+          projectInputs = [ nixpkgs rust-overlay flake-utils ];
+        };
+
         docsTools = rustPlatform.buildRustPackage {
           pname = "mcp-js-docs-tools";
           version = "0.1.0";
@@ -203,6 +209,13 @@
           doCheck = false;
           meta.mainProgram = "mcp-js-scheduler-runner";
         };
+
+        packages.benchmark-config = cargoNixBenchmark.config;
+        packages.benchmark-nix = cargoNixBenchmark.nix;
+        packages.benchmark-plugin = cargoNixBenchmark.plugin;
+        packages.benchmark-source-roots = cargoNixBenchmark.sourceRoots;
+        packages.benchmark-tests = cargoNixBenchmark.tests;
+        packages.benchmark-runner = cargoNixBenchmark.runner;
 
         packages.default = rustPlatform.buildRustPackage {
           pname = "mcp-js-server";

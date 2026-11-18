@@ -1,0 +1,67 @@
+name: Nix build framework comparison
+on:
+  pull_request:
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/experiments/**'
+      - 'scripts/ci/**'
+      - '.github/workflows/build-cache-comparison.yml'
+      - 'Cargo.lock'
+      - 'server/Cargo.toml'
+      - 'server/src/**'
+      - 'server/tests/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-framework-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  comparison:
+    name: Compare cargo-nix
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use an isolated Cargo index cache
+        run: echo "CARGO_HOME=$RUNNER_TEMP/comparison-cargo" >> "$GITHUB_ENV"
+      - name: Free space for V8-linked test artifacts
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+            max-jobs = 2
+            cores = 2
+      - name: Restore framework build store
+        id: cache
+        uses: nix-community/cache-nix-action@d8cff2f74b9341e0d90fbf3c0c0212a161ceaef6 # v6
+        with:
+          primary-key: build-compare-v1-cargo-nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'nix/experiments/**', 'scripts/ci/**', 'server/src/**', 'server/tests/**') }}
+          restore-prefixes-first-match: build-compare-v1-cargo-nix-${{ runner.os }}-${{ runner.arch }}-
+          gc-max-store-size-linux: 3G
+          paths: ${{ runner.temp }}/comparison-cargo
+      - name: Reject unsuccessful extraction
+        if: steps.cache.outputs.hit == 'true'
+        env:
+          RESTORED_KEY: ${{ steps.cache.outputs.restored-key }}
+        run: test -n "$RESTORED_KEY"
+      - name: Measure artifact builds, test coverage and invalidation
+        env:
+          STORE_CACHE_RESTORED: ${{ steps.cache.outputs.restored-key }}
+        run: python3 scripts/ci/compare-nix-builds.py --implementation cargo-nix --results "$RUNNER_TEMP/build-comparison"
+      - name: Upload comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-comparison-cargo-nix-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-comparison
+          if-no-files-found: warn
+          retention-days: 7
