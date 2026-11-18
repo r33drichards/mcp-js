@@ -1,6 +1,9 @@
 //! Synchronous runtime metadata adapter. A dedicated I/O thread owns the async
 //! runtime, so callers inside V8 or Tokio never nest `block_on`.
-use crate::{MetadataStore, Result, Row, Write};
+use crate::{
+    MetadataStore, Result, Row, Write,
+    content::{ContentObjects, ObjectKind, ObjectRef},
+};
 use std::sync::{Arc, mpsc};
 
 type Job = Box<dyn FnOnce(&tokio::runtime::Runtime, &Arc<dyn MetadataStore>) + Send>;
@@ -85,21 +88,38 @@ impl RuntimeStore {
             tree
         }
     }
-    fn put_payload(&self, value: Vec<u8>) -> Result<Vec<u8>> {
+    fn put_object(&self, kind: ObjectKind, value: Vec<u8>) -> Result<ObjectRef> {
         let blobs = self.blobs.clone();
         self.call(move |rt, _| {
             wait(rt, async {
-                let blobs =
-                    blobs.ok_or("blob storage is required for artifacts and console output")?;
-                let name = format!("runtime/{}", uuid::Uuid::new_v4());
-                blobs.put(&name, &value).await?;
-                let mut reference = PAYLOAD_REFERENCE.to_vec();
-                reference.extend_from_slice(name.as_bytes());
-                Ok(reference)
+                ContentObjects::new(blobs.ok_or("blob storage is required for runtime payloads")?)
+                    .put(kind, &value)
+                    .await
             })
         })
     }
+    fn get_object(&self, reference: ObjectRef) -> Result<Vec<u8>> {
+        let blobs = self.blobs.clone();
+        self.call(move |rt, _| {
+            wait(rt, async {
+                ContentObjects::new(
+                    blobs.ok_or("blob storage is required to read runtime payloads")?,
+                )
+                .get(&reference)
+                .await
+            })
+        })
+    }
+    fn put_payload(&self, kind: ObjectKind, value: Vec<u8>) -> Result<Vec<u8>> {
+        let reference = self.put_object(kind, value)?;
+        let mut bytes = CONTENT_REFERENCE.to_vec();
+        bytes.extend(reference.encode());
+        Ok(bytes)
+    }
     fn read_payload(&self, value: Vec<u8>) -> Result<Vec<u8>> {
+        if let Some(bytes) = value.strip_prefix(CONTENT_REFERENCE) {
+            return self.get_object(ObjectRef::decode(bytes)?);
+        }
         let Some(name) = value.strip_prefix(PAYLOAD_REFERENCE) else {
             // Existing inline records remain readable; new writes never use this form.
             return Ok(value);
@@ -132,6 +152,7 @@ pub enum RuntimeTree {
     Payload {
         metadata: Box<RuntimeTree>,
         store: RuntimeStore,
+        kind: ObjectKind,
     },
 }
 impl From<sled::Tree> for RuntimeTree {
@@ -154,6 +175,7 @@ fn decode(value: Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
         _ => Err("invalid runtime metadata envelope".into()),
     }
 }
+const CONTENT_REFERENCE: &[u8] = b"\0mcp-runtime-content-v1\0";
 const PAYLOAD_REFERENCE: &[u8] = b"\0mcp-runtime-blob-v1\0";
 async fn decode_value(
     value: Option<Vec<u8>>,
@@ -200,15 +222,51 @@ impl RuntimeTree {
     }
     /// Store every payload in blob storage, publishing its database reference only after upload succeeds.
     pub fn with_payload_store(self, store: RuntimeStore) -> Self {
+        let artifact = match &self {
+            Self::Remote { name, .. } => name == "artifacts",
+            Self::Local(tree) => tree.name().as_ref() == b"artifacts",
+            Self::Payload { kind, .. } => *kind == ObjectKind::Artifact,
+        };
         Self::Payload {
             metadata: Box::new(self),
             store,
+            kind: if artifact {
+                ObjectKind::Artifact
+            } else {
+                ObjectKind::ConsolePage
+            },
+        }
+    }
+    pub fn has_objects(&self) -> bool {
+        matches!(self, Self::Payload { .. })
+    }
+    pub fn put_object(&self, kind: ObjectKind, value: &[u8]) -> Result<ObjectRef> {
+        match self {
+            Self::Payload { store, .. } => store.put_object(kind, value.to_vec()),
+            _ => Err("runtime object storage unavailable".into()),
+        }
+    }
+    pub fn get_object(&self, reference: ObjectRef) -> Result<Vec<u8>> {
+        match self {
+            Self::Payload { store, .. } => store.get_object(reference),
+            _ => Err("runtime object storage unavailable".into()),
+        }
+    }
+    pub fn insert_metadata(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
+        match self {
+            Self::Payload { metadata, .. } => {
+                metadata.insert(key, value)?;
+                metadata.flush_local()
+            }
+            _ => self.insert(key, value),
         }
     }
     pub fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
         let key = key.as_ref().to_vec();
         match self {
-            Self::Payload { metadata, store } => metadata
+            Self::Payload {
+                metadata, store, ..
+            } => metadata
                 .get(key)?
                 .map(|v| store.read_payload(v))
                 .transpose(),
@@ -231,8 +289,12 @@ impl RuntimeTree {
         let key = key.as_ref().to_vec();
         let value = value.as_ref().to_vec();
         match self {
-            Self::Payload { metadata, store } => {
-                metadata.insert(key, store.put_payload(value)?)?;
+            Self::Payload {
+                metadata,
+                store,
+                kind,
+            } => {
+                metadata.insert(key, store.put_payload(*kind, value)?)?;
                 metadata.flush_local()
             }
             Self::Local(t) => t.insert(key, value).map(|_| ()).map_err(|e| e.to_string()),
@@ -268,12 +330,16 @@ impl RuntimeTree {
     ) -> Result<std::result::Result<(), ()>> {
         let key = key.as_ref().to_vec();
         let ok = match self {
-            Self::Payload { metadata, store } => {
+            Self::Payload {
+                metadata,
+                store,
+                kind,
+            } => {
                 let current = metadata.get(&key)?;
                 if current.clone().map(|v| store.read_payload(v)).transpose()? != old {
                     return Ok(Err(()));
                 }
-                let replacement = new.map(|v| store.put_payload(v)).transpose()?;
+                let replacement = new.map(|v| store.put_payload(*kind, v)).transpose()?;
                 let ok = metadata
                     .compare_and_swap(key, current, replacement)?
                     .is_ok();
@@ -309,7 +375,9 @@ impl RuntimeTree {
     }
     pub fn iter(&self) -> std::vec::IntoIter<Result<Row>> {
         let rows: Result<Vec<Row>> = match self {
-            Self::Payload { metadata, store } => metadata
+            Self::Payload {
+                metadata, store, ..
+            } => metadata
                 .iter()
                 .map(|row| {
                     let (key, value) = row?;

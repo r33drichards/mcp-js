@@ -413,6 +413,14 @@ fn runtime_sled_contract() {
 struct TestBlobs(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
 #[async_trait::async_trait]
 impl mcp_metadata_store::runtime_tree::RuntimeBlobs for TestBlobs {
+    async fn put_immutable(&self, name: &str, value: &[u8]) -> Result<(), String> {
+        let mut objects = self.0.lock().unwrap();
+        match objects.get(name) {
+            Some(existing) if existing != value => Err("immutable conflict".into()),
+            Some(_) => Ok(()),
+            None => { objects.insert(name.into(), value.to_vec()); Ok(()) }
+        }
+    }
     async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> {
         self.0.lock().unwrap().insert(name.into(), value.to_vec()); Ok(())
     }
@@ -536,4 +544,20 @@ async fn runtime_payloads_always_use_blobs_and_metadata_never_spills() {
     assert!(db.get("artifacts", b"missing").await.unwrap().is_none());
     blobs.0.lock().unwrap().clear();
     assert!(store.tree("artifacts").get(b"key").is_err());
+}
+
+#[tokio::test(flavor="current_thread")]
+async fn legacy_uuid_and_dynamodb_blob_references_remain_readable() {
+    use mcp_metadata_store::{RuntimeStore,Write};
+    let backend=Arc::new(TestBlobs::default());
+    let db=Arc::new(SledStore(sled::Config::new().temporary(true).open().unwrap()));
+    let name="runtime/legacy-object";
+    mcp_metadata_store::blob::BlobStorage::put(backend.as_ref(),name,b"old payload").await.unwrap();
+    let mut inline=vec![1];inline.extend(b"\0mcp-runtime-blob-v1\0");inline.extend(name.as_bytes());
+    db.put(Write::new("artifacts",b"uuid",inline)).await.unwrap();
+    let mut old_ddb=vec![2];old_ddb.extend(name.as_bytes());
+    db.put(Write::new("artifacts",b"ddb",old_ddb)).await.unwrap();
+    let tree=RuntimeStore::new(db).unwrap().with_blobs(backend).tree("artifacts");
+    assert_eq!(tree.get(b"uuid").unwrap(),Some(b"old payload".to_vec()));
+    assert_eq!(tree.get(b"ddb").unwrap(),Some(b"old payload".to_vec()));
 }

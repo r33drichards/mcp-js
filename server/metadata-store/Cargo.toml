@@ -10,6 +10,8 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 aws-sdk-dynamodb = "1"
 hex = "0.4"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

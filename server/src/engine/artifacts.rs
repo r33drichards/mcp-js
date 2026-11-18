@@ -137,6 +137,8 @@ struct StoredHeader {
     created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload: Option<mcp_metadata_store::content::ObjectRef>,
 }
 
 impl ArtifactStore {
@@ -156,10 +158,15 @@ impl ArtifactStore {
     ) -> Result<ArtifactMeta, String> {
         validate(key, mime_type, bytes.len())?;
 
+        let payload = if self.tree.has_objects() {
+            Some(self.tree.put_object(mcp_metadata_store::content::ObjectKind::Artifact, bytes)?)
+        } else { None }; // Explicit raw-tree callers retain legacy encodings.
+        let inline = payload.is_none();
         let header = StoredHeader {
             mime_type: mime_type.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             execution_id: execution_id.map(str::to_string),
+            payload,
         };
         let header_json = serde_json::to_vec(&header)
             .map_err(|e| format!("artifact: failed to encode header: {}", e))?;
@@ -167,10 +174,10 @@ impl ArtifactStore {
         let mut value = Vec::with_capacity(4 + header_json.len() + bytes.len());
         value.extend_from_slice(&(header_json.len() as u32).to_be_bytes());
         value.extend_from_slice(&header_json);
-        value.extend_from_slice(bytes);
+        if inline { value.extend_from_slice(bytes); }
 
         self.tree
-            .insert(key.as_bytes(), value)
+            .insert_metadata(key.as_bytes(), value)
             .map_err(|e| format!("artifact: failed to store '{}': {}", key, e))?;
 
         Ok(ArtifactMeta {
@@ -192,10 +199,12 @@ impl ArtifactStore {
             return Ok(None);
         };
         let (meta, payload_start) = decode_header(key, &value)?;
-        Ok(Some(Artifact {
-            meta,
-            bytes: value[payload_start..].to_vec(),
-        }))
+        let header: StoredHeader = serde_json::from_slice(&value[4..payload_start]).map_err(|e|e.to_string())?;
+        let bytes = match header.payload {
+            Some(reference) => self.tree.get_object(reference)?,
+            None => value[payload_start..].to_vec(),
+        };
+        Ok(Some(Artifact { meta, bytes }))
     }
 
     /// List metadata for all stored artifacts, sorted by key.
@@ -280,7 +289,7 @@ fn decode_header(key: &str, value: &[u8]) -> Result<(ArtifactMeta, usize), Strin
         ArtifactMeta {
             key: key.to_string(),
             mime_type: header.mime_type,
-            size_bytes: (value.len() - payload_start) as u64,
+            size_bytes: header.payload.as_ref().map(|r|r.size_bytes).unwrap_or((value.len() - payload_start) as u64),
             created_at: header.created_at,
             execution_id: header.execution_id,
         },

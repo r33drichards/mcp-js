@@ -58,3 +58,5 @@ pub mod runtime_tree;
 pub use runtime_tree::{RuntimeStore, RuntimeTree};
 
 pub mod blob;
+
+pub mod content;
