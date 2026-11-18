@@ -53,10 +53,13 @@ tasks. The response includes `status`, `fs`, `execution_id`, and bounded console
 Keep the host's request timeout above the execution and storage deadlines.
 Waiting is bounded to 305 seconds; `wait_timed_out: true` preserves the original
 execution ID and is **not** permission to replay a possibly completed write.
-Execution IDs and console registries remain process-local: use the inline
-response and durable snapshot/session handles across cold starts, not a later
-request's ability to recover an old execution ID. For durable serverless files,
+With `--dynamodb-table`, completed execution records and console output can be
+read by a fresh process; running isolates and cancellation handles remain
+process-local. Without a shared metadata backend, do not rely on another
+process recovering an execution ID. For durable serverless files,
 combine `--fs-store s3` with `--dynamodb-table` and leave `--cache-dir` unset.
+See the [Lambda deployment tutorial](../tutorials/lambda-dynamodb.md) for image,
+IAM, invocation and recovery steps.
 
 ```json
 {"tool":"run_js","arguments":{"code":"console.log(await fs.readFile('/work/state.txt', 'utf8'))","wait":true}}
@@ -339,3 +342,19 @@ A denied operation returns an error before any pointer move happens. See [Polici
 - [How-to: Heap storage backends](storage-backends.md)
 - [How-to: Clustering & replication (Raft)](clustering.md)
 - [Concepts: Policies](../concepts/policies.md)
+
+### Runtime bookkeeping on DynamoDB
+
+Selecting `--dynamodb-table` also stores execution records, console pages,
+artifact records and upload grants in a separate `/runtime` namespace. The
+execution registry does not open a local sled database in this mode. Completed
+records and console output can be queried from a fresh process. In-flight V8
+isolates and cancellation handles remain process-local; durable metadata does
+not resume interrupted JavaScript or enable cross-process cancellation.
+
+Use `run_js` with `wait: true` on Lambda. Final metadata is acknowledged before
+that request completes, and storage failures are returned as errors. Values
+larger than 128 KiB are stored as immutable S3 blobs with DynamoDB references;
+configure `--s3-bucket` for those values. Replaced/unreferenced runtime blobs are
+not swept by filesystem GC; retain them until a dedicated runtime retention
+policy is configured. Runtime metadata currently has no automatic expiry.

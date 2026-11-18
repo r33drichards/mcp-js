@@ -91,6 +91,7 @@ def main() -> int:
         ("/install/overview/", ["Install"]),
         ("/reference/http-api/", ["HTTP API"]),
         ("/reference/mcp-tools/", ["MCP Tools"]),
+        ("/tutorials/lambda-dynamodb/", ["Deploy mcp-js on Lambda", "Prove recovery", "wait: true"]),
     ]
 
     handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(*a, directory=str(site_dir), **kw)

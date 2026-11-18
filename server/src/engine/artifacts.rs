@@ -128,7 +128,7 @@ impl Artifact {
 /// the metadata (mime type, timestamp, writing execution).
 #[derive(Clone)]
 pub struct ArtifactStore {
-    tree: sled::Tree,
+    tree: mcp_metadata_store::RuntimeTree,
 }
 
 #[derive(Serialize, serde::Deserialize)]
@@ -140,7 +140,8 @@ struct StoredHeader {
 }
 
 impl ArtifactStore {
-    pub fn new(tree: sled::Tree) -> Self {
+    pub fn new(tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
+        let tree = tree.into();
         Self { tree }
     }
 
@@ -324,11 +325,12 @@ pub struct UploadGrant {
 /// Sled-backed store of outstanding upload grants, keyed by token.
 #[derive(Clone)]
 pub struct UploadGrants {
-    tree: sled::Tree,
+    tree: mcp_metadata_store::RuntimeTree,
 }
 
 impl UploadGrants {
-    pub fn new(tree: sled::Tree) -> Self {
+    pub fn new(tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
+        let tree = tree.into();
         Self { tree }
     }
 
