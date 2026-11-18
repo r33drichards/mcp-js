@@ -1,0 +1,26 @@
+name: Set up cached Rust
+description: Select the native Rust toolchain and cache a declared Cargo workspace.
+inputs:
+  shared-key:
+    description: Compatible build/workspace family.
+    required: true
+  workspaces:
+    description: Cargo workspace to target-directory mappings.
+    default: '. -> target'
+  components:
+    description: Additional Rust components, such as rustfmt and clippy.
+    default: ''
+  toolchain:
+    description: Rust release used by the job.
+    default: '1.99.0'
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+    - uses: ./.github/actions/rust-cache
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        workspaces: ${{ inputs.workspaces }}

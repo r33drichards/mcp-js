@@ -3,13 +3,13 @@ on:
   pull_request:
     paths:
       - 'scheduler-core/**'
-      - '.github/actions/rust-cache/**'
+      - '.github/actions/**'
       - '.github/workflows/scheduler-core.yml'
   push:
     branches: ['impl/scheduler-*']
     paths:
       - 'scheduler-core/**'
-      - '.github/actions/rust-cache/**'
+      - '.github/actions/**'
       - '.github/workflows/scheduler-core.yml'
 permissions:
   contents: read
@@ -26,13 +26,11 @@ jobs:
         working-directory: scheduler-core
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.99.0
-        with:
-          components: rustfmt, clippy
-      - uses: ./.github/actions/rust-cache
+      - uses: ./.github/actions/setup-rust
         with:
           shared-key: native-scheduler-core
           workspaces: scheduler-core -> target
+          components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings

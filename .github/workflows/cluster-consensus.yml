@@ -5,7 +5,7 @@ on:
       - 'server/src/cluster*'
       - 'server/tests/cluster*'
       - 'server/cluster-tests/**'
-      - '.github/actions/rust-cache/**'
+      - '.github/actions/**'
       - '.github/workflows/cluster-consensus.yml'
   push:
     branches: [main]
@@ -13,7 +13,7 @@ on:
       - 'server/src/cluster*'
       - 'server/tests/cluster*'
       - 'server/cluster-tests/**'
-      - '.github/actions/rust-cache/**'
+      - '.github/actions/**'
       - '.github/workflows/cluster-consensus.yml'
 # New commits supersede older PR runs; independent branch pushes stay independent.
 concurrency:
@@ -25,10 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.99.0'
-      - uses: ./.github/actions/rust-cache
+      - uses: ./.github/actions/setup-rust
         with:
           shared-key: native-cluster
           workspaces: server/cluster-tests -> target

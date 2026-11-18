@@ -16,19 +16,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+      - uses: ./.github/actions/setup-nix-shell
         with:
+          shared-key: nix-release-cli
           extra-conf: |
             sandbox = relaxed
 
-      - uses: DeterminateSystems/flake-checker-action@main
-
-      - name: Build server binary
-        run: nix develop --command bash -c "cargo build --release -p server && cp target/release/server server-bin"
-
-      - name: Build CLI binary
-        run: nix develop --command bash -c "cargo build --release -p mcp-v8-client --bin mcp-v8-cli && cp target/release/mcp-v8-cli cli-bin"
+      - name: Build server and CLI binaries together
+        run: |
+          nix develop "$MCP_CI_NIX_PROFILE" --command cargo build --locked --release \
+            -p server -p mcp-v8-client --bin server --bin mcp-v8-cli
+          cp target/release/server server-bin
+          cp target/release/mcp-v8-cli cli-bin
 
       - name: Run bash CLI E2E tests
         run: |
@@ -68,7 +67,7 @@ jobs:
         # Each test starts its own server, so no external server is needed here.
         # SERVER_BIN points to the pre-built release binary built above.
         run: |
-          nix develop --command bash -c "
+          nix develop "$MCP_CI_NIX_PROFILE" --command bash -c "
             SERVER_BIN=\$(pwd)/server-bin \
             cargo test --test cli_e2e -p mcp-v8-client -- --test-threads=4 --nocapture
           "

@@ -1,83 +1,102 @@
-# Rust test CI caching
+# Shared CI environments and caching
 
-## Evidence and scope
+## Measurements
 
-In PR #322's cluster run [43810178836](https://github.com/r33drichards/mcp-js/actions/runs/43810178836),
-engine-harness compilation took 3m20s and the six scenario tests took 6.82s.
-The interrupted-publish test failed its convergence assertion; caching does not
-fix that correctness failure. The non-V8 cluster command took about 41s including
-compilation. The broader Test run
-[43810178710](https://github.com/r33drichards/mcp-js/actions/runs/43810178710)
-spent about five minutes in its separate server-build step before starting tests.
-These are cold-build observations, not measured warm-cache improvements.
+The native SQLite job improved from **5m39s to 2m59s** on the same commit
+([cold](https://github.com/r33drichards/mcp-js/actions/runs/43811816228/attempts/1),
+[warm](https://github.com/r33drichards/mcp-js/actions/runs/43811816228/attempts/2)).
+Both runs executed the same ten passing tests; queue time is excluded.
 
-This change is based on main at `29c55599`. Main does not yet contain the separate
-`server/engine-cluster-tests` workspace from the simulation stack. When that stack
-lands, add a cache step for that workspace using the shared action, before its
-existing test command:
+The Nix comparison was **10m40s versus 10m34s**, effectively unchanged
+([baseline](https://github.com/r33drichards/mcp-js/actions/runs/43814318323/attempts/1),
+[rerun](https://github.com/r33drichards/mcp-js/actions/runs/43814318323/attempts/2)).
+The rerun found the cache but failed to extract root-owned `/nix/store` paths
+with permission errors, then downloaded dependencies again. A cache lookup hit
+is not proof of a successful restore. These measurements precede the shared
+single-user Nix setup below; no new performance improvement is claimed yet.
+
+The general Nix suite also spends substantial time executing tests: its baseline
+compiled for 2m52s, then ran tests for more than five minutes, including 102s in
+`wpt_subset_matches_expectations`. Caching cannot remove that execution time.
+
+## Native Rust jobs
+
+Use `setup-rust` after checkout. It installs the pinned toolchain action and
+calls the shared dependency-cache action; each job declares only its build family,
+workspace mapping and optional lint components:
 
 ```yaml
-- uses: ./.github/actions/rust-cache
+- uses: ./.github/actions/setup-rust
+  with:
+    shared-key: native-server
+    components: rustfmt
+```
+
+Root server jobs share `native-server`. Independent cluster/core/runner workspaces
+use separate keys and target mappings. For the engine workspace on the simulation
+stack (not yet on this main baseline), use:
+
+```yaml
+- uses: ./.github/actions/setup-rust
   with:
     shared-key: native-engine-cluster
     workspaces: server/engine-cluster-tests -> target
 ```
 
-## What is cached
+## Nix Rust jobs
 
-The shared action wraps a commit-pinned Swatinem/rust-cache. It caches Cargo
-registry/git downloads, compiled dependency artifacts, and rusty_v8's archive
-cache. It saves compiled dependencies even after test failures. It does not skip
-tests, cache test results, or cache project test executables/incremental outputs.
-Cargo checks fingerprints and recompiles invalid dependencies normally.
+Use `setup-nix-shell` after checkout, as the Test and CLI workflows do:
 
-Native server workflows share `native-server`; standalone cluster/core/runner
-workspaces use their own keys and target-directory mappings. Compiler version,
-OS/architecture, manifests/lockfiles and relevant build environment contribute to
-the action's automatic cache keys. Dependency changes can reuse a compatible
-fallback and Cargo rebuilds what changed. Incompatible toolchains still miss.
+```yaml
+- uses: ./.github/actions/setup-nix-shell
+- run: nix develop "$MCP_CI_NIX_PROFILE" --command cargo test --locked -p server -- --test-threads=1
+```
 
-The main Test workflow keeps Nix. Its Cargo cache identifies Rust through
-`nix develop --command {0}`, with a distinct key including the Nix shell inputs,
-so runner Rust and Nix Rust artifacts cannot accidentally share a cache. The
-Nix store has its own commit-pinned cache action; its versioned key tracks
-flake.lock, flake.nix and shell.nix. Before using the shell, `nix develop --profile`
-creates a GC root under RUNNER_TEMP that lives through the cache action's post-job
-save. CI verifies that the actual rustc and rusty_v8 store paths are in Nix's live
-set. Without this profile, pre-save GC can delete the shell and Rust toolchain,
-leaving a successfully uploaded but ineffective cache. The v2 key excludes those
-older incomplete cache entries. The 3 GiB pre-save GC target is not a hard cache
-size limit when the rooted shell closure exceeds it.
+This action owns the installer, store cache, GC roots, verification, and Cargo
+cache. It installs a runner-owned single-user Nix store using the installer
+recommended by cache-nix-action, so restoring store archives does not require
+writing root-owned paths. A found-but-not-restored cache fails explicitly.
 
-Caches are scoped by GitHub's branch/PR rules. The first run is cold; main runs
-seed caches that PRs can restore. Caches created inside one PR are not generally
-available to sibling PRs. Compatible parallel jobs may race to save the same
-immutable key; the first save wins. This is safe but its cache may not contain
-every dependency feature combination. A later run can still compile missing
-artifacts. Cache eviction/restore/upload time must be included in measurements.
+`prepare.sh` roots both the development environment and recursively archived
+flake sources; pre-save GC must retain the Rust compiler, V8 archive and flake
+inputs. Keeping only a shell profile can still discard the sources needed to
+evaluate its flake. The live-path check covers both sets. The v3 cache namespace
+excludes the older root-owned/incomplete entries. Cache keys track OS/architecture,
+flake/shell inputs and the setup implementation. The pre-save 3 GiB GC target is
+not a hard size limit if live roots exceed it.
 
-## Avoiding repeated work
+The prepared profile is exported once as `MCP_CI_NIX_PROFILE` and is also an action
+output. Subsequent Cargo cache probes, builds and test commands enter that profile
+directly, avoiding repeated flake evaluation. Nix officially supports reusing a
+recorded environment with `nix develop /path/to/profile`. Debug server jobs and
+release CLI jobs use separate Cargo cache families; native Rust artifacts never
+share a key with Nix Rust artifacts. The CLI builds only the two required binaries
+in one Cargo invocation, rather than also building the server's docs generators.
 
-- `cargo test -p server` already builds the application binary and test targets,
-  so the main workflow no longer runs a separate `cargo build` first.
-- Cargo prints captured output for failed tests. The workflow stores that output
-  as an artifact instead of automatically executing the entire suite again.
-  Bash pipefail preserves the test exit status through `tee`.
-- The native HTTP/SQLite/cluster/runner workflows run feature branches through
-  pull_request and main through push, avoiding duplicate push+PR builds.
-- New commits cancel superseded PR runs within the same workflow/event/PR.
-  Main pushes are not cancelled. Test commands, coverage and serial V8 settings
-  are preserved. Scheduler-core retains its existing push-branch policy.
-- Path-filtered workflows include shared-action changes, so edits to cache setup
-  are actually validated by their consumers.
+The store-cache action's post-job save runs while the profile/source roots are
+still alive. Never delete those roots in an earlier cleanup step.
 
-## Measuring after merge
+## Cache and test boundaries
 
-Compare a cold run and a second run with unchanged toolchain/lockfiles: inspect
-cache hit/fallback logs, compilation duration, actual test duration and cache
-save/restore duration. Report observed differences instead of promising a speedup.
-Only consider nextest/sharding or more test threads after execution time becomes
-the bottleneck; multiple shards otherwise duplicate expensive compilation, and
-existing V8/port-sensitive tests still need serialization. Nix package/VM builds
-in other workflows need their own Nix-store/binary-cache work; a Cargo cache alone
-does not speed them up.
+The underlying commit-pinned Rust cache stores Cargo registry/git downloads,
+compiled dependencies and rusty_v8 archives, including after test failures. It
+does not cache test results or project test executables/incremental outputs.
+Cargo still validates fingerprints and compiles changed or missing dependencies.
+
+GitHub cache scope/eviction rules apply. Main runs seed caches available to PRs;
+a PR's cache is not generally available to sibling PRs. Parallel compatible jobs
+may race for an immutable cache key: the first save wins and may contain fewer
+feature combinations. Missing artifacts still compile normally. The first run
+for a new namespace is cold. Include restore/upload overhead in comparisons.
+
+Native path-filtered workflows validate shared-action changes. Superseded PR
+runs are cancelled, and feature branches use PR checks instead of duplicate
+push+PR runs where configured. Main pushes remain independent. Test commands and
+serial V8 settings are retained. The main workflow records failed-test output
+instead of automatically rerunning the entire suite; Bash pipefail preserves the
+failure status through `tee`.
+
+Pure Nix package/VM jobs are outside this action's scope: they need their own
+rooted output/binary-cache setup, not an unnecessary Rust development shell.
+Measure the shared setup on cold and warm runs before claiming a speedup. Consider
+safe test grouping/sharding separately for the remaining execution time.
