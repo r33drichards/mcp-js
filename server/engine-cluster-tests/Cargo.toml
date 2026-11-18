@@ -25,6 +25,7 @@ tinystr = "=0.8.1"
 sled = "0.34"
 deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "4a09194d0fb8dbe062fe066d82d7ad6bcaa4f39a" }
 tokio = { version = "1", features = ["full"] }
+turmoil = "=0.7.2"
 server = { path = ".." }
 
 [dev-dependencies]
