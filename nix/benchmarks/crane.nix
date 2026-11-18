@@ -17,6 +17,16 @@ let
     pname = "mcp-js-crane-benchmark";
     version = "0.1.0";
     cargoExtraArgs = "--locked -p server";
+    # Crane packages every crate in each Git workspace, including unused dcore.
+    # That upstream manifest declares a missing README; supply existing root docs
+    # before cargo package enumerates files. No compiled dependency code changes.
+    overrideVendorGitCheckout = packages: drv:
+      if pkgs.lib.any (package: pkgs.lib.hasInfix "r33drichards/deno_core" package.source) packages
+      then drv.overrideAttrs (old: {
+        preInstall = (old.preInstall or "") + ''
+          if [ ! -e dcore/README.md ]; then cp README.md dcore/README.md; fi
+        '';
+      }) else drv;
     CARGO_PROFILE = "dev";
     CARGO_INCREMENTAL = "0";
     CARGO_TARGET_DIR = "target";
