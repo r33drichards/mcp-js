@@ -9,11 +9,8 @@ pub struct RuntimeStore {
     tx: mpsc::Sender<Job>,
     blobs: Option<Arc<dyn RuntimeBlobs>>,
 }
-#[async_trait::async_trait]
-pub trait RuntimeBlobs: Send + Sync {
-    async fn put(&self, name: &str, value: &[u8]) -> Result<()>;
-    async fn get(&self, name: &str) -> Result<Vec<u8>>;
-}
+/// Compatibility alias for the shared named-blob interface.
+pub use crate::blob::BlobStorage as RuntimeBlobs;
 impl RuntimeStore {
     pub fn new(store: Arc<dyn MetadataStore>) -> Result<Self> {
         Self::from_factory(async move { Ok((store, None)) })

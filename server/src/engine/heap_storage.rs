@@ -7,39 +7,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
-#[async_trait]
-pub trait HeapStorage: Send + Sync + 'static {
-    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String>;
-    async fn get(&self, name: &str) -> Result<Vec<u8>, String>;
-
-    /// List every blob name in the backend. Used by fs snapshot GC. Backends
-    /// that cannot enumerate return an error (GC is then unavailable on them).
-    async fn list(&self) -> Result<Vec<String>, String> {
-        Err("list is not supported by this storage backend".to_string())
-    }
-
-    /// Delete a blob by name. Used by fs snapshot GC sweep.
-    async fn delete(&self, _name: &str) -> Result<(), String> {
-        Err("delete is not supported by this storage backend".to_string())
-    }
-
-    /// Whether a blob is present in this backend's *local* layer. Cheap by
-    /// default only where it can be (a local file/memory store); the generic
-    /// fallback actually fetches. Used by `warm` to skip already-local blobs.
-    async fn contains(&self, name: &str) -> Result<bool, String> {
-        Ok(self.get(name).await.is_ok())
-    }
-
-    /// Ensure a blob is materialized in this backend's local layer so a later
-    /// `get` does not have to cross to a remote backend (or another tokio
-    /// runtime). On a write-through cache this populates the local cache from
-    /// the primary; on a purely-local backend it is a no-op. Pre-staging fs
-    /// blobs via `warm` on the main runtime is what lets the isolate's
-    /// current-thread ops read them without awaiting remote I/O.
-    async fn warm(&self, name: &str) -> Result<(), String> {
-        self.get(name).await.map(|_| ())
-    }
-}
+/// Compatibility name for the shared blob backend used by heaps, filesystems and runtime payloads.
+pub use mcp_metadata_store::blob::BlobStorage as HeapStorage;
 
 /// In-memory blob backend. Primarily for tests and the `FsStore::in_memory`
 /// constructor, but kept in the normal build so integration test crates (which
@@ -57,6 +26,15 @@ impl MemoryHeapStorage {
 
 #[async_trait]
 impl HeapStorage for MemoryHeapStorage {
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let mut map = self.map.lock().unwrap();
+        match map.get(name) {
+            Some(existing) if existing != data => Err("immutable object conflict".into()),
+            Some(_) => Ok(()),
+            None => { map.insert(name.into(), data.to_vec()); Ok(()) }
+        }
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         self.map
             .lock()
@@ -103,6 +81,43 @@ impl FileHeapStorage {
 
 #[async_trait]
 impl HeapStorage for FileHeapStorage {
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        use std::io::Write;
+        // Content keys are relative paths; never escape the configured root.
+        if std::path::Path::new(name).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err("invalid immutable object key".into());
+        }
+        let path = self.dir.join(name);
+        let parent = path.parent().ok_or("invalid object parent")?;
+        std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;
+        let temp = parent.join(format!(".object-{}", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+                .open(&temp).map_err(|e|e.to_string())?;
+            file.write_all(data).map_err(|e|e.to_string())?;
+            file.sync_all().map_err(|e|e.to_string())?;
+            match std::fs::hard_link(&temp, &path) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if std::fs::read(&path).map_err(|e|e.to_string())? != data {
+                        return Err("immutable object conflict".into());
+                    }
+                    std::fs::File::open(&path).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+            // Sync directory entries back through the root, including newly
+            // created ancestors. A file sync alone does not persist its name.
+            for directory in parent.ancestors() {
+                let directory = if directory.as_os_str().is_empty() { std::path::Path::new(".") } else { directory };
+                std::fs::File::open(directory).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(temp);
+        result
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         let path = self.dir.join(name);
         if let Some(parent) = path.parent() {
@@ -186,12 +201,12 @@ impl S3HeapStorage {
             s3_builder = s3_builder.force_path_style(true);
         }
 
-        let client = S3Client::from_conf(s3_builder.build());
-        Self {
-            bucket: bucket.into(),
-            client: Arc::new(client),
-            runtime: tokio::runtime::Handle::current(),
-        }
+        Self::from_client(bucket, S3Client::from_conf(s3_builder.build()))
+    }
+
+    /// Explicit clients support embedders and isolated endpoint contract tests.
+    pub fn from_client(bucket: impl Into<String>, client: S3Client) -> Self {
+        Self { bucket: bucket.into(), client: Arc::new(client), runtime: tokio::runtime::Handle::current() }
     }
 
     async fn put_blocking(&self, name: &str, data: &[u8]) -> Result<(), String> {
@@ -240,6 +255,27 @@ impl S3HeapStorage {
 
 #[async_trait]
 impl HeapStorage for S3HeapStorage {
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let name = name.to_owned();
+        let data = data.to_vec();
+        self.runtime.spawn(async move {
+            match client.put_object().bucket(&bucket).key(&name).if_none_match("*")
+                .body(ByteStream::from(data.clone())).send().await {
+                Ok(_) => Ok(()),
+                Err(error) if error.raw_response().is_some_and(|r|r.status().as_u16() == 412) => {
+                    let existing = client.get_object().bucket(&bucket).key(&name).send().await
+                        .map_err(|e|format!("immutable object verification: {e}"))?
+                        .body.collect().await.map_err(|e|e.to_string())?.into_bytes();
+                    if existing.as_ref() == data.as_slice() { Ok(()) }
+                    else { Err("immutable object conflict".into()) }
+                }
+                Err(e) => Err(format!("immutable S3 write: {e}")),
+            }
+        }).await.map_err(|e|e.to_string())?
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         self.put_blocking(name, data).await
     }
@@ -343,10 +379,19 @@ impl<P: HeapStorage + Clone> WriteThroughCacheHeapStorage<P> {
 
 #[async_trait]
 impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.primary.put_immutable(name, data).await?;
+        // The primary is durable; an unavailable cache must not invalidate it.
+        if self.cache.put(name, data).await.is_ok() {
+            self.note_cached(name, data.len() as u64).await;
+        }
+        Ok(())
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
-        // Write-through: write to both FS cache and primary
-        self.cache.put(name, data).await?;
+        // Never let a failed authoritative write become a cache hit.
         self.primary.put(name, data).await?;
+        self.cache.put(name, data).await?;
         self.note_cached(name, data.len() as u64).await;
         Ok(())
     }
@@ -409,6 +454,14 @@ pub enum AnyHeapStorage {
 
 #[async_trait::async_trait]
 impl HeapStorage for AnyHeapStorage {
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        match self {
+            Self::File(inner) => inner.put_immutable(name, data).await,
+            Self::S3(inner) => inner.put_immutable(name, data).await,
+            Self::S3WithFsCache(inner) => inner.put_immutable(name, data).await,
+        }
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         match self {
             AnyHeapStorage::File(inner) => inner.put(name, data).await,
@@ -438,14 +491,29 @@ impl HeapStorage for AnyHeapStorage {
         }
     }
 }
-/// Adapt the heap blob design for runtime payloads without duplicating its clients.
+/// Compatibility adapter; new callers can use the shared blob backend directly.
 pub struct RuntimeHeapStorage<T: HeapStorage>(pub T);
 #[async_trait]
-impl<T: HeapStorage> mcp_metadata_store::runtime_tree::RuntimeBlobs for RuntimeHeapStorage<T> {
-    async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> {
-        self.0.put(name, value).await
-    }
-    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
-        self.0.get(name).await
+impl<T: HeapStorage> HeapStorage for RuntimeHeapStorage<T> {
+    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> { self.0.put(name, data).await }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> { self.0.get(name).await }
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> { self.0.put_immutable(name, data).await }
+}
+
+/// Shared construction used by all storage domains; callers retain their own
+/// enablement and directory defaults. Creating an S3 client must happen on the
+/// runtime that will perform its I/O.
+pub enum BlobBackendConfig {
+    Directory { path: PathBuf },
+    S3 { bucket: String, cache_dir: Option<PathBuf> },
+}
+impl BlobBackendConfig {
+    pub async fn build(self) -> AnyHeapStorage {
+        match self {
+            Self::Directory { path } => AnyHeapStorage::File(FileHeapStorage::new(path)),
+            Self::S3 { bucket, cache_dir: Some(path) } => AnyHeapStorage::S3WithFsCache(
+                WriteThroughCacheHeapStorage::new(S3HeapStorage::new(bucket).await, path)),
+            Self::S3 { bucket, cache_dir: None } => AnyHeapStorage::S3(S3HeapStorage::new(bucket).await),
+        }
     }
 }

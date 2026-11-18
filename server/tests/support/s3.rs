@@ -35,16 +35,19 @@ impl S3 {
         async fn put(
             State(objects): State<Objects>,
             OriginalUri(uri): OriginalUri,
+            headers: axum::http::HeaderMap,
             body: Bytes,
         ) -> Response {
             if objects.fail_put.load(Ordering::SeqCst) {
                 return StatusCode::FORBIDDEN.into_response();
             }
-            objects
-                .values
-                .lock()
-                .unwrap()
-                .insert(uri.path().into(), body.to_vec());
+            let mut values = objects.values.lock().unwrap();
+            if headers.get("if-none-match").is_some_and(|h| h == "*")
+                && values.contains_key(uri.path())
+            {
+                return StatusCode::PRECONDITION_FAILED.into_response();
+            }
+            values.insert(uri.path().into(), body.to_vec());
             (StatusCode::OK, [("etag", "\"test\"")]).into_response()
         }
         async fn fetch(State(objects): State<Objects>, OriginalUri(uri): OriginalUri) -> Response {

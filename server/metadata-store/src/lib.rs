@@ -56,3 +56,5 @@ pub trait MetadataStore: Send + Sync {
 
 pub mod runtime_tree;
 pub use runtime_tree::{RuntimeStore, RuntimeTree};
+
+pub mod blob;
