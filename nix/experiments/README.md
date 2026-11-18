@@ -40,7 +40,22 @@ First CI attempt (run 44231511512) validated Nix/runtime and plugin bootstrap,
 but failed the independent index check: upstream prefetch silently skipped
 swc_core's 16.9 MB sparse index because ureq defaults to a 10 MB body limit.
 The experiment patches only the prefetch utility to a bounded 64 MiB read;
-the plugin/resolver remains unmodified. The config records this patch and the
+that first fix preserved the plugin/resolver. The config records this patch and the
 check remains mandatory. No server build or warm-cache result came from that
 failed run. Its bootstrap measurements were runtime 43.275 s and plugin
 189.475 s; these are integration diagnostics, not full benchmark results.
+
+Second CI attempt (44232394638) passed prefetch and its independent check,
+then the unmodified native resolver rejected the repository's existing
+root [patch.crates-io] url path: upstream discovers member dependency path
+edges but omits root patch paths. The trial adds an explicit resolver patch
+that only seeds those path overrides into the existing source-discovery
+queue. It includes a regression for a source-less local override with no
+member path edge. Application manifests, lockfile and vendored url content
+remain unchanged. benchmark-config records both upstream patches. The native
+resolver also unifies resolver-2 host/target features as a conservative
+superset; this is another reason feature parity remains unverified.
+The root-path discovery regression passed with Rust 1.93.1; removing the
+implementation while retaining the regression made it fail at the missing
+patched-source assertion. Final result JSON is also printed in job logs so
+measurements remain reviewable when artifact downloads are unavailable.

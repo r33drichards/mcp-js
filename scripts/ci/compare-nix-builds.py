@@ -207,3 +207,4 @@ finally:
     original_file.write_bytes(original_bytes)
     report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     save()
+    print(result_file.read_text(), flush=True)

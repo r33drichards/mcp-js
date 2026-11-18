@@ -16,10 +16,20 @@ let
         '.read_to_vec()' '.with_config().limit(64 * 1024 * 1024).read_to_vec()'
     '';
   });
+  # Native lockfile mode does not discover root [patch.*] path sources.
+  # Add source discovery only; preserve application manifests and features.
+  resolverRustPlatform = pkgs.rustPlatform // {
+    buildRustPackage = args: pkgs.rustPlatform.buildRustPackage (args // {
+      patches = (args.patches or [ ]) ++ [ ./cargo-nix-root-path-patches.patch ];
+    });
+  };
+  resolverPlugin = pluginFlake.packages.${system}.cargo-nix-plugin.override {
+    rustPlatform = resolverRustPlatform;
+  };
   plugin = pkgs.buildEnv {
     name = "cargo-nix-benchmark-bootstrap";
     paths = [
-      pluginFlake.packages.${system}.cargo-nix-plugin
+      resolverPlugin
       pluginFlake.packages.${system}.build-rust-crate-bin
       prefetch
     ];
@@ -89,7 +99,9 @@ let
     cargo_lock_sha256 = builtins.hashFile "sha256" (source + "/Cargo.lock");
     upstream_revision = "00f311abab999b4ad4c7f3fa3d85bb17beb91aee";
     prefetch_patch = "ureq-body-limit-64MiB";
+    resolver_patch = "discover-root-patch-paths";
     resolver_scope = "all-workspace-roots";
+    feature_resolution = "resolver2-host-target-unified-superset";
     feature_parity = "unverified";
   });
   tests = cargoNix.workspaceMembers.server.doctest.overrideAttrs (old: {

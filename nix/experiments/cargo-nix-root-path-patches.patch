@@ -1,0 +1,64 @@
+diff --git a/rust/src/lockfile_resolve/manifest.rs b/rust/src/lockfile_resolve/manifest.rs
+index 7f91d63..8202797 100644
+--- a/rust/src/lockfile_resolve/manifest.rs
++++ b/rust/src/lockfile_resolve/manifest.rs
+@@ -233,6 +233,17 @@ pub(super) fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest
+     for m in &members {
+         enqueue(&mut queue, m);
+     }
++    // Root path patches are also source-less Cargo.lock packages, even
++    // when no member dependency spells the override as a path edge.
++    if let Some(registries) = root_toml.get("patch").and_then(toml::Value::as_table) {
++        for overrides in registries.values().filter_map(toml::Value::as_table) {
++            for dependency in overrides.values() {
++                if let Some(path) = dependency.get("path").and_then(toml::Value::as_str) {
++                    queue.push((workspace_root.to_path_buf(), path.to_string()));
++                }
++            }
++        }
++    }
+     while let Some((referrer_dir, rel)) = queue.pop() {
+         // Lexical normalize (not canonicalize): `manifest_dir` must share a
+         // textual prefix with `workspace_root` for lib/default.nix's
+@@ -781,6 +792,41 @@ fn expand_glob(base: &Path, pattern: &str) -> Vec<PathBuf> {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn root_path_patch_is_discovered_without_a_member_path_edge() {
++        let tmp = tempfile::tempdir().unwrap();
++        let root = tmp.path();
++        std::fs::create_dir_all(root.join("app/src")).unwrap();
++        std::fs::create_dir_all(root.join("vendor/url/src")).unwrap();
++        std::fs::write(root.join("Cargo.toml"), r#"
++[workspace]
++members = ["app"]
++[patch.crates-io]
++url = { path = "vendor/url" }
++"#).unwrap();
++        std::fs::write(root.join("app/Cargo.toml"), r#"
++[package]
++name = "app"
++version = "0.1.0"
++edition = "2021"
++[dependencies]
++url = "2.5.8"
++"#).unwrap();
++        std::fs::write(root.join("vendor/url/Cargo.toml"), r#"
++[package]
++name = "url"
++version = "2.5.8"
++edition = "2021"
++"#).unwrap();
++        std::fs::write(root.join("app/src/lib.rs"), "").unwrap();
++        std::fs::write(root.join("vendor/url/src/lib.rs"), "").unwrap();
++        let workspace = super::parse_workspace(root).unwrap();
++        assert_eq!(workspace.members.len(), 1);
++        let patched = workspace.path_deps.get("url").expect("root path patch must be discovered");
++        assert_eq!(patched.version, "2.5.8");
++        assert_eq!(std::path::Path::new(&patched.manifest_dir), root.join("vendor/url"));
++    }
++
+     use super::*;
+ 
+     #[test]
