@@ -233,7 +233,7 @@ fn fresh_write_requires_a_post_recovery_ack_not_an_old_commit() {
     scenario.workload.count = 1;
     scenario.faults = vec![Fault::Partition {
         at_ms: 900,
-        groups: vec![vec!["n0".into()], vec!["n1".into()], vec!["n2".into()]],
+        groups: vec![vec!["current_leader".into()], vec!["n0".into()], vec!["n1".into()], vec!["n2".into()]],
     }];
     scenario.recovery.heal_all = false;
     scenario.recovery.deadline_ms = 600;
@@ -243,4 +243,22 @@ fn fresh_write_requires_a_post_recovery_ack_not_an_old_commit() {
     assert!(result.events.iter().any(|event| matches!(event,
         ScenarioEvent::Assert { name, passed: false, .. } if name == "FreshWriteSucceeds"
     )), "an old ack cannot prove fresh progress: {:?}", result.events);
+}
+
+#[test]
+fn fixed_name_partition_isolates_all_three_voters() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.faults = vec![Fault::Partition {
+        at_ms: 900,
+        groups: vec![vec!["n0".into()], vec!["n1".into()], vec!["n2".into()]],
+    }];
+    scenario.asserts = vec![Assertion::ReplicasConvergeAfterRecovery];
+    let result = scenario.run_and_dump("fixed-name-partition");
+    let links: Vec<_> = result.events.iter().filter_map(|event| match event {
+        ScenarioEvent::Partition { a, b, .. } => Some(format!("{a}-{b}")),
+        _ => None,
+    }).collect();
+    assert_eq!(links, ["n0-n1", "n0-n2", "n1-n2"], "all named voters must be isolated");
 }
