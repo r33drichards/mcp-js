@@ -131,6 +131,12 @@ diskless runtime. FFI constructors keep their existing sled defaults.
 
 For deployment steps, see the [Lambda tutorial](../../site-docs/tutorials/lambda-dynamodb.md).
 
+## Shared storage architecture proposal
+
+See the [content-addressed storage design](../../docs/content-addressed-storage-design.md)
+for a proposed shared object/publication layer and optional Raft metadata adapter.
+It is a design sketch; the current backend and cluster restrictions still apply.
+
 ## Semantics and limits
 
 - Point reads and queries are strongly consistent. A multi-page traversal is not
