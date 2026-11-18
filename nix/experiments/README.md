@@ -77,3 +77,21 @@ that scanner was the only path outside server, and none were missing. The
 workflow also preserves valid intermediate Nix builds after a failed attempt
 so later integration fixes can reuse completed dependencies; failed test
 verdicts are never cached or treated as successful.
+
+Durable fixture paths currently embed the full tracked source tree. Unrelated
+tracked documentation/workflow edits can therefore change that store path
+and invalidate root artifacts. A production cache design should narrow the
+fixture source closure and align cache keys/triggers with all retained inputs,
+including root tools. This trial measures a deliberate server-source change;
+it does not establish optimal invalidation behavior for unrelated edits.
+
+The fifth run compiled the actual harnesses and captured doctests, then the
+example adapter hit a Python environment-merge error: the captured recipe
+already contained CARGO_BIN_NAME. The merge now overrides both binary/crate
+names explicitly. A reproducible adapter unit regression exercises the real
+compile_example function with a mock compiler, a prepopulated binary name,
+and checks its source/argv/environment/output contract; it is not a substitute
+for the Rust build. Run it with `python3 -m unittest discover -s nix/experiments`.
+That failed CI attempt successfully saved valid dependencies: 11,055,888,024
+store bytes compressed to 3,103,598,059 bytes, in roughly 107 seconds. The next
+attempt is therefore a restored-dependency trial, not another cold build.

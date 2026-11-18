@@ -87,7 +87,8 @@ def compile_example():
     if len(inputs) != 1:
         raise SystemExit("Cannot identify the server input for example parity compilation")
     args[inputs[0]] = str(Path(recipe["source"]) / "server/examples/node_compat_full.rs")
-    env = dict(os.environ, **recipe["env"], CARGO_BIN_NAME="node_compat_full")
+    env = {**os.environ, **recipe["env"], "CARGO_BIN_NAME": "node_compat_full",
+           "CARGO_CRATE_NAME": "node_compat_full"}
     subprocess.run([recipe["compiler"], *args], env=env, check=True)
 
 

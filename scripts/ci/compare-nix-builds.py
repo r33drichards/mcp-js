@@ -106,13 +106,19 @@ def inventory(tests):
     wanted_examples = {t['name'] for t in expected['targets'] if 'example' in t['kind']}
     if actual_examples != wanted_examples or found.get('doctests') is not True:
         raise RuntimeError('Example/doctest coverage does not match baseline')
+    binary_sizes = {}
     for target in found['targets'] + found['example_targets']:
         path = Path(target['path'])
         if not path.is_absolute():
             path = tests / path
         if not path.is_file():
             raise RuntimeError(f'Missing compiled target: {target["name"]}: {path}')
-    report['inventory'] = {'runtime_targets': len(actual), 'examples': sorted(actual_examples), 'doctests': True}
+        binary_sizes[target['path']] = path.stat().st_size
+    report['inventory'] = {
+        'runtime_targets': len(actual), 'examples': sorted(actual_examples), 'doctests': True,
+        'runtime_binary_bytes': sum(binary_sizes[t['path']] for t in found['targets']),
+        'example_binary_bytes': sum(binary_sizes[t['path']] for t in found['example_targets']),
+    }
     (out / 'compiled-targets.json').write_text(json.dumps(found, indent=2))
     save()
 
