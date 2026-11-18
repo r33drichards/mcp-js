@@ -119,6 +119,8 @@ pub struct Workload {
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum Op {
     RunJs { node: String, program: Program },
+    /// Broader JS track: no exact filesystem oracle is claimed.
+    RunJsUnmodeled { node: String, source: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,6 +171,7 @@ pub enum Assertion {
     ReplicasConvergeAfterRecovery,
     PublishedSnapshotMatchesModel,
     FreshWriteSucceeds,
+    NoUnexpectedJsFailure,
 }
 
 impl Program {
@@ -196,6 +199,8 @@ impl Op {
         match self {
             Op::RunJs { node, .. } if node == "leader" => leader.to_string(),
             Op::RunJs { node, .. } => node.clone(),
+            Op::RunJsUnmodeled { node, .. } if node == "leader" => leader.to_string(),
+            Op::RunJsUnmodeled { node, .. } => node.clone(),
         }
     }
 }
@@ -228,6 +233,19 @@ impl Scenario {
                 "unsupported topology: clients must be exactly [observer], got {:?}",
                 self.topology.clients
             ));
+        }
+        if let Op::RunJsUnmodeled { source, .. } = &self.workload.op {
+            if source.len() > 512 || self.workload.count == 0 || self.workload.count > 2 {
+                return Err("unmodeled JS bounded to 512 source bytes and 1-2 executions".into());
+            }
+            if self.asserts.contains(&Assertion::PublishedSnapshotMatchesModel)
+                || self.asserts.contains(&Assertion::FreshWriteSucceeds)
+            {
+                return Err("unmodeled JS has no exact filesystem/fresh-write oracle".into());
+            }
+            if !self.asserts.contains(&Assertion::NoUnexpectedJsFailure) {
+                return Err("unmodeled JS requires the failure-classification oracle".into());
+            }
         }
         if self.workload.count > 12 {
             return Err(format!("workload.count bounded to 12, got {}", self.workload.count));
@@ -272,6 +290,8 @@ pub enum Outcome {
     Acked { head: String },
     Conflict,
     Failed { error: String },
+    JsException { error: String },
+    ResourceLimit { error: String },
     Unknown,
 }
 
@@ -281,6 +301,8 @@ impl Outcome {
             Outcome::Acked { .. } => "acked",
             Outcome::Conflict => "conflict",
             Outcome::Failed { .. } => "failed",
+            Outcome::JsException { .. } => "js_exception",
+            Outcome::ResourceLimit { .. } => "resource_limit",
             Outcome::Unknown => "unknown",
         }
     }
@@ -397,10 +419,15 @@ fn engine_with_cluster(node: Arc<ClusterNode>, tag: &str) -> (Arc<Engine>, Arc<F
     (engine, store)
 }
 
+// The generated program catches only pure-JS exceptions. Native filesystem and
+// engine failures are outside that catch and must not be text-classified.
+const JS_EXCEPTION_MARKER: &str = "__mcp_js_expected_exception__";
+
 enum JsResult {
     Head(String),
+    JsException(String),
     Failed(String),
-    Unknown,
+    TimedOut,
 }
 
 async fn run_js(engine: &Engine, code: &str) -> JsResult {
@@ -411,13 +438,18 @@ async fn run_js(engine: &Engine, code: &str) -> JsResult {
         .await
     {
         Ok(id) => id,
-        Err(_) => return JsResult::Unknown,
+        Err(e) => return JsResult::Failed(format!("execution submission failed: {e}")),
     };
-    for _ in 0..600 {
+    for _ in 0..1200 {
         tokio::time::sleep(Duration::from_millis(25)).await;
         if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => {
+                    if let Some(result) = &info.result {
+                        if result.contains(JS_EXCEPTION_MARKER) {
+                            return JsResult::JsException(result.clone());
+                        }
+                    }
                     return match info.fs {
                         Some(head) => JsResult::Head(head),
                         None => JsResult::Failed("completed without fs head".into()),
@@ -426,12 +458,12 @@ async fn run_js(engine: &Engine, code: &str) -> JsResult {
                 "failed" => {
                     return JsResult::Failed(info.error.unwrap_or_else(|| "failed".into()));
                 }
-                "timed_out" => return JsResult::Failed("timed_out".into()),
+                "timed_out" => return JsResult::TimedOut,
                 _ => continue,
             }
         }
     }
-    JsResult::Unknown
+    JsResult::Failed("execution status unavailable after polling deadline".into())
 }
 
 async fn read_file_at(store: &FsStore, head_hex: &str, path: &str) -> Option<Vec<u8>> {
@@ -724,16 +756,24 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             events.push(ScenarioEvent::Invoke { at_ms: now_ms(start), op_id, node: node.clone() });
             let code = match &sc.workload.op {
                 Op::RunJs { program, .. } => program.render_js(i),
+                Op::RunJsUnmodeled { source, .. } => source.clone(),
             };
             let head = run_js(&op_engine, &code).await;
+            let unmodeled = matches!(sc.workload.op, Op::RunJsUnmodeled { .. });
             let outcome = match head {
-                JsResult::Failed(e) => {
+                JsResult::TimedOut if unmodeled => Outcome::ResourceLimit { error: "engine timed out".into() },
+                JsResult::TimedOut => {
+                    failed.push(format!("op{op_id}:timed_out"));
+                    Outcome::Failed { error: "timed_out".into() }
+                }
+                JsResult::JsException(e) if unmodeled => Outcome::JsException { error: e },
+                JsResult::JsException(e) => {
                     failed.push(format!("op{op_id}:{e}"));
                     Outcome::Failed { error: e }
                 }
-                JsResult::Unknown => {
-                    unknown.push(format!("op{op_id}"));
-                    Outcome::Unknown
+                JsResult::Failed(e) => {
+                    failed.push(format!("op{op_id}:{e}"));
+                    Outcome::Failed { error: e }
                 }
                 JsResult::Head(h) => {
                     attempted.push(h.clone());
@@ -850,7 +890,11 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             }
             m
         };
-        let passed = check_assertion(assertion, &observer_store, &fs_store, &final_heads, &acked, &unknown, &model, &reconcile).await;
+        let passed = if *assertion == Assertion::NoUnexpectedJsFailure {
+            failed.is_empty()
+        } else {
+            check_assertion(assertion, &observer_store, &fs_store, &final_heads, &acked, &unknown, &model, &reconcile).await
+        };
         events.push(ScenarioEvent::Assert { at_ms: at, name: name.clone(), passed });
         if !passed {
             status = Err(format!("assertion failed: {name}"));
@@ -907,6 +951,7 @@ async fn check_assertion(
             }
             true
         }
+        Assertion::NoUnexpectedJsFailure => true, // checked against runner failures above
         Assertion::FreshWriteSucceeds => {
             // A post-recovery fresh op is recorded through the normal
             // workload; a scenario asserting this must have acked something.

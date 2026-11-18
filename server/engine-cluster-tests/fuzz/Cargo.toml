@@ -34,3 +34,10 @@ path = "fuzz_targets/fuzz_js_scenario.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_js_unmodeled"
+path = "fuzz_targets/fuzz_js_unmodeled.rs"
+test = false
+doc = false
+bench = false

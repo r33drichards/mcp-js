@@ -156,3 +156,53 @@ fn program_renders_to_real_js_with_iteration_variable() {
     // Dynamic selectors resolve at a defined boundary and are recorded.
     assert_eq!(Op::RunJs { node: "leader".into(), program }.resolve_node("n1"), "n1");
 }
+
+#[test]
+fn unmodeled_js_classifies_exception_without_claiming_exact_output() {
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.workload.op = Op::RunJsUnmodeled {
+        node: "leader".into(),
+        source: "(async () => { try { throw new TypeError('expected'); } catch (e) { return '__mcp_js_expected_exception__' + e.name; } })()".into(),
+    };
+    scenario.faults.clear();
+    scenario.asserts = vec![
+        Assertion::NoUnexpectedJsFailure,
+        Assertion::AckedCommitsInLegalHistory,
+        Assertion::ReplicasConvergeAfterRecovery,
+    ];
+    let parsed = Scenario::from_json(&scenario.to_json()).expect("unmodeled replay parses");
+    let result = parsed.run_and_dump("unmodeled-exception");
+    result.expect_status("all assertions passed");
+    assert_eq!(result.last_outcome().map(|(kind, _)| kind), Some("js_exception"));
+}
+
+#[test]
+fn unmodeled_js_rejects_unbounded_source_and_exact_model_assertion() {
+    let mut scenario = parse_known_answer();
+    scenario.workload.op = Op::RunJsUnmodeled { node: "leader".into(), source: "x".repeat(513) };
+    assert!(Scenario::from_json(&scenario.to_json()).is_err());
+    scenario.workload.op = Op::RunJsUnmodeled { node: "leader".into(), source: "1 + 1".into() };
+    assert!(Scenario::from_json(&scenario.to_json()).is_err(), "no false exact-output model");
+    scenario.asserts = vec![Assertion::NoUnexpectedJsFailure];
+    assert!(Scenario::from_json(&scenario.to_json()).is_err(), "execution count must be bounded");
+    scenario.workload.count = 0;
+    assert!(Scenario::from_json(&scenario.to_json()).is_err(), "zero executions cannot pass vacuously");
+    scenario.workload.count = 1;
+    assert!(Scenario::from_json(&scenario.to_json()).is_ok());
+}
+
+#[test]
+fn unmodeled_uncaught_error_is_not_misclassified_by_its_text() {
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.workload.op = Op::RunJsUnmodeled {
+        node: "leader".into(),
+        source: "(async () => { throw new TypeError('not tagged'); })()".into(),
+    };
+    scenario.faults.clear();
+    scenario.asserts = vec![Assertion::NoUnexpectedJsFailure];
+    let result = scenario.run_and_dump("unmodeled-untagged-error");
+    assert!(result.status.is_err(), "untagged failures must not pass the oracle");
+    assert_eq!(result.last_outcome().map(|(kind, _)| kind), Some("failed"));
+}
