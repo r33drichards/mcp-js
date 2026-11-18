@@ -68,3 +68,12 @@ The CI-produced resolver graph and Crane's build-time tree remain the final
 comparison evidence. Timings for these workloads are diagnostic and cannot
 establish a framework-only speed difference. No feature-semantics patch is
 applied to conceal these differences.
+
+The fourth run reached actual Rust test-target compilation, then exposed an
+adapter source-filter omission: compat_surface embeds a repository-level
+`tools/compat/surface_scan.js` file. The server's source closure now includes
+root tools. An audit resolved all 77 literal include_str!/include_bytes! paths;
+that scanner was the only path outside server, and none were missing. The
+workflow also preserves valid intermediate Nix builds after a failed attempt
+so later integration fixes can reuse completed dependencies; failed test
+verdicts are never cached or treated as successful.

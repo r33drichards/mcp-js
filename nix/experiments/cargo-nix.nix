@@ -58,6 +58,7 @@ let
       filter = path: type:
         let rel = lib.removePrefix (toString source + "/") (toString path);
         in rel == "Cargo.toml" || rel == "Cargo.lock"
+          || (member == "server" && (rel == "tools" || lib.hasPrefix "tools/" rel))
           || rel == member || lib.hasPrefix (member + "/") rel
           || (type == "directory" && lib.hasPrefix (rel + "/") member);
     };
