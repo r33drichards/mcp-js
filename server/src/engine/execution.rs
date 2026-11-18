@@ -103,11 +103,13 @@ impl ExecutionRegistry {
     pub fn new(db_path: &str) -> Result<Self, String> {
         let db = sled::open(db_path)
             .map_err(|e| format!("Failed to open execution db at {}: {}", db_path, e))?;
+        let backend = Arc::new(super::heap_storage::FileHeapStorage::new(std::path::Path::new(db_path).join("runtime-blobs")));
+        let payloads = RuntimeStore::new(Arc::new(mcp_metadata_store::SledStore(db.clone())))?.with_blobs(backend);
         Ok(Self {
             executions: Arc::new(DashMap::new()),
             db: Some(db),
             remote: None,
-            payloads: None,
+            payloads: Some(payloads),
             persistence_errors: Arc::new(DashMap::new()),
         })
     }
@@ -122,7 +124,9 @@ impl ExecutionRegistry {
     }
 
     pub fn with_blobs(mut self, blobs: Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs>) -> Self {
-        self.remote = self.remote.map(|store| store.with_blobs(blobs)); self
+        self.remote = self.remote.map(|store| store.with_blobs(blobs.clone()));
+        self.payloads = self.payloads.map(|store|store.with_blobs(blobs));
+        self
     }
 
     /// Keep local sled metadata encodings while storing payloads in the selected blob backend.

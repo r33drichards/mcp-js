@@ -12,8 +12,13 @@ The first implementation extracts `metadata_store::blob::BlobStorage`, keeps
 `HeapStorage` and `RuntimeBlobs` as compatibility names, shares backend
 construction across storage domains, and adds immutable-write contracts for
 memory/directory/S3 plus authoritative-first cache writes. Existing object keys
-and reference formats are unchanged. Content IDs, publication semantics and the
-Raft metadata adapter follow in dependent changes.
+and reference formats remain readable. The dependent content layer adds typed,
+versioned SHA-256 references for new runtime objects, payload verification and
+immutable writes. Artifact metadata stays in the database while payload bytes
+deduplicate independently of timestamps/MIME type. New direct execution registries
+also use filesystem objects. Publication semantics and the Raft adapter follow
+in a dependent change; heap/fs identities and existing runtime readers remain
+compatible.
 
 ## Problem and direction
 

@@ -282,7 +282,10 @@ async fn sqlite_runtime_records_console_artifacts_and_upload_grants_survive_rest
             assert_eq!(row[0], 1, "execution result must be inline, without S3");
             assert!(row.len() > 128 * 1024);
             let artifact = store.get("artifacts", b"saved.bin").await.unwrap().unwrap();
-            assert!(artifact.len() < 128, "artifact bytes must be in S3");
+            assert!(
+                artifact.len() < 1024,
+                "only artifact metadata belongs in the database"
+            );
             assert!(
                 !store
                     .scan(&format!("ex:{id}"), b"", false, None)
@@ -736,10 +739,20 @@ async fn runtime_filesystem_payloads_survive_restart_and_never_live_in_the_datab
         let id = result["execution_id"].as_str().unwrap();
         let output_path = format!("/api/executions/{id}/output");
         let output = server.get(&output_path).await;
-        let files: Vec<_> = std::fs::read_dir(dir.path().join("local/runtime-blobs/runtime"))
-            .unwrap()
-            .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
-            .collect();
+        fn read_objects(directory: &Path) -> Vec<Vec<u8>> {
+            std::fs::read_dir(directory)
+                .unwrap()
+                .flat_map(|entry| {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        read_objects(&path)
+                    } else {
+                        vec![std::fs::read(path).unwrap()]
+                    }
+                })
+                .collect()
+        }
+        let files = read_objects(&dir.path().join("local/runtime-blobs/runtime"));
         assert!(files.iter().any(|value| value.ends_with(&vec![9; 500_000])));
         assert!(
             files
@@ -749,7 +762,10 @@ async fn runtime_filesystem_payloads_survive_restart_and_never_live_in_the_datab
         if selection == "flag" {
             let db = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
             let value = db.get("artifacts", b"file.bin").await.unwrap().unwrap();
-            assert!(value.len() < 128, "database must contain only a reference");
+            assert!(
+                value.len() < 1024,
+                "database must contain only artifact metadata"
+            );
         }
         server.stop().await;
         let server = Server::start_with_s3(dir.path(), selection, None).await;

@@ -98,3 +98,40 @@ async fn immutable_s3_contract_uses_conditional_writes() {
             .contains_key("/runtime-test/new")
     );
 }
+
+#[tokio::test]
+async fn artifact_metadata_changes_deduplicate_payload_and_listing_needs_no_blob_reads() {
+    use mcp_metadata_store::{RuntimeStore, SledStore};
+    use server::engine::artifacts::ArtifactStore;
+    let backend = MemoryHeapStorage::new();
+    let db = Arc::new(SledStore(
+        sled::Config::new().temporary(true).open().unwrap(),
+    ));
+    let tree = RuntimeStore::new(db)
+        .unwrap()
+        .with_blobs(Arc::new(backend.clone()))
+        .tree("artifacts");
+    let artifacts = ArtifactStore::new(tree);
+    artifacts
+        .put("a", "text/plain", b"same bytes", Some("first"))
+        .unwrap();
+    artifacts
+        .put(
+            "b",
+            "application/octet-stream",
+            b"same bytes",
+            Some("second"),
+        )
+        .unwrap();
+    let keys = backend.list().await.unwrap();
+    assert_eq!(keys.len(), 1, "metadata must not change payload identity");
+    assert_eq!(artifacts.get("a").unwrap().unwrap().bytes, b"same bytes");
+    backend.delete(&keys[0]).await.unwrap();
+    let metadata = artifacts.list().unwrap();
+    assert_eq!(metadata.len(), 2);
+    assert_eq!(metadata[0].size_bytes, 10);
+    assert!(
+        artifacts.get("a").is_err(),
+        "missing blobs must not fall back"
+    );
+}
