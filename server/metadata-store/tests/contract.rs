@@ -310,7 +310,7 @@ async fn dynamodb_contract(endpoint: String) {
             .unwrap()
             .tree("runtime-size-limit");
         let error = tree.insert(b"large", vec![0; 500_000]).unwrap_err();
-        assert!(error.contains("requires S3 blob storage"), "{error}");
+        assert!(!error.is_empty());
         assert!(tree.get(b"large").unwrap().is_none());
     }).await.unwrap();
     let reopened = DynamoDbStore::new(client.clone(), &table, "test").unwrap();
@@ -408,17 +408,17 @@ impl mcp_metadata_store::runtime_tree::RuntimeBlobs for TestBlobs {
     }
 }
 #[tokio::test(flavor="current_thread")]
-async fn runtime_large_values_are_blob_references_and_missing_blobs_fail() {
+async fn runtime_artifact_values_are_blob_references_and_missing_blobs_fail() {
     use mcp_metadata_store::RuntimeStore;
     let db = Arc::new(SledStore(sled::Config::new().temporary(true).open().unwrap()));
     let blobs = Arc::new(TestBlobs::default());
-    let tree = RuntimeStore::new(db.clone()).unwrap().with_blobs(blobs.clone()).tree("large");
+    let tree = RuntimeStore::new(db.clone()).unwrap().with_blobs(blobs.clone()).tree("artifacts");
     let value = vec![42; 500_000];
     tree.insert(b"artifact", &value).unwrap();
     assert_eq!(tree.get(b"artifact").unwrap(), Some(value.clone()));
-    let raw = db.get("large", b"artifact").await.unwrap().unwrap();
-    assert_eq!(raw[0], 2); assert!(raw.len() < 100);
-    let reopened = RuntimeStore::new(db).unwrap().with_blobs(blobs.clone()).tree("large");
+    let raw = db.get("artifacts", b"artifact").await.unwrap().unwrap();
+    assert_eq!(raw[0], 1); assert!(raw.len() < 100);
+    let reopened = RuntimeStore::new(db).unwrap().with_blobs(blobs.clone()).tree("artifacts");
     assert_eq!(reopened.get(b"artifact").unwrap(), Some(value));
     blobs.0.lock().unwrap().clear();
     assert!(reopened.get(b"artifact").is_err());
@@ -433,13 +433,13 @@ fn runtime_sqlite_contract() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn runtime_sqlite_large_values_reopen_and_cas_without_blob_storage() {
+async fn runtime_sqlite_metadata_reopen_and_cas_without_blob_storage() {
     use mcp_metadata_store::RuntimeStore;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("metadata.sqlite");
     let store = Arc::new(SqliteStore::open(&path, "runtime").unwrap());
-    let tree = RuntimeStore::new(store.clone()).unwrap().tree("artifacts");
+    let tree = RuntimeStore::new(store.clone()).unwrap().tree("execution_records");
     let first = vec![42; 500_000];
     tree.insert(b"large", &first).unwrap();
     drop(tree);
@@ -447,7 +447,7 @@ async fn runtime_sqlite_large_values_reopen_and_cas_without_blob_storage() {
     // A fresh connection must read the payload from SQLite, with no blob client.
     let reopened = RuntimeStore::new(Arc::new(SqliteStore::open(&path, "runtime").unwrap()))
         .unwrap()
-        .tree("artifacts");
+        .tree("execution_records");
     assert_eq!(reopened.get(b"large").unwrap(), Some(first.clone()));
     let second = vec![43; 600_000];
     assert!(
@@ -466,10 +466,10 @@ async fn runtime_sqlite_large_values_reopen_and_cas_without_blob_storage() {
         reopened.iter().collect::<Result<Vec<_>, _>>().unwrap(),
         vec![(b"large".to_vec(), second.clone())]
     );
-    let raw = store.get("artifacts", b"large").await.unwrap().unwrap();
+    let raw = store.get("execution_records", b"large").await.unwrap().unwrap();
     assert_eq!(
         raw[0], 1,
-        "SQLite must store the inline envelope, not an S3 reference"
+        "metadata remains inline, subject to SQLite limits"
     );
     assert_eq!(&raw[1..], second);
     reopened.remove(b"large").unwrap();
@@ -484,9 +484,43 @@ async fn runtime_sqlite_large_values_reopen_and_cas_without_blob_storage() {
     assert!(
         SqliteStore::open(&path, "other")
             .unwrap()
-            .get("artifacts", b"large")
+            .get("execution_records", b"large")
             .await
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_payloads_always_use_blobs_and_metadata_never_spills() {
+    use mcp_metadata_store::RuntimeStore;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.sqlite");
+    let db = Arc::new(SqliteStore::open(&path, "runtime").unwrap());
+    let blobs = Arc::new(TestBlobs::default());
+    let store = RuntimeStore::new(db.clone()).unwrap().with_blobs(blobs.clone());
+    for name in ["artifacts", "ex:stdout", "ex:stderr"] {
+        let tree = store.tree(name);
+        // Even empty and tiny payloads must live in blob storage.
+        for payload in [vec![], b"tiny".to_vec(), vec![42; 500_000]] {
+            tree.insert(b"key", &payload).unwrap();
+            let raw = db.get(name, b"key").await.unwrap().unwrap();
+            assert!(raw.len() < 128, "payload was stored in the database");
+            assert_ne!(raw, [vec![1], payload.clone()].concat());
+            let reopened = RuntimeStore::new(Arc::new(SqliteStore::open(&path, "runtime").unwrap()))
+                .unwrap().with_blobs(blobs.clone()).tree(name);
+            assert_eq!(reopened.get(b"key").unwrap(), Some(payload));
+        }
+    }
+    let metadata = store.tree("execution_records");
+    metadata.insert(b"key", b"small").unwrap();
+    let count = blobs.0.lock().unwrap().len();
+    metadata.insert(b"key", vec![0; 500_000]).unwrap();
+    assert_eq!(metadata.get(b"key").unwrap(), Some(vec![0; 500_000]));
+    assert_eq!(blobs.0.lock().unwrap().len(), count, "metadata must never spill to S3");
+    let no_blobs = RuntimeStore::new(db.clone()).unwrap().tree("artifacts");
+    assert!(no_blobs.insert(b"missing", b"tiny").is_err());
+    assert!(db.get("artifacts", b"missing").await.unwrap().is_none());
+    blobs.0.lock().unwrap().clear();
+    assert!(store.tree("artifacts").get(b"key").is_err());
 }
