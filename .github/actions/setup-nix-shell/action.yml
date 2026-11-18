@@ -1,0 +1,53 @@
+name: Set up cached Nix Rust shell
+description: Cache and root one development environment, then reuse its profile for Cargo.
+inputs:
+  shared-key:
+    description: Cargo build family; keep release CLI artifacts separate from debug tests.
+    default: nix-server
+  extra-conf:
+    description: Additional Nix installer configuration.
+    default: ''
+outputs:
+  profile:
+    description: Prepared Nix environment; also exported as MCP_CI_NIX_PROFILE for run steps.
+    value: ${{ steps.profile.outputs.profile }}
+runs:
+  using: composite
+  steps:
+    # cache-nix-action restores as the runner user. A matching single-user
+    # store avoids permission-denied restores of a root-owned daemon store.
+    - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+      with:
+        nix_conf: |
+          keep-env-derivations = true
+          keep-outputs = true
+          ${{ inputs.extra-conf }}
+    - uses: DeterminateSystems/flake-checker-action@5b2d34ccdd3612df34a20066f6170a6480746220 # main
+    - name: Restore Nix shell and flake inputs
+      id: cache
+      uses: nix-community/cache-nix-action@d8cff2f74b9341e0d90fbf3c0c0212a161ceaef6 # v6
+      with:
+        # v3 additionally keeps the sources needed to evaluate the flake.
+        primary-key: nix-shell-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'shell.nix', '.github/actions/setup-nix-shell/**') }}
+        restore-prefixes-first-match: nix-shell-v3-${{ runner.os }}-${{ runner.arch }}-
+        gc-max-store-size-linux: 3G
+    - name: Reject a cache hit that failed to extract
+      if: steps.cache.outputs.hit == 'true'
+      shell: bash
+      env:
+        RESTORED_KEY: ${{ steps.cache.outputs.restored-key }}
+      run: |
+        test -n "$RESTORED_KEY" || {
+          echo 'Nix cache was found but restoration failed' >&2
+          exit 1
+        }
+    - name: Prepare and verify the rooted environment
+      id: profile
+      shell: bash
+      env:
+        PREPARE_SCRIPT: ${{ github.action_path }}/prepare.sh
+      run: bash "$PREPARE_SCRIPT"
+    - uses: ./.github/actions/rust-cache
+      with:
+        shared-key: ${{ inputs.shared-key }}-${{ hashFiles('flake.lock', 'flake.nix', 'shell.nix') }}
+        cmd-format: nix develop "${{ steps.profile.outputs.profile }}" --command {0}

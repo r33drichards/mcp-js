@@ -7,6 +7,11 @@ on:
     # Also gate pngjs's stacked PR before the Node compatibility branch lands.
     branches: [ main, claude/branch-status-xnlqaq ]
 
+# New commits supersede older PR runs; independent branch pushes stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Run Tests
@@ -16,14 +21,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/flake-checker-action@main
-      - name: Build server
-        run: nix develop --command bash -c "cd server && cargo build"
+      - uses: ./.github/actions/setup-nix-shell
 
+      # cargo test builds the server binary and all test targets itself.
+      # Cargo already prints captured output for failures; don't rerun the suite.
       - name: Run tests
-        run: nix develop --command bash -c "cd server && cargo test -- --test-threads=1"
+        shell: bash
+        run: nix develop "$MCP_CI_NIX_PROFILE" --command cargo test --locked -p server -- --test-threads=1 2>&1 | tee test-results.log
 
-      - name: Run tests with output
-        run: nix develop --command bash -c "cd server && cargo test -- --nocapture --test-threads=1"
+      - name: Preserve failure output
         if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-test-output-${{ github.run_attempt }}
+          path: test-results.log
+          if-no-files-found: ignore

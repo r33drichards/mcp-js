@@ -5,19 +5,28 @@ on:
       - 'server/src/cluster*'
       - 'server/tests/cluster*'
       - 'server/cluster-tests/**'
+      - '.github/actions/**'
       - '.github/workflows/cluster-consensus.yml'
   push:
+    branches: [main]
     paths:
       - 'server/src/cluster*'
       - 'server/tests/cluster*'
       - 'server/cluster-tests/**'
+      - '.github/actions/**'
       - '.github/workflows/cluster-consensus.yml'
+# New commits supersede older PR runs; independent branch pushes stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   consensus:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
-          toolchain: '1.99.0'
+          shared-key: native-cluster
+          workspaces: server/cluster-tests -> target
       - run: cargo test --manifest-path server/cluster-tests/Cargo.toml --locked -- --test-threads=1

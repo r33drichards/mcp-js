@@ -9,6 +9,7 @@ on:
       - 'server/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/actions/**'
       - '.github/workflows/sqlite-metadata.yml'
   push:
     branches: [main]
@@ -20,10 +21,16 @@ on:
       - 'server/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/actions/**'
       - '.github/workflows/sqlite-metadata.yml'
   workflow_dispatch:
 permissions:
   contents: read
+# New commits supersede older PR runs; independent branch pushes stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   sqlite:
     runs-on: ubuntu-latest
@@ -32,7 +39,9 @@ jobs:
       CARGO_BUILD_JOBS: '2'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: native-server
       - name: Storage contracts (SQLite and sled)
         run: cargo test --locked -p mcp-metadata-store --test contract
       - name: SQLite consumers

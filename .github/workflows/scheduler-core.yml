@@ -3,14 +3,21 @@ on:
   pull_request:
     paths:
       - 'scheduler-core/**'
+      - '.github/actions/**'
       - '.github/workflows/scheduler-core.yml'
   push:
     branches: ['impl/scheduler-*']
     paths:
       - 'scheduler-core/**'
+      - '.github/actions/**'
       - '.github/workflows/scheduler-core.yml'
 permissions:
   contents: read
+# New commits supersede older PR runs; independent branch pushes stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   core:
     runs-on: ubuntu-latest
@@ -19,8 +26,10 @@ jobs:
         working-directory: scheduler-core
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
+          shared-key: native-scheduler-core
+          workspaces: scheduler-core -> target
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo test --locked

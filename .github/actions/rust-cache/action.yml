@@ -1,0 +1,24 @@
+name: Cache Rust dependencies
+description: Share compiled dependencies across compatible jobs while always running tests.
+inputs:
+  shared-key:
+    description: Build environment and workspace family (native and Nix must differ).
+    required: true
+  workspaces:
+    description: Cargo workspace to target-directory mappings.
+    default: '. -> target'
+  cmd-format:
+    description: Command wrapper used to identify the actual Rust toolchain.
+    default: '{0}'
+runs:
+  using: composite
+  steps:
+    - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        workspaces: ${{ inputs.workspaces }}
+        cmd-format: ${{ inputs.cmd-format }}
+        # Persist compiled dependencies even when an actual test fails.
+        cache-on-failure: true
+        # rusty_v8 can reuse its download after a compiler/target cache miss.
+        cache-directories: ~/.cargo/.rusty_v8
