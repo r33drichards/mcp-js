@@ -285,7 +285,15 @@ fn fresh_write_after_heal_is_a_new_acknowledged_js_publish() {
     result.expect_status("all assertions passed");
     assert_eq!(result.acked.len(), 2, "initial and fresh publish must ack: {:?}", result.events);
     let invokes: Vec<_> = result.events.iter().filter(|event| matches!(event, ScenarioEvent::Invoke { .. })).collect();
-    assert_eq!(invokes.len(), 2, "fresh progress needs a separate JS invocation");
+    assert!(invokes.len() >= 2, "fresh progress needs a separate JS invocation");
+    let last_heal = result.events.iter().filter_map(|event| match event {
+        ScenarioEvent::HealAll { at_ms } => Some(*at_ms),
+        _ => None,
+    }).max().expect("recovery heal event");
+    assert!(result.events.iter().any(|event| matches!(event,
+        ScenarioEvent::Respond { at_ms, outcome: engine_cluster_tests::scenario::Outcome::Acked { .. }, .. }
+            if *at_ms > last_heal
+    )), "the new acknowledged publish must follow recovery: {:?}", result.events);
     assert!(result.events.iter().any(|event| matches!(event,
         ScenarioEvent::Assert { name, passed: true, .. } if name == "FreshWriteSucceeds"
     )));
