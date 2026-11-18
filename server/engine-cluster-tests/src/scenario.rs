@@ -710,8 +710,9 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
                         let mut rg: Vec<String> = Vec::new();
                         for host in g {
                             let h = if host == "current_leader" { leader.clone() } else { host.clone() };
-                            let is_leader_group = leader_group == Some(gi);
-                            if h == leader && !is_leader_group { continue; }
+                            // Suppress duplicate leader names only when a dynamic
+                            // selector chose its group. Explicit names must work too.
+                            if leader_group.is_some_and(|chosen| h == leader && gi != chosen) { continue; }
                             if !rg.contains(&h) { rg.push(h); }
                         }
                         resolved.push(rg);
@@ -835,6 +836,60 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             events.push(ScenarioEvent::Restart { at_ms: now_ms(start), node });
         }
     }
+    // An old workload acknowledgment is not evidence of post-recovery progress.
+    // Probe through the same real JS execution and cluster CAS path, then let
+    // the ordinary convergence/history checks observe its result.
+    let mut fresh_write_acked = false;
+    let mut fresh_attempted_iteration = None;
+    if sc.asserts.contains(&Assertion::FreshWriteSucceeds) {
+        op_id += 1;
+        let target = sc.workload.op.resolve_node(&leader);
+        events.push(ScenarioEvent::Invoke { at_ms: now_ms(start), op_id, node: target.clone() });
+        let outcome = if crashed.iter().any(|n| n == &target || n == &follower) {
+            // The old engine/observer handles are not generation-fenced after
+            // a crash. Fail closed until a host-owned fresh incarnation exists.
+            Outcome::Failed { error: "fresh JS probe after a crashed host requires host-local reopen".into() }
+        } else if let Op::RunJs { program, .. } = &sc.workload.op {
+            match run_js(&op_engine, &program.render_js(sc.workload.count)).await {
+                JsResult::Head(head) => {
+                    fresh_attempted_iteration = Some(sc.workload.count);
+                    attempted.push(head.clone());
+                    match parse_ca_hex(&head) {
+                        None => Outcome::Failed { error: "fresh JS returned invalid head".into() },
+                        Some(ca) => match observer_store.resolve("main").await {
+                            Err(_) => Outcome::Unknown,
+                            Ok(expect) => match observer_store.cas("main", expect, ca, None).await {
+                                Ok(true) => Outcome::Acked { head },
+                                Ok(false) => Outcome::Conflict,
+                                Err(_) => Outcome::Unknown,
+                            },
+                        },
+                    }
+                }
+                JsResult::Failed(error) | JsResult::JsException(error) => Outcome::Failed { error },
+                JsResult::TimedOut => Outcome::Failed { error: "fresh JS timed out".into() },
+            }
+        } else {
+            Outcome::Failed { error: "fresh write requires a modeled JS program".into() }
+        };
+        match &outcome {
+            Outcome::Acked { head } => {
+                fresh_write_acked = true;
+                acked.push(head.clone());
+                if let Op::RunJs { program, .. } = &sc.workload.op {
+                    for step in &program.0 {
+                        let Step::Write { path, bytes } = step;
+                        model.insert(path.clone(), bytes.replace("{i}", &sc.workload.count.to_string()).into_bytes());
+                    }
+                }
+            }
+            Outcome::Unknown => unknown.push(format!("op{op_id}")),
+            Outcome::Failed { error } => failed.push(format!("op{op_id}:{error}")),
+            _ => {}
+        }
+        events.push(ScenarioEvent::Respond { at_ms: now_ms(start), op_id, node: target, outcome });
+    }
+
     // Convergence: every node's head must reach a value in the legal target
     // set: the last acked head, or the head of a final unresolved operation
     // (an unknown outcome may have committed; it is only reconciled by
@@ -890,7 +945,7 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             if let Op::RunJs { program, .. } = &sc.workload.op {
                 for step in &program.0 {
                     if let Step::Write { path, bytes } = step {
-                        m.insert(path.clone(), bytes.replace("{i}", &(sc.workload.count.saturating_sub(1)).to_string()).into_bytes());
+                        m.insert(path.clone(), bytes.replace("{i}", &fresh_attempted_iteration.unwrap_or_else(|| sc.workload.count.saturating_sub(1)).to_string()).into_bytes());
                     }
                 }
             }
@@ -898,6 +953,8 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
         };
         let passed = if *assertion == Assertion::NoUnexpectedJsFailure {
             failed.is_empty()
+        } else if *assertion == Assertion::FreshWriteSucceeds {
+            fresh_write_acked
         } else {
             check_assertion(assertion, &observer_store, &fs_store, &final_heads, &acked, &unknown, &model, &reconcile).await
         };
@@ -958,10 +1015,6 @@ async fn check_assertion(
             true
         }
         Assertion::NoUnexpectedJsFailure => true, // checked against runner failures above
-        Assertion::FreshWriteSucceeds => {
-            // A post-recovery fresh op is recorded through the normal
-            // workload; a scenario asserting this must have acked something.
-            !acked.is_empty()
-        }
+        Assertion::FreshWriteSucceeds => false, // handled by the runner post-recovery probe
     }
 }

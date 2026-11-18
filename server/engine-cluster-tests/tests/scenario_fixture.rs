@@ -262,3 +262,31 @@ fn fixed_name_partition_isolates_all_three_voters() {
     }).collect();
     assert_eq!(links, ["n0-n1", "n0-n2", "n1-n2"], "all named voters must be isolated");
 }
+
+#[test]
+fn fresh_write_after_heal_is_a_new_acknowledged_js_publish() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.faults = vec![
+        Fault::Partition {
+            at_ms: 900,
+            groups: vec![vec!["current_leader".into()], vec!["n0".into()], vec!["n1".into()], vec!["n2".into()]],
+        },
+        Fault::HealAll { at_ms: 1500 },
+    ];
+    scenario.asserts = vec![
+        Assertion::FreshWriteSucceeds,
+        Assertion::AckedCommitsInLegalHistory,
+        Assertion::ReplicasConvergeAfterRecovery,
+        Assertion::PublishedSnapshotMatchesModel,
+    ];
+    let result = scenario.run_and_dump("fresh-write-after-heal");
+    result.expect_status("all assertions passed");
+    assert_eq!(result.acked.len(), 2, "initial and fresh publish must ack: {:?}", result.events);
+    let invokes: Vec<_> = result.events.iter().filter(|event| matches!(event, ScenarioEvent::Invoke { .. })).collect();
+    assert_eq!(invokes.len(), 2, "fresh progress needs a separate JS invocation");
+    assert!(result.events.iter().any(|event| matches!(event,
+        ScenarioEvent::Assert { name, passed: true, .. } if name == "FreshWriteSucceeds"
+    )));
+}
