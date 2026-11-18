@@ -1413,6 +1413,8 @@ name = "sled-fs-proof"
 version = "0.1.0"
 dependencies = [
  "scheduler-raft-audit",
+ "serde",
+ "serde_json",
  "sled",
  "tokio",
  "turmoil",

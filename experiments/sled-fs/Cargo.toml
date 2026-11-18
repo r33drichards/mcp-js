@@ -5,9 +5,11 @@ edition = "2021"
 publish = false
 [workspace]
 [features]
-cluster = ["sim", "dep:scheduler-raft-audit"]
+cluster = ["sim", "dep:scheduler-raft-audit", "dep:serde", "dep:serde_json"]
 sim = ["sled/turmoil-fs", "dep:turmoil", "dep:tokio"]
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 sled = { path = "sled" }
 turmoil = { version = "=0.7.2", features = ["unstable-fs"], optional = true }
 tokio = { version = "1", features = ["rt", "time"], optional = true }

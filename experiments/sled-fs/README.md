@@ -42,6 +42,11 @@ The tests exercise:
   syncs config bytes and newly created directory entries before acknowledging.
 - Disk-full ClusterNode recovery after an abrupt crash, then a fresh append;
   seeds 7, 42, and 314 replay the same observed acknowledgment history.
+- Three real sled-backed Raft voters exchange RPCs over Turmoil TCP. After
+  n0 exhausts its disk, n1/n2 commit another value; n0 abruptly restarts,
+  recovers its earlier value, catches up, then survives a second crash/reopen
+  with the new value. Seeds 7, 42, and 314 each replay twice. The observer
+  uses HTTP only, never a cross-host ClusterNode handle.
 
 ## Run
 
@@ -75,6 +80,10 @@ instance is never used again; a fresh Db performs recovery. This leaks a small
 amount of memory per test; it is a test technique, not a production crash API.
 Do not use normal Db drop as a crash. A reusable crash-safe ownership mechanism
 and invalidation of outstanding handles remain future work.
+The multi-node fixture also retains one bounded Arc per host incarnation through
+teardown: dropping sled after Turmoil removes a host context can access an
+unset scoped context. These leaked test handles are never reused; this is not
+a production host-generation or lock-ownership implementation.
 
 Turmoil `FsHandle::enter` (`src/fs/mod.rs:139-145`) constructs a worker context
 with `Mutex::new(rand::rng())` and capture-time `time`. OS worker interleavings,

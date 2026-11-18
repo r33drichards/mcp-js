@@ -47,6 +47,8 @@ Turmoil 0.7.2 sources inspected:
 5. Test snapshot, blob, new-directory, truncation, and teardown failures under
    realistic ordering. The adapter explicitly syncs initial config and names;
    distinguish this from upstream sled behavior. Blob/snapshot sync gaps remain.
-6. Extend the cluster lifecycle harness to use the backend safely with multiple
-   nodes, worker tasks and restarts. This proof only adds a direct real-cluster
-   disk-full test; it does not alter the independent scenario implementation.
+6. The bounded three-voter fixture routes all data through host-local RPC
+   handlers and covers quorum progress plus two crash/reopen cycles. Integrate
+   the real backend into the independent JS scenario runner, model worker
+   scheduling and host generations, and retire test leaks only after an
+   explicit lifecycle mechanism is proven.

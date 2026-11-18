@@ -1,5 +1,28 @@
 # Validation record
 
+## Three-node follow-up: 2026-11-18
+
+A new opt-in test runs three real sled-backed Raft nodes on separate Turmoil
+hosts. All client and peer data traffic uses simulated TCP, not shared node
+handles. It fills n0's disk after all voters have applied an acknowledged
+value, verifies that n1/n2 commit a later value, crashes n0, checks the old
+value on fresh open, waits for catch-up, and crashes/reopens n0 again to verify
+the later value is durable. Seeds 7, 42, and 314 each run twice and compare
+observed histories. No handwritten flush-failure hook is used.
+
+| Check | Observed result |
+| --- | --- |
+| Focused three-node test, three seeds replayed twice | 1 passed |
+| Full isolated experiment with `cluster` | 9 passed |
+| Default std-backend experiment | 1 passed |
+| Upstream sled library, log and tree suites with testing | 102 passed, 1 ignored |
+
+This is still an isolated Rust storage/cluster proof, not the JS scenario
+runner or a production backend. It intentionally leaks bounded handles to
+prevent sled destructors from flushing after host teardown; lock ownership,
+host-generation invalidation, deterministic workers, snapshot/blob ordering,
+and fsync-error injection remain open. Existing failure hooks are retained.
+
 ## Follow-up: 2026-11-18
 
 The original 2026-11-15 record below remains a historical baseline. This
