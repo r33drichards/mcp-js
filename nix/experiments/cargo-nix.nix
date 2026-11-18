@@ -6,12 +6,22 @@ let
   lib = pkgs.lib;
   # The plugin ABI must match this exact runtime from its own locked nixpkgs.
   nix = pkgs.nixVersions.nix_2_34;
+  # swc_core's sparse index is >16 MiB. ureq's default body limit is
+  # 10 MiB and upstream prefetch only reports failure if every job fails.
+  # Keep the resolver/plugin unchanged; seed a complete cache with a bounded
+  # 64 MiB prefetch read and retain the independent --check phase.
+  prefetch = pluginFlake.packages.${system}.cargo-nix-prefetch.overrideAttrs (old: {
+    postPatch = (old.postPatch or "") + ''
+      substituteInPlace src/registry.rs --replace-fail \
+        '.read_to_vec()' '.with_config().limit(64 * 1024 * 1024).read_to_vec()'
+    '';
+  });
   plugin = pkgs.buildEnv {
     name = "cargo-nix-benchmark-bootstrap";
     paths = [
       pluginFlake.packages.${system}.cargo-nix-plugin
       pluginFlake.packages.${system}.build-rust-crate-bin
-      pluginFlake.packages.${system}.cargo-nix-prefetch
+      prefetch
     ];
   };
   driver = ./cargo-nix-driver.py;
@@ -78,6 +88,7 @@ let
     codegen_units = 256;
     cargo_lock_sha256 = builtins.hashFile "sha256" (source + "/Cargo.lock");
     upstream_revision = "00f311abab999b4ad4c7f3fa3d85bb17beb91aee";
+    prefetch_patch = "ureq-body-limit-64MiB";
     resolver_scope = "all-workspace-roots";
     feature_parity = "unverified";
   });

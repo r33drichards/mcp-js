@@ -35,3 +35,12 @@ for audit against Crane's Cargo feature report. Performance differences cannot
 be attributed solely to the build framework until feature equivalence is
 established. These adapters have not changed project manifests to suppress
 that difference.
+
+First CI attempt (run 44231511512) validated Nix/runtime and plugin bootstrap,
+but failed the independent index check: upstream prefetch silently skipped
+swc_core's 16.9 MB sparse index because ureq defaults to a 10 MB body limit.
+The experiment patches only the prefetch utility to a bounded 64 MiB read;
+the plugin/resolver remains unmodified. The config records this patch and the
+check remains mandatory. No server build or warm-cache result came from that
+failed run. Its bootstrap measurements were runtime 43.275 s and plugin
+189.475 s; these are integration diagnostics, not full benchmark results.
