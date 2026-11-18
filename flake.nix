@@ -96,6 +96,12 @@
           }.${system};
         };
 
+        comparison = import ./nix/benchmarks/crane.nix {
+          inherit rustToolchain rustyV8Archive system;
+          sourceInputs = [ self.outPath nixpkgs.outPath rust-overlay.outPath
+            flake-utils.outPath flake-utils.inputs.systems.outPath ];
+        };
+
         docsTools = rustPlatform.buildRustPackage {
           pname = "mcp-js-docs-tools";
           version = "0.1.0";
@@ -189,6 +195,13 @@
         packages.docs-tools = docsTools;
         packages.npm-client = npmClient;
         packages.widdershins = widdershins;
+
+        packages.benchmark-nix = comparison.benchmark-nix;
+        packages.benchmark-config = comparison.benchmark-config;
+        packages.benchmark-source-roots = comparison.benchmark-source-roots;
+        packages.benchmark-deps = comparison.benchmark-deps;
+        packages.benchmark-tests = comparison.benchmark-tests;
+        packages.benchmark-runner = comparison.benchmark-runner;
 
         packages.scheduler-runner = rustPlatform.buildRustPackage {
           pname = "mcp-js-scheduler-runner";
