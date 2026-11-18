@@ -38,13 +38,18 @@ Key flags used during compilation:
 mcp-v8 --stateless --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
 
-### Stateful mode (persistent sessions)
+### Persistence limitations
 
-```bash
-mcp-v8 --directory-path /tmp/mcp-v8-heaps --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
-```
+Heap snapshots cannot preserve the SQLite WASM runtime or its database. V8's
+`SnapshotCreator` isolate disables WebAssembly, so the server rejects
+`--wasm-module` with `--heap-store dir` or `--heap-store s3`. Use
+`--heap-store none` (the default).
 
-In stateful mode the SQLite wrapper code is snapshotted into the V8 heap, so you only need to initialize it once and can continue using it across subsequent calls by passing the `heap` hash.
+The database lasts for one execution. Although filesystem persistence
+(`--fs-store`) can be enabled independently, this SQLite build has no filesystem
+VFS and opens only `:memory:` databases. It does not automatically write to the
+server's filesystem. Persisting database contents requires an explicit
+export/import workflow or another storage integration, neither supplied here.
 
 ### HTTP transport
 

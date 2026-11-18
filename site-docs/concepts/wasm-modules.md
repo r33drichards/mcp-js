@@ -79,27 +79,21 @@ The default cap is 16 MiB (256 pages). The SQLite example builds with
 cap — 256 pages declared against a 256-page budget, passing the `initial > max`
 check with zero pages to spare.
 
-## Snapshot persistence in stateful mode
+## Heap snapshots and persistence
 
-In stateful mode mcp-v8 persists V8 heap state across calls as a content-addressed
-snapshot. WASM module injection follows the snapshot lifecycle:
+WASM cannot be combined with V8 heap persistence. Heap snapshots require a V8
+`SnapshotCreator` isolate, which disables WebAssembly. The server rejects
+`--wasm-module`/`--wasm-config` with any `--heap-store` other than `none`;
+the embedded engine likewise rejects `wasm_modules` with `heap_store`.
 
-- **First execution on a new heap (no snapshot)**: modules are injected and the
-  resulting globals are baked into the V8 heap before the snapshot is taken. The
-  snapshot captures the compiled `WebAssembly.Module` objects and any
-  auto-instantiated `exports` objects.
-- **Subsequent executions (snapshot exists)**: the snapshot is restored and
-  `inject_wasm_modules` is **not** called again. The globals are already present
-  in the restored heap.
+With heap persistence disabled, each execution receives freshly compiled
+modules from the module bytes loaded at server startup. Module instances and
+WASM linear memory do not survive between executions through a `heap` key.
 
-This makes stateful mode efficient: WASM modules are compiled once per heap, not
-once per call. The trade-off is that existing heap snapshots are bound to the
-modules that were loaded when those heaps were first created. If you restart the
-server with different `--wasm-module` flags, only new heaps (created after the
-restart) pick up the changed modules.
-
-In stateless mode (`--stateless`) there is no snapshot. The module bytes are
-re-validated and re-compiled from disk on every execution.
+[Filesystem persistence](../how-to/fs-snapshots.md) is independent and can be
+used with WASM. It persists explicitly written files, not module instances or
+linear memory. A library needs an explicit storage integration to use it; the
+bundled in-memory SQLite example does not provide one.
 
 ## Discovery: WASM stub tools
 
