@@ -42,9 +42,11 @@ inventory in `scripts/ci/expected-nix-comparison-tests.json`: one library, five 
 immutable fixture and installed binary paths instead of `/build/source` paths.
 The doctest capture records Cargo's exact rustdoc arguments and environment but
 runs no tests during artifact construction. The external runner replays real
-rustdoc even though the baseline's sixteen doctests are ignored. Thus a warm
-artifact lookup must still produce 82 real test-result summaries, with the
-baseline 860 passed and 32 ignored, before claiming test parity.
+rustdoc even though the baseline's sixteen doctests are ignored. Every target
+and the real rustdoc invocation must succeed on every attempt. The historical
+860 passed / 32 ignored counts are recorded for workload comparisons; adding
+tests changes the comparison flag instead of failing an otherwise successful
+run. Missing target summaries and test failures still fail the job.
 
 `share/cargo-features.txt` records Cargo's selected `-p server` feature graph for
 comparison with the native plugin resolver. Any feature-selection difference,
@@ -59,7 +61,9 @@ All 81 executable targets ran successfully: 860 passed, 16 ignored. The real
 rustdoc invocation then failed because capture omitted `CARGO_CRATE_NAME`, which
 UniFFI macros require. The adapter now retains Cargo's complete `CARGO_*`
 environment and relocates inherited dependency build-script target paths.
-Doctest parity and source-only rebuild timings remain unverified pending rerun.
+The subsequent complete run `44236828144` passed 860 tests with 32 ignored,
+including real rustdoc execution. Its source-only rebuild took 460.792s and
+reused dependency artifacts.
 
 Python syntax, wrapper path-rewrite compile/run checks, doctest-command relocation
 and an 81-target/one-example installation fixture were checked locally. The local

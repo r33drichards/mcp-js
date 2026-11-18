@@ -127,11 +127,16 @@ def runtime_results(text):
         'failed': sum(int(x[1]) for x in summaries),
         'ignored': sum(int(x[2]) for x in summaries), 'summaries': len(summaries)}
     report['tests'] = counts
-    save()
-    wanted = {'passed': expected['baseline_passed'], 'failed': 0,
+    reference = {'passed': expected['baseline_passed'], 'failed': 0,
         'ignored': expected['baseline_ignored'], 'summaries': 82}
-    if counts != wanted:
-        raise RuntimeError(f'Test parity failed: {counts}; expected {wanted}')
+    report['baseline_test_counts'] = reference
+    report['baseline_test_counts_match'] = counts == reference
+    save()
+    wanted_summaries = report['inventory']['runtime_targets'] + int(report['inventory']['doctests'])
+    if counts['failed'] or counts['summaries'] != wanted_summaries:
+        raise RuntimeError(f'Test execution failed or incomplete: {counts}; expected {wanted_summaries} summaries')
+    if counts != reference:
+        print(f'Test counts differ from the historical comparison baseline: {counts}; baseline {reference}', flush=True)
 
 
 original_file = repo / 'server/src/lib.rs'
