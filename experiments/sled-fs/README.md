@@ -37,9 +37,11 @@ The tests exercise:
 - Real sled-written blob bytes visible before crash, absent afterward, and
   sled recovery collecting that orphaned blob. This tests pending filesystem
   state, not just a value retained in sled's memory.
-- A negative namespace control: a freshly created, flushed database loses its
-  contents on crash without explicit directory synchronization in the fixture.
-  That is a measured limitation, not a passing durability guarantee.
+- A formerly negative namespace case now recovers a freshly created, flushed
+  database without fixture-side directory synchronization: the Turmoil adapter
+  syncs config bytes and newly created directory entries before acknowledging.
+- Disk-full ClusterNode recovery after an abrupt crash, then a fresh append;
+  seeds 7, 42, and 314 replay the same observed acknowledgment history.
 
 ## Run
 
@@ -101,13 +103,13 @@ with text, **not** raw errno 5/28; tests check propagated error messages. `set_l
 does not check capacity in Turmoil 0.7.2; the cluster test fills the disk using
 actual writes.
 
-Sled does not sync config creation, blob contents, or parent directory entries
-in the reviewed routes. The positive small-value recovery fixture explicitly
-syncs initial config and directories, then relies on sled's log sync. The negative
-control leaves that setup unsynced and confirms data loss. Blob roundtrip tests
-are clean-reopen tests, not a promise that flushed blob values survive crashes.
-A complete durability study must separately cover new databases, blob references,
-snapshot rename/delete ordering, namespace loss, and interrupted writes.
+The opt-in Turmoil backend now fsyncs newly written config bytes and syncs
+newly created blob/journal directory entries (including parent directories)
+before a durable cluster write can be acknowledged. The crash fixture tests
+that guarantee both with and without redundant fixture-side sync. The default
+std backend is unchanged. Blob roundtrips are clean-reopen tests, not proof that
+flushed blob values survive crashes. Snapshot rename/delete ordering, blob
+references, and interrupted writes still need a separate durability study.
 
 ## Source provenance and review
 

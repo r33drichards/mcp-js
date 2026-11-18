@@ -5,7 +5,7 @@ not sled main. `adapter.patch` records exact replacements.
 
 | Route | Original operations | Experimental treatment / coverage |
 | --- | --- | --- |
-| `config.rs`, `Config::open_file`, `write_config`, `read_config` | Directory existence, mkdir, OpenOptions, create_new, read/write/seek/metadata, config serialization | Route through `crate::fs`. Config write error and normal open/reopen tested. Absolute paths required in simulation to avoid cwd dependence. |
+| `config.rs`, `Config::open_file`, `write_config`, `read_config` | Directory existence, mkdir, OpenOptions, create_new, read/write/seek/metadata, config serialization | Route through `crate::fs`. Config writes now fsync and newly created blob/journal paths plus ancestor directories sync under the opt-in simulation feature; crash recovery without fixture sync is tested. Std behavior unchanged. Absolute paths required in simulation to avoid cwd dependence. |
 | `config.rs`, `try_lock` | fs2 blocking/test or nonblocking/production exclusive lock | Std unchanged; explicitly unmodeled under simulation, single opener required. |
 | `config.rs`, `RunningConfig::get_snapshot_files`, Config drop | Path exists/read_dir and remove_dir_all | Path methods replaced with boundary calls. Temporary simulation config rejected; no simulated temp cleanup promise. |
 | `pagecache/parallel_io_unix.rs` | FileExt read_at/read_exact_at/write_all_at, short/interrupted I/O loops | Uses boundary File; real std Unix FileExt is implemented by Turmoil. Log flush and recovery exercised. |
@@ -45,8 +45,8 @@ Turmoil 0.7.2 sources inspected:
 4. Model Linux writeback separately from durable fsync; expose write/sync
    interruption points and error injection at each boundary.
 5. Test snapshot, blob, new-directory, truncation, and teardown failures under
-   realistic ordering. Do not silently make missing directory/blob syncs durable
-   inside the adapter: that would mask sled behavior.
+   realistic ordering. The adapter explicitly syncs initial config and names;
+   distinguish this from upstream sled behavior. Blob/snapshot sync gaps remain.
 6. Extend the cluster lifecycle harness to use the backend safely with multiple
    nodes, worker tasks and restarts. This proof only adds a direct real-cluster
    disk-full test; it does not alter the independent scenario implementation.

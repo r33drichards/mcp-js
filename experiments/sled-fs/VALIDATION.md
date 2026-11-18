@@ -1,5 +1,29 @@
 # Validation record
 
+## Follow-up: 2026-11-18
+
+The original 2026-11-15 record below remains a historical baseline. This
+follow-up supersedes its negative namespace result: the opt-in Turmoil backend
+now fsyncs newly written config and directory names at open. A new test first
+failed on recovery (acknowledged value missing after crash) without fixture sync;
+it passes after the adapter change. The std backend remains unchanged.
+
+| Check | Observed result |
+| --- | --- |
+| Focused real-ClusterNode disk-full/crash/reopen/re-append test (seeds 7, 42, 314, two runs each) | 1 passed |
+| Full isolated experiment with `cluster` | 8 passed (cluster 1, recovery 1, storage 6) |
+| Default std-backend experiment | 1 passed |
+| Upstream sled library, log and tree tests with `testing` | 102 passed, 1 ignored |
+| `git apply --check` against published sled 0.34.7 and patched config comparison | Both succeeded |
+
+The new workflow runs the isolated std and cluster suites on a pull request;
+CI is not claimed green until its checks complete. Outstanding gaps remain:
+JS scenario-runner integration, modeled lock ownership/host generations,
+background worker scheduling, snapshot/blob crash ordering, and fsync-error
+injection. No production storage dependency or default changed.
+
+## Initial record: 2026-11-15
+
 Executed 2026-11-15 in the isolated `poc/sled-turmoil-fs` checkout on x86_64 Linux,
 Rust 1.100.0 (`0ef1bc386`, 2026-11-09). All commands ran from the MCP-JS root.
 The environment had no Rust initially; the toolchain was installed separately at

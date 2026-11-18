@@ -16,25 +16,16 @@
  docs = []
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -1,7 +1,5 @@
- use std::{
+@@ -2,4 +2,2 @@
      collections::HashMap,
 -    fs,
 -    fs::File,
      io,
-     io::{BufRead, BufReader, ErrorKind, Read, Seek, Write},
-     ops::Deref,
-@@ -11,6 +9,7 @@
- 
- use crate::pagecache::{arr_to_u32, u32_to_arr, Lsn};
+@@ -13,2 +11,3 @@
  use crate::*;
 +use crate::fs::{self, File};
  
- const DEFAULT_PATH: &str = "default.sled";
- 
-@@ -520,6 +519,12 @@
- 
-     // panics if config options are outside of advised range
+@@ -522,2 +521,8 @@
      fn validate(&self) -> Result<()> {
 +        #[cfg(feature = "turmoil-fs")]
 +        {
@@ -43,20 +34,32 @@
 +            supported!(self.path.is_absolute(), "turmoil-fs requires an absolute path");
 +        }
          supported!(
-             self.segment_size.count_ones() == 1,
-             "segment_size should be a power of 2"
-@@ -556,7 +561,7 @@
-     fn open_file(&self) -> Result<File> {
-         let blob_dir: PathBuf = self.get_path().join("blobs");
+@@ -558,4 +563,4 @@
  
 -        if !blob_dir.exists() {
+-            fs::create_dir_all(blob_dir)?;
 +        if !fs::exists(&blob_dir) {
-             fs::create_dir_all(blob_dir)?;
++            fs::create_dir_all(&blob_dir)?;
          }
+@@ -575,3 +580,16 @@
  
-@@ -577,8 +582,12 @@
+-        self.try_lock(options.open(&self.db_path())?)
++        let file = self.try_lock(options.open(&self.db_path())?)?;
++
++        #[cfg(feature = "turmoil-fs")]
++        {
++            // Persist newly created blob and journal names before a durable write is acknowledged.
++            fs::sync_dir(&blob_dir)?;
++            let mut dir = self.get_path();
++            loop {
++                fs::sync_dir(&dir)?;
++                if !dir.pop() { break; }
++            }
++        }
++
++        Ok(file)
      }
- 
+@@ -579,4 +597,8 @@
      fn try_lock(&self, file: File) -> Result<File> {
 +        // The experimental Turmoil backend has no OS descriptor/lock API.
 +        // Its supported slice is one live opener per host/path; lock contention
@@ -65,84 +68,26 @@
              not(miri),
 +            not(feature = "turmoil-fs"),
              any(windows, target_os = "linux", target_os = "macos")
-         ))]
-         {
-@@ -773,7 +782,7 @@
-     pub fn truncate_corrupt(&self, new_len: u64) {
-         self.event_log.reset();
+@@ -680,2 +702,4 @@
+         io_fail!(self, "write_config post");
++        #[cfg(feature = "turmoil-fs")]
++        f.sync_all()?;
+         Ok(())
+@@ -775,3 +799,3 @@
          let path = self.db_path();
 -        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
 +        let f = crate::fs::OpenOptions::new().write(true).open(path).unwrap();
          f.set_len(new_len).expect("should be able to truncate");
-     }
- }
-@@ -848,11 +857,11 @@
- 
-         let snap_dir = Path::new(&absolute_path).parent().unwrap();
+@@ -850,3 +874,3 @@
  
 -        if !snap_dir.exists() {
 +        if !fs::exists(snap_dir) {
              fs::create_dir_all(snap_dir)?;
-         }
+@@ -854,3 +878,3 @@
  
 -        Ok(snap_dir.read_dir()?.filter_map(filter).collect())
 +        Ok(fs::read_dir(snap_dir)?.filter_map(filter).collect())
      }
- }
- 
---- /dev/null
-+++ b/src/fs.rs
-@@ -0,0 +1,50 @@
-+//! Compile-time filesystem boundary. The default backend is the original std I/O.
-+//! The experimental backend must only run synchronously inside a Turmoil host.
-+#[cfg(not(feature = "turmoil-fs"))]
-+pub(crate) use std::fs::*;
-+#[cfg(feature = "turmoil-fs")]
-+pub(crate) use turmoil::fs::shim::std::fs::*;
-+
-+#[cfg(not(feature = "turmoil-fs"))]
-+pub(crate) fn exists(path: &std::path::Path) -> bool {
-+    path.exists()
-+}
-+
-+// Preserve sled's Linux writeback behavior exactly for the production backend.
-+#[cfg(all(target_os = "linux", not(feature = "turmoil-fs")))]
-+#[allow(unsafe_code)]
-+pub(crate) fn sync_range(
-+    file: &File,
-+    offset: u64,
-+    len: usize,
-+) -> std::io::Result<()> {
-+    use std::convert::TryFrom;
-+    use std::os::unix::io::AsRawFd;
-+    let ret = unsafe {
-+        libc::sync_file_range(
-+            file.as_raw_fd(),
-+            i64::try_from(offset).unwrap(),
-+            i64::try_from(len).unwrap(),
-+            libc::SYNC_FILE_RANGE_WAIT_BEFORE
-+                | libc::SYNC_FILE_RANGE_WRITE
-+                | libc::SYNC_FILE_RANGE_WAIT_AFTER,
-+        )
-+    };
-+    if ret < 0 {
-+        let error = std::io::Error::last_os_error();
-+        if error.raw_os_error() == Some(libc::ENOSYS) {
-+            file.sync_all()
-+        } else {
-+            Err(error)
-+        }
-+    } else {
-+        Ok(())
-+    }
-+}
-+
-+// Turmoil has no raw fd / sync_file_range. Model a successful log write as
-+// a whole-file sync; this is intentionally stronger than Linux writeback.
-+#[cfg(any(not(target_os = "linux"), feature = "turmoil-fs"))]
-+pub(crate) fn sync_range(file: &File, _: u64, _: usize) -> std::io::Result<()> {
-+    file.sync_all()
-+}
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -183,6 +183,9 @@

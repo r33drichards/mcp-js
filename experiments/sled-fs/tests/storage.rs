@@ -131,7 +131,7 @@ mod simulated {
     #[test]
     fn crash_recovery_without_destructor_flush() -> turmoil::Result {
         for seed in [7, 42, 314] {
-            for (flush_last, durable_namespace) in [(false, true), (true, true), (true, false)] {
+            for (flush_last, explicit_sync) in [(false, true), (true, true), (true, false)] {
                 let mut builder = turmoil::Builder::new();
                 builder.rng_seed(seed).fs().sync_probability(0.0);
                 let mut sim = builder.build();
@@ -147,9 +147,8 @@ mod simulated {
                         if p.load(Ordering::SeqCst) == 0 {
                             db.insert("committed", b"yes")?;
                             db.flush()?;
-                            // sled 0.34.7 does not sync config or namespace creation.
-                            // Explicit fixture setup isolates log durability from that gap.
-                            if durable_namespace {
+                            // Both the adapter-only and explicitly synced cases must recover.
+                            if explicit_sync {
                                 fs::OpenOptions::new()
                                     .write(true)
                                     .open("/crash/conf")?
@@ -168,11 +167,8 @@ mod simulated {
                             // destructor can persist it during crash or later teardown.
                             std::mem::forget(db);
                         } else {
-                            assert_eq!(db.get("committed")?.is_some(), durable_namespace);
-                            if durable_namespace {
-                                assert_eq!(db.get("committed")?.unwrap().as_ref(), b"yes");
-                            }
-                            assert_eq!(db.get("last")?.is_some(), flush_last && durable_namespace);
+                            assert_eq!(db.get("committed")?.unwrap().as_ref(), b"yes");
+                            assert_eq!(db.get("last")?.is_some(), flush_last);
                             drop(db);
                         }
                         c.fetch_add(1, Ordering::SeqCst);
