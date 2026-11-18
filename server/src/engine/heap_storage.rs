@@ -435,8 +435,14 @@ impl HeapStorage for AnyHeapStorage {
         }
     }
 }
+/// Adapt the heap blob design for runtime payloads without duplicating its clients.
+pub struct RuntimeHeapStorage<T: HeapStorage>(pub T);
 #[async_trait]
-impl mcp_metadata_store::runtime_tree::RuntimeBlobs for S3HeapStorage {
-    async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> { HeapStorage::put(self, name, value).await }
-    async fn get(&self, name: &str) -> Result<Vec<u8>, String> { HeapStorage::get(self, name).await }
+impl<T: HeapStorage> mcp_metadata_store::runtime_tree::RuntimeBlobs for RuntimeHeapStorage<T> {
+    async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> {
+        self.0.put(name, value).await
+    }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.0.get(name).await
+    }
 }

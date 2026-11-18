@@ -19,13 +19,30 @@ backend. The parent directory must exist; the database and schema are created
 at startup. Sessions, tags, labels and runtime bookkeeping use separate namespaces
 inside one database file. Runtime records use the `runtime` namespace, independent
 of the HTTP port, and survive process replacement. Runtime persistence also works
-without heap or filesystem snapshot persistence. `--execution-db-path` applies
-only to the default sled mode.
+without heap or filesystem snapshot persistence. Default sled runtime metadata
+uses the execution database under the configured session database directory.
 An open/schema error aborts startup instead of falling back to sled.
 
-Runtime payloads, including artifacts larger than 128 KiB, stay inline in SQLite;
-S3 is not required. The adapter preserves durable writes, CAS and logical deletion.
-DynamoDB retains its existing 128 KiB inline limit and S3 offload behavior.
+The server always writes artifact and console payloads to S3, including empty
+artifacts and small console pages. Configure `--s3-bucket` (or `MCP_V8_S3_BUCKET`)
+to use these features with SQLite, DynamoDB or default sled metadata. Missing S3
+configuration and upload failures are errors; there is no inline or local-file
+fallback. The database reference is published only after S3 acknowledges the
+upload. Overwrites publish a new immutable object reference.
+
+This reuses `S3HeapStorage` and the heap `HeapStorage` interface, with runtime
+objects under `runtime/` (requiring `s3:PutObject` and `s3:GetObject` permissions
+on that prefix). Heap/filesystem snapshot selection remains independent;
+`--cache-dir` does not enable a runtime payload fallback. Old inline records and
+legacy S3 references remain readable; new artifact/console writes always use S3.
+Runtime objects are not automatically garbage-collected; overwrites and failed
+reference publication may leave unreferenced objects.
+
+Execution records and upload grants remain database values. There is no 128 KiB
+spill threshold: the selected database enforces its native limits, and oversized
+metadata writes fail rather than being externalized to S3. SQLite can therefore
+keep large execution results, while DynamoDB rejects items above its 400 KiB
+limit (including keys and attributes).
 
 SQLite uses a bundled library, WAL journaling, `synchronous=FULL`, and a five-second
 busy timeout. Async operations run on Tokio's blocking pool. CAS reserves the
@@ -39,8 +56,8 @@ This is embedded, local SQLite, not rqlite. `--sqlite-path` conflicts with
 Raft log. Use a local filesystem that supports SQLite locking, and include the
 WAL in live backups or use SQLite's backup API. No automatic migration from sled
 is performed, including existing console, artifact and upload-grant data in sled.
-Scheduler and HTTP-function definitions still use their existing stores. Snapshot blobs still
-use the separately selected directory or S3 backend. FFI constructors retain sled
+Scheduler and HTTP-function definitions still use their existing stores.
+Snapshot blobs still use the separately selected directory or S3 backend. FFI constructors retain sled
 as their default.
 
 ```sh
@@ -60,8 +77,10 @@ Docker nor an external database and run in the SQLite metadata CI workflow.
 Runtime coverage checks all three selection methods across hard process restarts:
 large execution results, paginated console output, artifacts, grant redemption,
 one-time use across independent server processes, and rejection of reuse after
-another restart. Tests also
-inspect SQLite rows and verify no sled execution database was created.
+another restart. Tests use a disposable S3 HTTP fixture through the real AWS SDK,
+inspect SQLite references and verify no sled execution database was created.
+Coverage also checks small payloads with sled, missing S3 configuration, failed
+uploads preserving the previous reference, and missing objects without fallback.
 
 ## Server configuration
 
@@ -95,7 +114,8 @@ DynamoDB cannot be combined with `--cluster-port`: it already arbitrates shared
 metadata writes and is not a backend for the existing Raft log. Raft, scheduler
 checkpoints and HTTP-function definitions are **not migrated** by this change.
 Execution records, console pages, artifact records and upload grants use the
-`/runtime` namespace; values larger than 128 KiB require S3 blob storage.
+`/runtime` namespace. Artifact and console bytes always require S3; execution
+records and upload grants stay in DynamoDB and obey its native item limits.
 Completed records can be read by a fresh process, but running isolates and
 cancellation handles remain process-local. This flag does not promise a completely
 diskless runtime. FFI constructors keep their existing sled defaults.

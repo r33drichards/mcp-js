@@ -28,13 +28,6 @@ impl Write {
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
-    /// Runtime payloads above this size are offloaded to blob storage.
-    /// The conservative default preserves bounded DynamoDB item sizes; backends
-    /// that support large inline rows can return None instead.
-    fn runtime_inline_limit(&self) -> Option<usize> {
-        Some(128 * 1024)
-    }
-
     async fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>>;
     async fn put(&self, write: Write) -> Result<()>;
     /// Byte-lexicographic order, optionally reversed. Limit applies after prefix
