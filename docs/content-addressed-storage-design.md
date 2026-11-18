@@ -16,8 +16,9 @@ stronger cluster read guarantees are not enabled.
   references for new runtime objects, verification and deduplication independent
   of artifact metadata, filesystem objects for direct execution registries, and
   legacy reference readers. Heap/filesystem snapshot identities are preserved.
-- The dependent publication implementation adds the revision/receipt facade and
-  optional `RaftMetadataStore`, with deterministic consensus-harness contracts.
+- [#334](https://github.com/r33drichards/mcp-js/pull/334): revision/receipt
+  publication and optional `RaftMetadataStore`, with deterministic consensus-harness
+  contracts.
   Stronger Raft reads fail as unsupported; pending mismatches remain provisional.
 
 The publication facade and Raft adapter are explicit Rust APIs. Existing domain
