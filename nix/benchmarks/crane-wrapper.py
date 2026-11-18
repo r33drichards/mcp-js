@@ -1,6 +1,7 @@
 """Keep paths embedded by Cargo usable after the Nix build sandbox disappears."""
 import json
 import os
+import re
 from pathlib import Path
 import sys
 
@@ -17,6 +18,11 @@ if build_root and not os.path.isabs(target):
 def relocate(value):
     if output and target:
         value = value.replace(target, str(Path(output) / "target"))
+    # Build-script output can retain the previous dependency sandbox's target
+    # path; its artifacts have been inherited into our installed target tree.
+    if output:
+        value = re.sub(r"/(?:nix/var/nix/builds/[^/]+|build)/[^/]+/target/",
+                       str(Path(output) / "target") + "/", value)
     if source and build_root:
         value = value.replace(build_root, source)
     return value
@@ -44,7 +50,7 @@ elif mode == "rustdoc":
         "cwd": relocate(os.getcwd()),
         "environment": {
             key: relocate(value) for key, value in env.items()
-            if key.startswith(("CARGO_PKG_", "CARGO_BIN_EXE_")) or key in ("CARGO_MANIFEST_DIR", "OUT_DIR")
+            if key.startswith("CARGO_") or key in ("CARGO_MANIFEST_DIR", "OUT_DIR")
         },
     }
     with open(Path(output) / "doctests.jsonl", "a") as destination:

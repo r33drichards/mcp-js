@@ -37,7 +37,7 @@ import its public API. The full server fixture source is not a dependency-artifa
 input; project-only changes must leave `benchmark-deps` unchanged.
 
 The test artifact checks its discovered Cargo targets against the baseline
-inventory in `expected-tests.json`: one library, five binary-unit targets,
+inventory in `scripts/ci/expected-nix-comparison-tests.json`: one library, five binary-unit targets,
 75 integration targets and one compile-only example. Its rustc wrapper embeds
 immutable fixture and installed binary paths instead of `/build/source` paths.
 The doctest capture records Cargo's exact rustdoc arguments and environment but
@@ -52,6 +52,14 @@ missing target, build failure or mismatched runtime result makes timings
 non-equivalent; it must be reported rather than suppressed.
 
 ## Validation status
+
+The first complete artifact build succeeded in CI run `44232928137`: 1484.117s
+for compilation and 3.020s for exact warm lookup with identical output paths.
+All 81 executable targets ran successfully: 860 passed, 16 ignored. The real
+rustdoc invocation then failed because capture omitted `CARGO_CRATE_NAME`, which
+UniFFI macros require. The adapter now retains Cargo's complete `CARGO_*`
+environment and relocates inherited dependency build-script target paths.
+Doctest parity and source-only rebuild timings remain unverified pending rerun.
 
 Python syntax, wrapper path-rewrite compile/run checks, doctest-command relocation
 and an 81-target/one-example installation fixture were checked locally. The local

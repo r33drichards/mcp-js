@@ -57,6 +57,13 @@ jobs:
         env:
           STORE_CACHE_RESTORED: ${{ steps.cache.outputs.restored-key }}
         run: python3 scripts/ci/compare-nix-builds.py --implementation crane --results "$RUNNER_TEMP/build-comparison"
+      - name: Preserve valid dependency builds after an integration failure
+        if: failure()
+        uses: nix-community/cache-nix-action/save@d8cff2f74b9341e0d90fbf3c0c0212a161ceaef6 # v6
+        with:
+          primary-key: build-compare-v1-crane-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'nix/benchmarks/**', 'scripts/ci/**', 'server/src/**', 'server/tests/**') }}
+          gc-max-store-size-linux: -1
+          paths: ${{ runner.temp }}/comparison-cargo
       - name: Upload comparison evidence
         if: always()
         uses: actions/upload-artifact@v4

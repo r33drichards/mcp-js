@@ -33,7 +33,7 @@ for line in log.read_text().splitlines():
 # Match Cargo's target execution order; a lib and bin may share their name.
 order = {"lib": 0, "bin": 1, "test": 2}
 records.sort(key=lambda row: (min(order.get(k, 3) for k in row["kind"]), row["name"]))
-expected = json.loads((source / "nix/benchmarks/expected-tests.json").read_text())
+expected = json.loads((source / "scripts/ci/expected-nix-comparison-tests.json").read_text())
 expected_targets = sorted((row["name"], tuple(row["kind"])) for row in expected["targets"]
                           if row["test"] and "example" not in row["kind"])
 actual_targets = sorted((row["name"], tuple(row["kind"])) for row in records)
