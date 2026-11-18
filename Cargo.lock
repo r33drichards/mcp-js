@@ -5355,6 +5355,7 @@ dependencies = [
  "flate2",
  "futures",
  "h2 0.4.14",
+ "hex",
  "hmac",
  "http 1.4.0",
  "http-body-util",

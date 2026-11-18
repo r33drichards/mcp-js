@@ -31,6 +31,13 @@ pub struct ObjectRef {
     pub size_bytes: u64,
 }
 impl ObjectRef {
+    pub fn identify(kind: ObjectKind, bytes: &[u8]) -> Self {
+        Self {
+            kind,
+            digest: Sha256::digest(bytes).into(),
+            size_bytes: bytes.len() as u64,
+        }
+    }
     pub fn key(&self) -> String {
         format!(
             "runtime/v2/{}/{}",
@@ -69,11 +76,7 @@ impl ContentObjects {
         Self { backend }
     }
     pub async fn put(&self, kind: ObjectKind, bytes: &[u8]) -> Result<ObjectRef> {
-        let reference = ObjectRef {
-            kind,
-            digest: Sha256::digest(bytes).into(),
-            size_bytes: bytes.len() as u64,
-        };
+        let reference = ObjectRef::identify(kind, bytes);
         self.backend.put_immutable(&reference.key(), bytes).await?;
         Ok(reference)
     }

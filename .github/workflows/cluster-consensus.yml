@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - 'server/src/cluster*'
+      - 'server/src/raft_metadata.rs'
+      - 'server/metadata-store/**'
       - 'server/tests/cluster*'
       - 'server/cluster-tests/**'
       - '.github/actions/**'
@@ -11,6 +13,8 @@ on:
     branches: [main]
     paths:
       - 'server/src/cluster*'
+      - 'server/src/raft_metadata.rs'
+      - 'server/metadata-store/**'
       - 'server/tests/cluster*'
       - 'server/cluster-tests/**'
       - '.github/actions/**'

@@ -14,6 +14,13 @@ serde_json = "1"
 sled = "0.34"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures = "0.3"
 tracing = "0.1"
+
+async-trait = "0.1"
+hex = "0.4"
+mcp-metadata-store = { path = "../metadata-store", default-features = false }
+
+[profile.dev]
+debug = "line-tables-only"

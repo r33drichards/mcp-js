@@ -66,6 +66,17 @@ impl DynamoDbStore {
 
 #[async_trait]
 impl MetadataStore for DynamoDbStore {
+    fn validate_transaction(&self, primary: &Write, _expected: Option<&[u8]>, companions: &[Write]) -> Result<()> {
+        if companions.len() >= 100 {return Err("DynamoDB transaction exceeds 100 items".into())}
+        let mut keys=BTreeSet::new();let mut total=0;
+        for write in std::iter::once(primary).chain(companions) {
+            if !keys.insert((&write.tree,&write.key)) {return Err("duplicate transaction key".into())}
+            self.item(write)?;
+            total += self.pk(&write.tree).len()+Self::sk(&write.key).len()+write.value.len()+64;
+        }
+        if total>4*1024*1024 {return Err("DynamoDB transaction exceeds 4 MiB".into())}
+        Ok(())
+    }
     async fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let result = self
             .client

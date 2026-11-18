@@ -43,7 +43,8 @@ moving existing objects; no read-error fallback or automatic migration is
 performed. Processes sharing metadata must also share the same S3 bucket or
 filesystem payload directory. Runtime objects are not automatically
 garbage-collected; overwrites and failed reference publication may leave
-unreferenced objects.
+unreferenced objects. New content-addressed references use `runtime/v2/` keys;
+include that prefix in existing `runtime/` object permissions.
 
 Execution records and upload grants remain database values. There is no 128 KiB
 spill threshold: the selected database enforces its native limits, and oversized
@@ -131,11 +132,48 @@ diskless runtime. FFI constructors keep their existing sled defaults.
 
 For deployment steps, see the [Lambda tutorial](../../site-docs/tutorials/lambda-dynamodb.md).
 
-## Shared storage architecture proposal
+## Shared object and publication APIs
 
-See the [content-addressed storage design](../../docs/content-addressed-storage-design.md)
-for a proposed shared object/publication layer and optional Raft metadata adapter.
-It is a design sketch; the current backend and cluster restrictions still apply.
+`blob::BlobStorage` is the shared named-blob boundary (`HeapStorage` and
+`RuntimeBlobs` remain compatibility names). Immutable writes must acknowledge an
+identical existing object or fail on conflicting content; they never overwrite
+it. Server memory, filesystem and S3 backends implement the contract. Common
+backend construction also gives runtime S3 storage the existing cache support.
+
+`content::ContentObjects` stores versioned SHA-256 objects and verifies size and
+digest when reading. New console pages hold compact typed references. Artifact
+metadata stays in the database and points to payload-only objects, so timestamps
+and MIME types do not change payload identity; listing metadata needs no blob
+fetch. UUID, inline and old DynamoDB S3 references remain readable. Heap/fs
+snapshot hashes and formats are unchanged. Compatibility is one-way: old binaries
+do not understand the new runtime reference format. Shared deployments must
+pause runtime writes while upgrading their readers. Rolling back requires
+restoring compatible metadata/object formats.
+Direct execution registries initialize
+filesystem payload storage by default; explicit raw-tree APIs retain legacy
+encoding support.
+
+`publication::MetadataPublication` is an opt-in revisioned metadata facade.
+Publication commits the primary, operation receipt and index companions atomically
+and flushes before acknowledgement. Retries use a per-key operation ID, including
+a request fingerprint; a reused ID with different input fails. Tombstones retain
+revisions. Preflight validation returns known backend size/shape errors before
+mutation; transport/flush uncertainty after mutation returns `UnknownOutcome`.
+Receipts have no automatic expiry in this initial API.
+
+`publication::ObjectPublication` composes immutable object storage with the
+publication facade, writing the object before metadata. The optional server
+`raft_metadata::RaftMetadataStore` adapts binary metadata to consensus. Its reads
+are local committed reads; stronger reads are rejected and pending CAS conflicts
+remain explicitly provisional. It is exercised by the V8-free consensus harness,
+not implicitly enabled for existing server domains. No SQLite Raft persistence
+or automatic blob replication is introduced. Shared GC and migration of existing
+domain routing are separate work.
+
+The metadata crate's default `dynamodb` feature preserves the existing SDK-backed
+backend. Consensus-only consumers can disable default features to avoid compiling
+that SDK. See the [content-addressed storage design](../../docs/content-addressed-storage-design.md)
+for the boundaries, migration stages and remaining guarantees.
 
 ## Semantics and limits
 
@@ -191,3 +229,37 @@ file contents, and verifies the recorded input/output heap chain. Generated entr
 module URLs must remain unique across processes because their module registrations
 are retained in the heap snapshot. The CI command runs this entire test binary,
 including the sled regression.
+
+### Publication example (Rust)
+
+```rust,ignore
+use mcp_metadata_store::{content::{ContentObjects, ObjectKind}, publication::{
+    MetadataPublication, ObjectPublication, Publication, PublishOutcome,
+}};
+
+// metadata: Arc<dyn MetadataStore>, e.g. SqliteStore or RaftMetadataStore.
+// blobs: Arc<dyn BlobStorage>, e.g. FileHeapStorage or S3HeapStorage.
+let service = ObjectPublication {
+    objects: ContentObjects::new(blobs),
+    metadata: MetadataPublication::new(metadata, "artifacts")?,
+};
+let outcome = service.publish(Publication {
+    operation_id: request_id, // retain this ID and the same request when retrying
+    key: b"report.csv".to_vec(),
+    expected_revision: None, // create; updates supply the observed revision
+    value: None, // ObjectPublication fills in the typed content reference
+    companions: vec![],
+}, ObjectKind::Artifact, &bytes).await?;
+match outcome {
+    PublishOutcome::Committed { revision } => { /* acknowledge revision */ }
+    PublishOutcome::UnknownOutcome { .. } => { /* retry same operation ID */ }
+    PublishOutcome::ProvisionalConflict => { /* pending Raft mismatch; no ownership claim */ }
+    PublishOutcome::Conflict => { /* standalone CAS conflict; choose next operation */ }
+}
+```
+
+References returned by `MetadataPublication::read` use `ObjectRef::decode` on the
+record value, followed by `ContentObjects::get` for verified bytes. A tombstone
+retains its revision but has no value. An operation ID is scoped to its key and
+publication namespace; receipts are not an authorization boundary or a garbage
+collection policy.
