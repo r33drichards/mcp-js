@@ -167,12 +167,16 @@ impl Server {
     }
 
     async fn tags(&self, heap: &Value) -> Value {
+        self.tool("get_heap_tags", json!({"heap":heap})).await
+    }
+
+    async fn tool(&self, name: &str, arguments: Value) -> Value {
         let response = self.client.post(format!("{}/mcp", self.url))
             .header("Accept", "application/json, text/event-stream")
             .header("MCP-Protocol-Version", "2026-07-28")
-            .header("Mcp-Method", "tools/call").header("Mcp-Name", "get_heap_tags")
+            .header("Mcp-Method", "tools/call").header("Mcp-Name", name)
             .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"get_heap_tags","arguments":{"heap":heap},"_meta":{
+                "name":name,"arguments":arguments,"_meta":{
                     "io.modelcontextprotocol/protocolVersion":"2026-07-28",
                     "io.modelcontextprotocol/clientInfo":{"name":"sqlite-integration","version":"1"},
                     "io.modelcontextprotocol/clientCapabilities":{}
@@ -212,6 +216,80 @@ impl Server {
         // Kill/reap rather than sharing an Engine/store handle across "restart".
         self.child.kill().await.unwrap();
         self.child.wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn sqlite_runtime_records_console_artifacts_and_upload_grants_survive_restart() {
+    for selection in ["flag", "env", "config"] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start(dir.path(), selection).await;
+        let settled = server.tool("run_js", json!({"wait":true,"code":
+            "console.log('C'.repeat(150000)); console.log('tail'); \
+             artifact('saved.bin', 'application/octet-stream', new Uint8Array(500000).fill(7)); \
+             export const __mcp_http_result = 'R'.repeat(150000);"
+        })).await;
+        assert_eq!(settled["status"], "completed", "{settled}");
+        let id = settled["execution_id"].as_str().unwrap();
+        let execution = server.get(&format!("/api/executions/{id}")).await;
+        assert_eq!(execution["result"].as_str().unwrap().len(), 150_000);
+        assert_eq!(execution["artifacts"][0]["key"], "saved.bin");
+        let output_path = format!("/api/executions/{id}/output?byte_offset=10&byte_limit=32");
+        let output = server.get(&output_path).await;
+        assert_eq!(output["data"], "C".repeat(32));
+        assert_eq!(output["has_more"], true);
+        let grant = server.tool("get_artifact_upload_url", json!({
+            "key":"uploaded.bin", "mime_type":"application/octet-stream", "expires_in_secs":300
+        })).await;
+        let grant_path = grant["path"].as_str().unwrap();
+        server.stop().await;
+
+        let store = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
+        let row = store.get("execution_records", id.as_bytes()).await.unwrap();
+        assert!(row.is_some(), "{selection}: execution record missing from SQLite");
+        let row = row.unwrap();
+        assert_eq!(row[0], 1, "execution result must be inline, without S3");
+        assert!(row.len() > 128 * 1024);
+        assert!(store.get("artifacts", b"saved.bin").await.unwrap().is_some());
+        assert!(!store.scan(&format!("ex:{id}"), b"", false, None).await.unwrap().is_empty());
+        assert_eq!(store.scan("artifact_uploads", b"", false, None).await.unwrap().len(), 1);
+        if let Ok(entries) = std::fs::read_dir(dir.path().join("local")) {
+            for entry in entries {
+                assert!(!entry.unwrap().file_name().to_string_lossy().starts_with("executions"),
+                    "{selection}: SQLite mode must not open a sled execution database");
+            }
+        }
+
+        let server = Server::start(dir.path(), selection).await;
+        assert_eq!(server.get(&format!("/api/executions/{id}")).await, execution);
+        assert_eq!(server.get(&output_path).await, output);
+        let listed = server.get("/api/executions").await;
+        assert!(listed["executions"].as_array().unwrap().iter()
+            .any(|entry| entry["execution_id"] == id));
+        let saved = server.client.get(format!("{}/api/artifacts/saved.bin", server.url))
+            .send().await.unwrap().error_for_status().unwrap().bytes().await.unwrap();
+        assert_eq!(saved.as_ref(), vec![7; 500_000]);
+
+        // The grant survives restart, and simultaneous redemption still has one winner.
+        let upload_url = format!("{}{grant_path}", server.url);
+        let upload = vec![8; 500_000];
+        let (first, second) = tokio::join!(
+            server.client.put(&upload_url).body(upload.clone()).send(),
+            server.client.put(&upload_url).body(upload.clone()).send()
+        );
+        let mut statuses = [first.unwrap().status().as_u16(), second.unwrap().status().as_u16()];
+        statuses.sort_unstable();
+        assert_eq!(statuses, [200, 404]);
+        server.stop().await;
+
+        let server = Server::start(dir.path(), selection).await;
+        assert_eq!(server.client.put(format!("{}{grant_path}", server.url))
+            .body("must not overwrite").send().await.unwrap().status(), StatusCode::NOT_FOUND);
+        let uploaded = server.client.get(format!("{}/api/artifacts/uploaded.bin", server.url))
+            .send().await.unwrap().error_for_status().unwrap().bytes().await.unwrap();
+        assert_eq!(uploaded.as_ref(), upload);
+        assert_eq!(server.get(&format!("/api/executions/{id}")).await, execution);
+        server.stop().await;
     }
 }
 
