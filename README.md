@@ -405,7 +405,10 @@ schema, IAM, limits, and LocalStack/Testcontainers setup.
 ### Optional SQLite metadata backend
 
 Use `--sqlite-path ./data/metadata.sqlite` (or `MCP_V8_SQLITE_PATH`) for embedded
-SQLite session histories, heap tags, and filesystem labels/reflogs. Create the
-parent directory first and enable heap or filesystem persistence. This mode
-cannot be combined with `--cluster-port` or `--dynamodb-table`; other local stores
-still use sled. See [metadata backend configuration](server/metadata-store/README.md).
+SQLite session histories, heap tags, filesystem labels/reflogs, execution records,
+console pages, artifacts and upload grants. Create the parent directory first.
+Runtime payloads stay in SQLite without requiring S3; snapshot blobs keep their
+separately selected backend. This mode cannot be combined with `--cluster-port`
+or `--dynamodb-table`; the Raft log and scheduler keep their existing stores.
+Existing sled data is not migrated automatically.
+See [metadata backend configuration](server/metadata-store/README.md).

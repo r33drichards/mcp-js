@@ -719,6 +719,13 @@ async fn attach_filesystem(
 }
 
 async fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) -> Result<Engine> {
+    if config.sqlite_path.is_some() {
+        let store = configured_metadata(config, "runtime")
+            .await?
+            .ok_or_else(|| anyhow!("SQLite runtime metadata backend is unavailable"))?;
+        let registry = ExecutionRegistry::from_store(store).map_err(|error| anyhow!(error))?;
+        return Ok(engine.with_execution_registry(Arc::new(registry)));
+    }
     if let Some(table) = config.dynamodb_table.clone() {
         let namespace = format!("{}/runtime", config.dynamodb_namespace);
         let bucket = config.s3_bucket.clone();

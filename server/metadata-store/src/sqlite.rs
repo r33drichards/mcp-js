@@ -16,7 +16,7 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     /// Open a local database file. Its parent directory must already exist.
-    /// Namespaces isolate sessions, tags and labels within the same file.
+    /// Namespaces isolate sessions, tags, labels and runtime records in one file.
     pub fn open(path: impl AsRef<Path>, namespace: &str) -> Result<Self> {
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
         connection
@@ -69,6 +69,10 @@ fn put(connection: &Connection, namespace: &str, w: &Write) -> rusqlite::Result<
 
 #[async_trait]
 impl MetadataStore for SqliteStore {
+    fn runtime_inline_limit(&self) -> Option<usize> {
+        None
+    }
+
     async fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let (tree, key) = (tree.to_owned(), key.to_vec());
         self.run(move |connection, namespace| {

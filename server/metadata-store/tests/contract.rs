@@ -304,7 +304,15 @@ async fn dynamodb_contract(endpoint: String) {
     ))
     .await;
     let runtime_store = Arc::new(DynamoDbStore::new(client.clone(), &table, "runtime-test").unwrap());
-    tokio::task::spawn_blocking(move || runtime_contract(runtime_store)).await.unwrap();
+    tokio::task::spawn_blocking(move || {
+        runtime_contract(runtime_store.clone());
+        let tree = mcp_metadata_store::RuntimeStore::new(runtime_store)
+            .unwrap()
+            .tree("runtime-size-limit");
+        let error = tree.insert(b"large", vec![0; 500_000]).unwrap_err();
+        assert!(error.contains("requires S3 blob storage"), "{error}");
+        assert!(tree.get(b"large").unwrap().is_none());
+    }).await.unwrap();
     let reopened = DynamoDbStore::new(client.clone(), &table, "test").unwrap();
     assert!(reopened.get("heads", b"main").await.unwrap().is_some());
     let other = DynamoDbStore::new(client.clone(), &table, "test-other").unwrap();
@@ -442,30 +450,43 @@ async fn runtime_sqlite_large_values_reopen_and_cas_without_blob_storage() {
         .tree("artifacts");
     assert_eq!(reopened.get(b"large").unwrap(), Some(first.clone()));
     let second = vec![43; 600_000];
-    assert!(reopened
-        .compare_and_swap(b"large", Some(first.clone()), Some(second.clone()))
-        .unwrap()
-        .is_ok());
-    assert!(reopened
-        .compare_and_swap(b"large", Some(first), Some(vec![0]))
-        .unwrap()
-        .is_err());
-    assert_eq!(reopened.iter().collect::<Result<Vec<_>, _>>().unwrap(),
-        vec![(b"large".to_vec(), second.clone())]);
+    assert!(
+        reopened
+            .compare_and_swap(b"large", Some(first.clone()), Some(second.clone()))
+            .unwrap()
+            .is_ok()
+    );
+    assert!(
+        reopened
+            .compare_and_swap(b"large", Some(first), Some(vec![0]))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        reopened.iter().collect::<Result<Vec<_>, _>>().unwrap(),
+        vec![(b"large".to_vec(), second.clone())]
+    );
     let raw = store.get("artifacts", b"large").await.unwrap().unwrap();
-    assert_eq!(raw[0], 1, "SQLite must store the inline envelope, not an S3 reference");
+    assert_eq!(
+        raw[0], 1,
+        "SQLite must store the inline envelope, not an S3 reference"
+    );
     assert_eq!(&raw[1..], second);
     reopened.remove(b"large").unwrap();
     assert!(reopened.get(b"large").unwrap().is_none());
-    assert!(reopened
-        .compare_and_swap(b"large", None, Some(second.clone()))
-        .unwrap()
-        .is_ok());
+    assert!(
+        reopened
+            .compare_and_swap(b"large", None, Some(second.clone()))
+            .unwrap()
+            .is_ok()
+    );
     assert_eq!(reopened.get(b"large").unwrap(), Some(second));
-    assert!(SqliteStore::open(&path, "other")
-        .unwrap()
-        .get("artifacts", b"large")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        SqliteStore::open(&path, "other")
+            .unwrap()
+            .get("artifacts", b"large")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

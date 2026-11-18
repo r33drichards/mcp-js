@@ -136,7 +136,7 @@ impl ExecutionRegistry {
         Ok(())
     }
 
-    /// Register a new execution. Returns the sled tree for console output.
+    /// Register a new execution. Returns its backend tree for console output.
     pub fn register(&self, id: &str) -> Result<RuntimeTree, String> {
         let tree_name = format!("ex:{}", id);
         let tree = self.tree(&tree_name)

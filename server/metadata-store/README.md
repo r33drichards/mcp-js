@@ -1,7 +1,8 @@
 # Metadata backends
 
 `MetadataStore` is the asynchronous, binary-safe persistence boundary for
-mcp-js session histories, heap tags, and filesystem label heads/reflogs.
+mcp-js session histories, heap tags, filesystem label heads/reflogs and runtime
+bookkeeping (execution records, console pages, artifacts and upload grants).
 `SledStore` preserves existing sled tree names/key/value encodings and remains
 the default. `SqliteStore` adds embedded SQLite and `DynamoDbStore` adds shared
 DynamoDB metadata.
@@ -15,9 +16,16 @@ mcp-v8 --http-port 3000 --sqlite-path ./data/metadata.sqlite --fs-store dir
 
 `MCP_V8_SQLITE_PATH` or `sqlite_path` in a TOML/JSON config file selects the same
 backend. The parent directory must exist; the database and schema are created
-on first use by an enabled persistence axis (`--heap-store` or `--fs-store`).
-Sessions, tags and labels use separate namespaces inside one database file.
+at startup. Sessions, tags, labels and runtime bookkeeping use separate namespaces
+inside one database file. Runtime records use the `runtime` namespace, independent
+of the HTTP port, and survive process replacement. Runtime persistence also works
+without heap or filesystem snapshot persistence. `--execution-db-path` applies
+only to the default sled mode.
 An open/schema error aborts startup instead of falling back to sled.
+
+Runtime payloads, including artifacts larger than 128 KiB, stay inline in SQLite;
+S3 is not required. The adapter preserves durable writes, CAS and logical deletion.
+DynamoDB retains its existing 128 KiB inline limit and S3 offload behavior.
 
 SQLite uses a bundled library, WAL journaling, `synchronous=FULL`, and a five-second
 busy timeout. Async operations run on Tokio's blocking pool. CAS reserves the
@@ -30,8 +38,8 @@ This is embedded, local SQLite, not rqlite. `--sqlite-path` conflicts with
 `--dynamodb-table` and `--cluster-port`; it does not change the app's sled-backed
 Raft log. Use a local filesystem that supports SQLite locking, and include the
 WAL in live backups or use SQLite's backup API. No automatic migration from sled
-is performed. The execution registry, console output, artifacts, scheduler and
-HTTP-function definitions still use their existing stores. Snapshot blobs still
+is performed, including existing console, artifact and upload-grant data in sled.
+Scheduler and HTTP-function definitions still use their existing stores. Snapshot blobs still
 use the separately selected directory or S3 backend. FFI constructors retain sled
 as their default.
 
@@ -48,6 +56,12 @@ through HTTP, and verifies rejected label CAS writes no reflog entry. It also
 checks CLI/environment/config selection against the actual SQLite rows and
 invalid-path startup failure without sled fallback. These tests need neither
 Docker nor an external database and run in the SQLite metadata CI workflow.
+
+Runtime coverage checks all three selection methods across hard process restarts:
+large execution results, paginated console output, artifacts, grant redemption,
+one-time use across independent server processes, and rejection of reuse after
+another restart. Tests also
+inspect SQLite rows and verify no sled execution database was created.
 
 ## Server configuration
 
