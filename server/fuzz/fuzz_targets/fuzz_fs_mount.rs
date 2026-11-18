@@ -268,6 +268,15 @@ fuzz_target!(|ops: Vec<Op>| {
                             res.is_err(),
                             "symlink over existing {link_raw:?} must fail"
                         );
+                    } else if !descendants(&model, &link_key).is_empty() {
+                        // The link path is an implicit directory (parent of a
+                        // live file); the mount reports EEXIST for it exactly
+                        // as it does for files, and a symlink must not replace
+                        // a directory.
+                        assert!(
+                            res.is_err(),
+                            "symlink over directory {link_raw:?} must fail"
+                        );
                     } else {
                         res.expect("symlink");
                         model.insert(
