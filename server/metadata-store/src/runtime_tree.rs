@@ -92,9 +92,8 @@ impl RuntimeStore {
         let blobs = self.blobs.clone();
         self.call(move |rt, _| {
             wait(rt, async {
-                let blobs = blobs.ok_or(
-                    "S3 is required for artifacts and console output; configure --s3-bucket",
-                )?;
+                let blobs =
+                    blobs.ok_or("blob storage is required for artifacts and console output")?;
                 let name = format!("runtime/{}", uuid::Uuid::new_v4());
                 blobs.put(&name, &value).await?;
                 let mut reference = PAYLOAD_REFERENCE.to_vec();
@@ -118,7 +117,7 @@ impl RuntimeStore {
         self.call(move |rt, _| {
             wait(rt, async {
                 blobs
-                    .ok_or("S3 is required to read this runtime payload")?
+                    .ok_or("blob storage is required to read this runtime payload")?
                     .get(&name)
                     .await
             })
@@ -202,7 +201,7 @@ impl RuntimeTree {
             Self::Remote { .. } => Ok(()),
         }
     }
-    /// Store every payload in S3, publishing its database reference only after upload succeeds.
+    /// Store every payload in blob storage, publishing its database reference only after upload succeeds.
     pub fn with_payload_store(self, store: RuntimeStore) -> Self {
         Self::Payload {
             metadata: Box::new(self),

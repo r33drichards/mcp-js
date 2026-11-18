@@ -23,20 +23,27 @@ without heap or filesystem snapshot persistence. Default sled runtime metadata
 uses the execution database under the configured session database directory.
 An open/schema error aborts startup instead of falling back to sled.
 
-The server always writes artifact and console payloads to S3, including empty
-artifacts and small console pages. Configure `--s3-bucket` (or `MCP_V8_S3_BUCKET`)
-to use these features with SQLite, DynamoDB or default sled metadata. Missing S3
-configuration and upload failures are errors; there is no inline or local-file
-fallback. The database reference is published only after S3 acknowledges the
-upload. Overwrites publish a new immutable object reference.
+The server stores artifact and console payloads outside the database, including
+empty artifacts and small console pages. Configure `--s3-bucket` (or
+`MCP_V8_S3_BUCKET`) to use S3; otherwise payloads use files under
+`<session-db-path>/runtime-blobs`. This applies with SQLite, DynamoDB or default
+sled metadata. The database reference is published only after the blob write
+succeeds. Overwrites publish a new immutable object reference, and sled references
+are flushed before acknowledgement.
 
-This reuses `S3HeapStorage` and the heap `HeapStorage` interface, with runtime
-objects under `runtime/` (requiring `s3:PutObject` and `s3:GetObject` permissions
-on that prefix). Heap/filesystem snapshot selection remains independent;
-`--cache-dir` does not enable a runtime payload fallback. Old inline records and
-legacy S3 references remain readable; new artifact/console writes always use S3.
-Runtime objects are not automatically garbage-collected; overwrites and failed
-reference publication may leave unreferenced objects.
+Both backends reuse the heap `HeapStorage` interface: `S3HeapStorage` and
+`FileHeapStorage`. Objects use the `runtime/` prefix (S3 needs `s3:PutObject` and
+`s3:GetObject` permissions there). Backend selection happens at startup: S3
+errors never switch to filesystem storage, and filesystem errors never store the
+payload inline. Heap/filesystem snapshot selection remains independent.
+
+Old inline records and legacy S3 references remain readable. New artifact/console
+writes always use the selected blob backend. Changing that backend requires
+moving existing objects; no read-error fallback or automatic migration is
+performed. Processes sharing metadata must also share the same S3 bucket or
+filesystem payload directory. Runtime objects are not automatically
+garbage-collected; overwrites and failed reference publication may leave
+unreferenced objects.
 
 Execution records and upload grants remain database values. There is no 128 KiB
 spill threshold: the selected database enforces its native limits, and oversized
@@ -79,8 +86,9 @@ large execution results, paginated console output, artifacts, grant redemption,
 one-time use across independent server processes, and rejection of reuse after
 another restart. Tests use a disposable S3 HTTP fixture through the real AWS SDK,
 inspect SQLite references and verify no sled execution database was created.
-Coverage also checks small payloads with sled, missing S3 configuration, failed
-uploads preserving the previous reference, and missing objects without fallback.
+Coverage also checks small payloads with sled, filesystem persistence across
+hard restarts, failed S3 uploads preserving the previous reference, missing
+objects without fallback, and filesystem errors without database fallback.
 
 ## Server configuration
 
@@ -114,8 +122,9 @@ DynamoDB cannot be combined with `--cluster-port`: it already arbitrates shared
 metadata writes and is not a backend for the existing Raft log. Raft, scheduler
 checkpoints and HTTP-function definitions are **not migrated** by this change.
 Execution records, console pages, artifact records and upload grants use the
-`/runtime` namespace. Artifact and console bytes always require S3; execution
-records and upload grants stay in DynamoDB and obey its native item limits.
+`/runtime` namespace. Artifact and console bytes use the configured S3 bucket or
+the local payload directory; execution records and upload grants stay in DynamoDB
+and obey its native item limits.
 Completed records can be read by a fresh process, but running isolates and
 cancellation handles remain process-local. This flag does not promise a completely
 diskless runtime. FFI constructors keep their existing sled defaults.

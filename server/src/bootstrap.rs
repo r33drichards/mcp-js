@@ -718,25 +718,26 @@ async fn attach_filesystem(
     }
 }
 
-async fn runtime_s3_blobs(
+async fn runtime_blobs(
     bucket: Option<String>,
-) -> Option<Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs>> {
+    directory: std::path::PathBuf,
+) -> Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs> {
+    use crate::engine::heap_storage::{FileHeapStorage, RuntimeHeapStorage};
     match bucket {
-        Some(bucket) => Some(Arc::new(crate::engine::heap_storage::RuntimeHeapStorage(
-            S3HeapStorage::new(bucket).await,
-        ))),
-        None => None,
+        Some(bucket) => Arc::new(RuntimeHeapStorage(S3HeapStorage::new(bucket).await)),
+        None => Arc::new(RuntimeHeapStorage(FileHeapStorage::new(directory))),
     }
 }
 
 async fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) -> Result<Engine> {
+    let payload_directory = std::path::Path::new(&config.session_db_path).join("runtime-blobs");
     if config.sqlite_path.is_some() {
         let store = configured_metadata(config, "runtime")
             .await?
             .ok_or_else(|| anyhow!("SQLite runtime metadata backend is unavailable"))?;
         let bucket = config.s3_bucket.clone();
         let remote = mcp_metadata_store::RuntimeStore::from_factory(async move {
-            Ok((store, runtime_s3_blobs(bucket).await))
+            Ok((store, Some(runtime_blobs(bucket, payload_directory).await)))
         }).map_err(|error|anyhow!(error))?;
         return Ok(engine.with_execution_registry(Arc::new(ExecutionRegistry::from_runtime(remote))));
     }
@@ -747,7 +748,7 @@ async fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConf
             let sdk = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let store: Arc<dyn mcp_metadata_store::MetadataStore> = Arc::new(mcp_metadata_store::DynamoDbStore::new(aws_sdk_dynamodb::Client::new(&sdk), table, &namespace)?);
             store.get("__probe", b"ready").await?;
-            let blobs = runtime_s3_blobs(bucket).await;
+            let blobs = Some(runtime_blobs(bucket, payload_directory).await);
             Ok((store, blobs))
         }).map_err(|e|anyhow!(e))?;
         return Ok(engine.with_execution_registry(Arc::new(ExecutionRegistry::from_runtime(remote))));
@@ -761,7 +762,7 @@ async fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConf
         });
     let bucket = config.s3_bucket.clone();
     match ExecutionRegistry::new(&path).and_then(|registry| registry.with_local_blob_factory(async move {
-        Ok(runtime_s3_blobs(bucket).await)
+        Ok(Some(runtime_blobs(bucket, payload_directory).await))
     })) {
         Ok(registry) => {
             tracing::info!("Execution registry opened at {}", path);

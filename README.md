@@ -407,8 +407,8 @@ schema, IAM, limits, and LocalStack/Testcontainers setup.
 Use `--sqlite-path ./data/metadata.sqlite` (or `MCP_V8_SQLITE_PATH`) for embedded
 SQLite session histories, heap tags, filesystem labels/reflogs, execution records,
 console pages, artifacts and upload grants. Create the parent directory first.
-Artifact and console payloads always use `--s3-bucket`; SQLite holds their
-references. Other runtime records stay in SQLite, with no size-based S3 offload.
+Artifact and console payloads use `--s3-bucket` when configured, otherwise files
+under `<session-db-path>/runtime-blobs`; SQLite holds their references. Other runtime records stay in SQLite, with no size-based S3 offload.
 Snapshot blobs keep their separately selected backend. This mode cannot be
 combined with `--cluster-port`
 or `--dynamodb-table`; the Raft log and scheduler keep their existing stores.

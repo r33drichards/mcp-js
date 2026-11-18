@@ -2,7 +2,7 @@
 //!
 //! Intercepts `console.log`, `console.info`, `console.warn`, and `console.error`
 //! calls and buffers output in fixed-size pages. Server registries put each
-//! page in S3 and retain its ordered reference in the metadata database.
+//! page in the S3/filesystem blob backend and retain its ordered reference in the metadata database.
 
 use std::cell::RefCell;
 use std::sync::{

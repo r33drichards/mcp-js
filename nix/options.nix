@@ -238,7 +238,7 @@
   s3_bucket = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "S3 bucket for artifact and console payloads, and snapshot axes selecting `s3`. Required to persist artifacts or console output, or use `--heap-store s3` / `--fs-store s3`. Config-file key for the `--s3-bucket` flag. Environment variable: `MCP_V8_S3_BUCKET`.";
+    description = "S3 bucket for artifact and console payloads (otherwise stored on disk), and snapshot axes selecting `s3`. Required for `--heap-store s3` or `--fs-store s3`. Config-file key for the `--s3-bucket` flag. Environment variable: `MCP_V8_S3_BUCKET`.";
   };
   sandbox = lib.mkOption {
     type = lib.types.nullOr (lib.types.attrsOf lib.types.anything);

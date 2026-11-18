@@ -105,6 +105,9 @@ impl FileHeapStorage {
 impl HeapStorage for FileHeapStorage {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         let path = self.dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;
+        }
         std::fs::write(path, data).map_err(|e| e.to_string())
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {

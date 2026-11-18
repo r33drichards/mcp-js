@@ -358,8 +358,8 @@ pub struct Cli {
     pub sandbox_manifest: Option<String>,
 
     // ── Shared S3 backend ─────────────────────────────────────────────────
-    /// S3 bucket for artifact and console payloads, and snapshot axes selecting `s3`.
-    /// Required to persist artifacts or console output, or use `--heap-store s3` / `--fs-store s3`.
+    /// S3 bucket for artifact and console payloads (otherwise stored on disk), and snapshot axes selecting `s3`.
+    /// Required for `--heap-store s3` or `--fs-store s3`.
     #[arg(long, env = "MCP_V8_S3_BUCKET", help_heading = "Storage (S3)")]
     pub s3_bucket: Option<String>,
 

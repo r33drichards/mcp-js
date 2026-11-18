@@ -2,7 +2,7 @@
 //!
 //! Each execution is assigned a UUID, tracked in an in-memory `DashMap`, and
 //! has its console pages indexed by a per-execution runtime tree (`"ex:{id}"`).
-//! Server registries store those payloads in S3.
+//! Server registries store those payloads in the S3/filesystem blob backend.
 //! Supports querying console output by line offset or byte offset, and
 //! cancellation via V8's `IsolateHandle::terminate_execution()`.
 
@@ -125,7 +125,7 @@ impl ExecutionRegistry {
         self.remote = self.remote.map(|store| store.with_blobs(blobs)); self
     }
 
-    /// Keep local sled metadata encodings while requiring S3 for runtime payloads.
+    /// Keep local sled metadata encodings while storing payloads in the selected blob backend.
     pub fn with_local_blob_factory<F>(mut self, factory: F) -> Result<Self, String>
     where F: std::future::Future<Output=Result<Option<Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs>>, String>> + Send + 'static {
         let db = self.db.clone().ok_or("local execution database unavailable")?;

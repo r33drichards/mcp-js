@@ -652,47 +652,10 @@ async fn sled_heap_restore_survives_repeated_server_restarts() {
 }
 
 #[tokio::test]
-async fn runtime_s3_required_and_failed_upload_never_replaces_database_reference() {
+async fn runtime_s3_failure_never_replaces_reference_or_falls_back_to_files() {
     use std::sync::atomic::Ordering;
     for selection in ["flag", "sled"] {
         let dir = tempfile::tempdir().unwrap();
-        let server = Server::start_with_s3(dir.path(), selection, None).await;
-        let response = server
-            .client
-            .put(format!("{}/api/artifacts/tiny.txt", server.url))
-            .header("content-type", "text/plain")
-            .body("tiny")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(response.text().await.unwrap().contains("S3"));
-        let accepted = server
-            .post(
-                "/api/exec",
-                json!({"code":"console.log('must not be stored inline')"}),
-                StatusCode::ACCEPTED,
-            )
-            .await;
-        let id = accepted["execution_id"].as_str().unwrap();
-        let failure = timeout(Duration::from_secs(10), async {
-            loop {
-                let info = server.get(&format!("/api/executions/{id}")).await;
-                if info["status"] != "running" {
-                    break info;
-                }
-                sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(failure["status"], "failed", "{failure}");
-        assert!(
-            failure["error"].as_str().unwrap().contains("S3"),
-            "{failure}"
-        );
-        server.stop().await;
-
         let s3 = s3::S3::start().await;
         let server = Server::start_with_s3(dir.path(), selection, Some(&s3)).await;
         let result = server.tool("run_js", json!({"wait":true, "code":
@@ -724,6 +687,10 @@ async fn runtime_s3_required_and_failed_upload_never_replaces_database_reference
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !dir.path().join("local/runtime-blobs").exists(),
+            "S3 failures must not switch to files"
+        );
         let response = server
             .client
             .get(format!("{}/api/artifacts/tiny.txt", server.url))
@@ -755,4 +722,71 @@ async fn runtime_s3_required_and_failed_upload_never_replaces_database_reference
         );
         server.stop().await;
     }
+}
+
+#[tokio::test]
+async fn runtime_filesystem_payloads_survive_restart_and_never_live_in_the_database() {
+    for selection in ["flag", "sled"] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start_with_s3(dir.path(), selection, None).await;
+        let result = server.tool("run_js", json!({"wait":true,"code":
+            "console.log('filesystem console'); artifact('file.bin', 'application/octet-stream', new Uint8Array(500000).fill(9));"
+        })).await;
+        assert_eq!(result["status"], "completed", "{result}");
+        let id = result["execution_id"].as_str().unwrap();
+        let output_path = format!("/api/executions/{id}/output");
+        let output = server.get(&output_path).await;
+        let files: Vec<_> = std::fs::read_dir(dir.path().join("local/runtime-blobs/runtime"))
+            .unwrap()
+            .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(files.iter().any(|value| value.ends_with(&vec![9; 500_000])));
+        assert!(
+            files
+                .iter()
+                .any(|value| String::from_utf8_lossy(value).contains("filesystem console"))
+        );
+        if selection == "flag" {
+            let db = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
+            let value = db.get("artifacts", b"file.bin").await.unwrap().unwrap();
+            assert!(value.len() < 128, "database must contain only a reference");
+        }
+        server.stop().await;
+        let server = Server::start_with_s3(dir.path(), selection, None).await;
+        let response = server
+            .client
+            .get(format!("{}/api/artifacts/file.bin", server.url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), vec![9; 500_000]);
+        let mut recovered = server.get(&output_path).await;
+        let mut output = output;
+        if selection == "sled" {
+            // Default sled execution status is process-local; compare the durable console page.
+            recovered.as_object_mut().unwrap().remove("status");
+            output.as_object_mut().unwrap().remove("status");
+        }
+        assert_eq!(recovered, output);
+        server.stop().await;
+    }
+    // A non-writable payload location is an error, never a database fallback.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("local")).unwrap();
+    std::fs::write(dir.path().join("local/runtime-blobs"), b"not a directory").unwrap();
+    let server = Server::start_with_s3(dir.path(), "flag", None).await;
+    let response = server
+        .client
+        .put(format!("{}/api/artifacts/file.txt", server.url))
+        .header("content-type", "text/plain")
+        .body("must not be inline")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let db = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
+    assert!(db.get("artifacts", b"file.txt").await.unwrap().is_none());
+    server.stop().await;
 }
