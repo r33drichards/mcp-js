@@ -69,10 +69,6 @@ fn put(connection: &Connection, namespace: &str, w: &Write) -> rusqlite::Result<
 
 #[async_trait]
 impl MetadataStore for SqliteStore {
-    fn runtime_inline_limit(&self) -> Option<usize> {
-        None
-    }
-
     async fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let (tree, key) = (tree.to_owned(), key.to_vec());
         self.run(move |connection, namespace| {

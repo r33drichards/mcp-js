@@ -306,12 +306,25 @@ async fn dynamodb_contract(endpoint: String) {
     let runtime_store = Arc::new(DynamoDbStore::new(client.clone(), &table, "runtime-test").unwrap());
     tokio::task::spawn_blocking(move || {
         runtime_contract(runtime_store.clone());
-        let tree = mcp_metadata_store::RuntimeStore::new(runtime_store)
-            .unwrap()
-            .tree("runtime-size-limit");
+        let blobs = Arc::new(TestBlobs::default());
+        let runtime = mcp_metadata_store::RuntimeStore::new(runtime_store)
+            .unwrap().with_blobs(blobs.clone());
+        let tree = runtime.tree("runtime-size-limit");
+        // Above the old threshold but below DynamoDB's native item limit.
+        tree.insert(b"metadata", vec![7; 200_000]).unwrap();
         let error = tree.insert(b"large", vec![0; 500_000]).unwrap_err();
-        assert!(!error.is_empty());
+        assert!(error.contains("size limit exceeded"), "{error}");
         assert!(tree.get(b"large").unwrap().is_none());
+        assert!(tree.compare_and_swap(b"metadata", Some(vec![7; 200_000]), Some(vec![0; 500_000])).is_err());
+        assert_eq!(tree.get(b"metadata").unwrap(), Some(vec![7; 200_000]));
+        assert!(blobs.0.lock().unwrap().is_empty(), "metadata must never spill to S3");
+        for name in ["artifacts", "ex:test"] {
+            let payloads = runtime.tree(name);
+            for bytes in [b"tiny".to_vec(), vec![8; 500_000]] {
+                payloads.insert(b"key", &bytes).unwrap();
+                assert_eq!(payloads.get(b"key").unwrap(), Some(bytes));
+            }
+        }
     }).await.unwrap();
     let reopened = DynamoDbStore::new(client.clone(), &table, "test").unwrap();
     assert!(reopened.get("heads", b"main").await.unwrap().is_some());

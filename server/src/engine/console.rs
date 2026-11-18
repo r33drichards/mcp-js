@@ -1,9 +1,8 @@
 //! Console output capture for the JavaScript runtime.
 //!
 //! Intercepts `console.log`, `console.info`, `console.warn`, and `console.error`
-//! calls and streams the output as a byte stream into a sled tree. Writes are
-//! buffered in-memory and flushed to sled in fixed-size pages (WAL-style) for
-//! efficient batching.
+//! calls and buffers output in fixed-size pages. Server registries put each
+//! page in S3 and retain its ordered reference in the metadata database.
 
 use std::cell::RefCell;
 use std::sync::{
@@ -15,8 +14,8 @@ use deno_core::{JsRuntime, OpState, op2, v8};
 
 // ── Configuration ────────────────────────────────────────────────────────
 
-/// Page size for WAL-style writes to sled. When the in-memory buffer reaches
-/// this size, a full page is flushed to sled. Remaining bytes are flushed on
+/// Page size for buffered payload writes. When the in-memory buffer reaches
+/// this size, a full page is persisted. Remaining bytes are flushed on
 /// execution end.
 const PAGE_SIZE: usize = 4096;
 
@@ -46,7 +45,7 @@ impl ProcessExitState {
 }
 
 /// Per-execution console output state, stored in deno_core's `OpState`.
-/// Buffers console output bytes and flushes them to sled in fixed-size pages.
+/// Buffers console output bytes and persists them in fixed-size pages.
 pub struct ConsoleLogState {
     tree: mcp_metadata_store::RuntimeTree,
     error: RefCell<Option<String>>,
@@ -100,7 +99,7 @@ impl ConsoleLogState {
         }
     }
 
-    /// Append bytes to the stdout buffer, flushing full pages to sled.
+    /// Append bytes to the stdout buffer, persisting full pages.
     pub fn write(&self, data: &[u8]) {
         Self::write_buffer(&self.tree, &self.seq, &self.buffer, data, &self.error);
     }
@@ -127,7 +126,7 @@ impl ConsoleLogState {
         }
     }
 
-    /// Flush any remaining buffered bytes to sled (call on execution end).
+    /// Flush any remaining buffered bytes (call on execution end).
     pub fn flush(&self) -> Result<(), String> {
         Self::flush_buffer(&self.tree, &self.seq, &self.buffer, &self.error);
         if let Some(tree) = &self.stderr_tree {

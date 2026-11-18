@@ -667,6 +667,30 @@ async fn runtime_s3_required_and_failed_upload_never_replaces_database_reference
             .unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(response.text().await.unwrap().contains("S3"));
+        let accepted = server
+            .post(
+                "/api/exec",
+                json!({"code":"console.log('must not be stored inline')"}),
+                StatusCode::ACCEPTED,
+            )
+            .await;
+        let id = accepted["execution_id"].as_str().unwrap();
+        let failure = timeout(Duration::from_secs(10), async {
+            loop {
+                let info = server.get(&format!("/api/executions/{id}")).await;
+                if info["status"] != "running" {
+                    break info;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(failure["status"], "failed", "{failure}");
+        assert!(
+            failure["error"].as_str().unwrap().contains("S3"),
+            "{failure}"
+        );
         server.stop().await;
 
         let s3 = s3::S3::start().await;

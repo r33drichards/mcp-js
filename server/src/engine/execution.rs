@@ -1,7 +1,8 @@
 //! Execution registry — tracks in-flight and completed V8 executions.
 //!
 //! Each execution is assigned a UUID, tracked in an in-memory `DashMap`, and
-//! has its console output stored in a per-execution sled tree (`"ex:{id}"`).
+//! has its console pages indexed by a per-execution runtime tree (`"ex:{id}"`).
+//! Server registries store those payloads in S3.
 //! Supports querying console output by line offset or byte offset, and
 //! cancellation via V8's `IsolateHandle::terminate_execution()`.
 
@@ -94,6 +95,7 @@ pub struct ExecutionRegistry {
     executions: Arc<DashMap<ExecutionId, ExecutionRecord>>,
     db: Option<sled::Db>,
     remote: Option<RuntimeStore>,
+    payloads: Option<RuntimeStore>,
     persistence_errors: Arc<DashMap<String, String>>,
 }
 
@@ -105,27 +107,43 @@ impl ExecutionRegistry {
             executions: Arc::new(DashMap::new()),
             db: Some(db),
             remote: None,
+            payloads: None,
             persistence_errors: Arc::new(DashMap::new()),
         })
     }
 
     pub fn from_store(store: Arc<dyn MetadataStore>) -> Result<Self, String> {
         Ok(Self { executions: Arc::new(DashMap::new()), db: None,
-            remote: Some(RuntimeStore::new(store)?), persistence_errors: Arc::new(DashMap::new()) })
+            remote: Some(RuntimeStore::new(store)?), payloads: None, persistence_errors: Arc::new(DashMap::new()) })
     }
 
     pub fn from_runtime(remote: RuntimeStore) -> Self {
-        Self { executions: Arc::new(DashMap::new()), db: None, remote: Some(remote), persistence_errors: Arc::new(DashMap::new()) }
+        Self { executions: Arc::new(DashMap::new()), db: None, remote: Some(remote), payloads: None, persistence_errors: Arc::new(DashMap::new()) }
     }
 
     pub fn with_blobs(mut self, blobs: Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs>) -> Self {
         self.remote = self.remote.map(|store| store.with_blobs(blobs)); self
     }
 
+    /// Keep local sled metadata encodings while requiring S3 for runtime payloads.
+    pub fn with_local_blob_factory<F>(mut self, factory: F) -> Result<Self, String>
+    where F: std::future::Future<Output=Result<Option<Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs>>, String>> + Send + 'static {
+        let db = self.db.clone().ok_or("local execution database unavailable")?;
+        self.payloads = Some(RuntimeStore::from_factory(async move {
+            let blobs = factory.await?;
+            Ok((Arc::new(mcp_metadata_store::SledStore(db)) as Arc<dyn MetadataStore>, blobs))
+        })?);
+        Ok(self)
+    }
+
     fn tree(&self, name: &str) -> Result<RuntimeTree, String> {
         if let Some(store) = &self.remote { return Ok(store.tree(name)); }
-        self.db.as_ref().ok_or("execution store unavailable")?.open_tree(name)
-            .map(RuntimeTree::from).map_err(|e| e.to_string())
+        let tree = RuntimeTree::from(self.db.as_ref().ok_or("execution store unavailable")?
+            .open_tree(name).map_err(|e|e.to_string())?);
+        Ok(match &self.payloads {
+            Some(store) if name == "artifacts" || name.starts_with("ex:") => tree.with_payload_store(store.clone()),
+            _ => tree,
+        })
     }
 
     fn persist(&self, id: &str) -> Result<(), String> {
@@ -481,14 +499,15 @@ mod persistence_tests {
     fn durable_execution_and_console_recover_without_local_registry() {
         let db = sled::Config::new().temporary(true).open().unwrap();
         let store = Arc::new(mcp_metadata_store::SledStore(db));
-        let first = ExecutionRegistry::from_store(store.clone()).unwrap();
+        let blobs = Arc::new(super::super::heap_storage::RuntimeHeapStorage(super::super::heap_storage::MemoryHeapStorage::new()));
+        let first = ExecutionRegistry::from_store(store.clone()).unwrap().with_blobs(blobs.clone());
         let console = first.register("durable").unwrap();
         console.insert(0u64.to_be_bytes(), b"persisted output\n").unwrap();
         first.complete("durable", "42".into(), None);
         first.set_fs("durable", Some("snapshot".into()));
         first.mark_stopped("durable");
         drop(first);
-        let second = ExecutionRegistry::from_store(store).unwrap();
+        let second = ExecutionRegistry::from_store(store).unwrap().with_blobs(blobs);
         let info = second.get("durable").unwrap().unwrap();
         assert_eq!(info.status, "completed");
         assert_eq!(info.result.as_deref(), Some("42"));
