@@ -225,3 +225,22 @@ fn unmodeled_uncaught_error_is_not_misclassified_by_its_text() {
     assert!(result.status.is_err(), "untagged failures must not pass the oracle");
     assert_eq!(result.last_outcome().map(|(kind, _)| kind), Some("failed"));
 }
+
+#[test]
+fn fresh_write_requires_a_post_recovery_ack_not_an_old_commit() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.faults = vec![Fault::Partition {
+        at_ms: 900,
+        groups: vec![vec!["n0".into()], vec!["n1".into()], vec!["n2".into()]],
+    }];
+    scenario.recovery.heal_all = false;
+    scenario.recovery.deadline_ms = 600;
+    scenario.asserts = vec![Assertion::FreshWriteSucceeds];
+    let result = scenario.run_and_dump("fresh-write-no-quorum");
+    assert_eq!(result.acked.len(), 1, "the initial write must ack: {:?}", result.events);
+    assert!(result.events.iter().any(|event| matches!(event,
+        ScenarioEvent::Assert { name, passed: false, .. } if name == "FreshWriteSucceeds"
+    )), "an old ack cannot prove fresh progress: {:?}", result.events);
+}
