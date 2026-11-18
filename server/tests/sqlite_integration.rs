@@ -246,49 +246,122 @@ async fn sqlite_runtime_records_console_artifacts_and_upload_grants_survive_rest
 
         let store = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
         let row = store.get("execution_records", id.as_bytes()).await.unwrap();
-        assert!(row.is_some(), "{selection}: execution record missing from SQLite");
+        assert!(
+            row.is_some(),
+            "{selection}: execution record missing from SQLite"
+        );
         let row = row.unwrap();
         assert_eq!(row[0], 1, "execution result must be inline, without S3");
         assert!(row.len() > 128 * 1024);
-        assert!(store.get("artifacts", b"saved.bin").await.unwrap().is_some());
-        assert!(!store.scan(&format!("ex:{id}"), b"", false, None).await.unwrap().is_empty());
-        assert_eq!(store.scan("artifact_uploads", b"", false, None).await.unwrap().len(), 1);
+        assert!(
+            store
+                .get("artifacts", b"saved.bin")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !store
+                .scan(&format!("ex:{id}"), b"", false, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .scan("artifact_uploads", b"", false, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(store);
         if let Ok(entries) = std::fs::read_dir(dir.path().join("local")) {
             for entry in entries {
-                assert!(!entry.unwrap().file_name().to_string_lossy().starts_with("executions"),
-                    "{selection}: SQLite mode must not open a sled execution database");
+                assert!(
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("executions"),
+                    "{selection}: SQLite mode must not open a sled execution database"
+                );
             }
         }
 
         let server = Server::start(dir.path(), selection).await;
-        assert_eq!(server.get(&format!("/api/executions/{id}")).await, execution);
+        assert_eq!(
+            server.get(&format!("/api/executions/{id}")).await,
+            execution
+        );
         assert_eq!(server.get(&output_path).await, output);
         let listed = server.get("/api/executions").await;
-        assert!(listed["executions"].as_array().unwrap().iter()
-            .any(|entry| entry["execution_id"] == id));
-        let saved = server.client.get(format!("{}/api/artifacts/saved.bin", server.url))
-            .send().await.unwrap().error_for_status().unwrap().bytes().await.unwrap();
+        assert!(
+            listed["executions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["execution_id"] == id)
+        );
+        let saved = server
+            .client
+            .get(format!("{}/api/artifacts/saved.bin", server.url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
         assert_eq!(saved.as_ref(), vec![7; 500_000]);
 
-        // The grant survives restart, and simultaneous redemption still has one winner.
+        // Independent server processes/SQLite connections must share one winner.
+        let peer = Server::start(dir.path(), selection).await;
         let upload_url = format!("{}{grant_path}", server.url);
+        let peer_url = format!("{}{grant_path}", peer.url);
         let upload = vec![8; 500_000];
         let (first, second) = tokio::join!(
             server.client.put(&upload_url).body(upload.clone()).send(),
-            server.client.put(&upload_url).body(upload.clone()).send()
+            peer.client.put(&peer_url).body(upload.clone()).send()
         );
-        let mut statuses = [first.unwrap().status().as_u16(), second.unwrap().status().as_u16()];
+        let mut statuses = [
+            first.unwrap().status().as_u16(),
+            second.unwrap().status().as_u16(),
+        ];
         statuses.sort_unstable();
         assert_eq!(statuses, [200, 404]);
+        peer.stop().await;
         server.stop().await;
 
         let server = Server::start(dir.path(), selection).await;
-        assert_eq!(server.client.put(format!("{}{grant_path}", server.url))
-            .body("must not overwrite").send().await.unwrap().status(), StatusCode::NOT_FOUND);
-        let uploaded = server.client.get(format!("{}/api/artifacts/uploaded.bin", server.url))
-            .send().await.unwrap().error_for_status().unwrap().bytes().await.unwrap();
+        assert_eq!(
+            server
+                .client
+                .put(format!("{}{grant_path}", server.url))
+                .body("must not overwrite")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let uploaded = server
+            .client
+            .get(format!("{}/api/artifacts/uploaded.bin", server.url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
         assert_eq!(uploaded.as_ref(), upload);
-        assert_eq!(server.get(&format!("/api/executions/{id}")).await, execution);
+        assert_eq!(
+            server.get(&format!("/api/executions/{id}")).await,
+            execution
+        );
         server.stop().await;
     }
 }

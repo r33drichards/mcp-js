@@ -55,10 +55,10 @@ fn encode(value: &[u8]) -> Vec<u8> { let mut v=Vec::with_capacity(value.len()+1)
 fn decode(value: Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
     match value { None => Ok(None), Some(v) if v == [0] => Ok(None), Some(v) if v.first()==Some(&1) => Ok(Some(v[1..].to_vec())), _ => Err("invalid runtime metadata envelope".into()) }
 }
-// Large runtime values (notably artifacts) remain S3 payloads. Publish the
-// small DDB pointer only after S3 acknowledges; never overwrite a blob in place.
-async fn encode_value(value: &[u8], blobs: &Option<Arc<dyn RuntimeBlobs>>) -> Result<Vec<u8>> {
-    if value.len() <= 128 * 1024 { return Ok(encode(value)); }
+// Backends with bounded items offload large runtime values. Publish the
+// small pointer only after blob storage acknowledges; never overwrite in place.
+async fn encode_value(value: &[u8], blobs: &Option<Arc<dyn RuntimeBlobs>>, inline_limit: Option<usize>) -> Result<Vec<u8>> {
+    if inline_limit.is_none_or(|limit| value.len() <= limit) { return Ok(encode(value)); }
     let blobs = blobs.as_ref().ok_or("large runtime value requires S3 blob storage")?;
     let name = format!("runtime/{}", uuid::Uuid::new_v4());
     blobs.put(&name, value).await?;
@@ -92,7 +92,7 @@ impl RuntimeTree {
         let key=key.as_ref().to_vec(); let value=value.as_ref().to_vec();
         match self {
             Self::Local(t) => t.insert(key,value).map(|_| ()).map_err(|e| e.to_string()),
-            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| wait(rt, async { db.put(Write::new(&name,key,encode_value(&value,&blobs).await?)).await })) }
+            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| wait(rt, async { db.put(Write::new(&name,key,encode_value(&value,&blobs,db.runtime_inline_limit()).await?)).await })) }
         }
     }
     pub fn remove(&self, key: impl AsRef<[u8]>) -> Result<()> {
@@ -109,7 +109,7 @@ impl RuntimeTree {
             Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| wait(rt, async {
                 let current=db.get(&name,&key).await?;
                 if decode_value(current.clone(), &blobs).await? != old {return Ok(false)}
-                let encoded=match new { Some(v)=>encode_value(&v,&blobs).await?, None=>vec![0] };
+                let encoded=match new { Some(v)=>encode_value(&v,&blobs,db.runtime_inline_limit()).await?, None=>vec![0] };
                 db.compare_and_swap(Write::new(&name,key,encoded),current,vec![]).await
             }))? }
         };

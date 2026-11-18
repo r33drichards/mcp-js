@@ -2,7 +2,7 @@
 //! back to the MCP client: images, audio, CSVs, JSON, arbitrary binary.
 //!
 //! JS calls `artifact(key, mime, bytes)` to store (or overwrite) an artifact
-//! under a caller-chosen key. Artifacts land in a sled tree (`"artifacts"`)
+//! under a caller-chosen key. Artifacts land in a runtime tree (`"artifacts"`)
 //! in the execution db, so they survive across executions and can be fetched
 //! later with the `get_artifact` MCP tool. The flow also runs the other way:
 //! a client asks the `get_artifact_upload_url` MCP tool for a one-time URL,
@@ -26,7 +26,7 @@ use serde::Serialize;
 // ── Limits ───────────────────────────────────────────────────────────────
 
 /// Maximum payload size for a single artifact. Generous for model-bound
-/// images (Claude caps images at ~5 MB) while still bounding sled growth.
+/// images (Claude caps images at ~5 MB) while still bounding stored payloads.
 pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Maximum artifact key length in bytes.
@@ -123,7 +123,7 @@ impl Artifact {
 
 // ── Store ────────────────────────────────────────────────────────────────
 
-/// Sled-backed keyed artifact store. Values are encoded as
+/// Backend-independent keyed artifact store. Values are encoded as
 /// `[u32 BE header_len][JSON header][payload bytes]` where the header carries
 /// the metadata (mime type, timestamp, writing execution).
 #[derive(Clone)]
@@ -322,7 +322,7 @@ pub struct UploadGrant {
     pub reserved: bool,
 }
 
-/// Sled-backed store of outstanding upload grants, keyed by token.
+/// Persistent store of outstanding upload grants, keyed by token.
 #[derive(Clone)]
 pub struct UploadGrants {
     tree: mcp_metadata_store::RuntimeTree,

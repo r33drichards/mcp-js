@@ -199,8 +199,8 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_DYNAMODB_TABLE", conflicts_with = "cluster_port", help_heading = "Core")]
     pub dynamodb_table: Option<String>,
 
-    /// SQLite metadata file for session history, heap tags and filesystem labels.
-    /// Parent directory must exist. Does not replace the Raft log or execution registry.
+    /// SQLite metadata file for session history, heap tags, filesystem labels and runtime bookkeeping.
+    /// Parent directory must exist. Does not replace the Raft log.
     #[arg(long, env = "MCP_V8_SQLITE_PATH", conflicts_with_all = ["dynamodb_table", "cluster_port"], help_heading = "Core")]
     pub sqlite_path: Option<String>,
 

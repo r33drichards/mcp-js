@@ -268,7 +268,7 @@
   sqlite_path = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "SQLite metadata file for session history, heap tags and filesystem labels. Parent directory must exist. Does not replace the Raft log or execution registry. Config-file key for the `--sqlite-path` flag. Environment variable: `MCP_V8_SQLITE_PATH`.";
+    description = "SQLite metadata file for session history, heap tags, filesystem labels and runtime bookkeeping. Parent directory must exist. Does not replace the Raft log. Config-file key for the `--sqlite-path` flag. Environment variable: `MCP_V8_SQLITE_PATH`.";
   };
   sse_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;

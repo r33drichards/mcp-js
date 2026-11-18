@@ -213,7 +213,7 @@ Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Cove
 
 ### `--sqlite-path`
 
-SQLite metadata file for session history, heap tags and filesystem labels. Parent directory must exist. Does not replace the Raft log or execution registry
+SQLite metadata file for session history, heap tags, filesystem labels and runtime bookkeeping. Parent directory must exist. Does not replace the Raft log
 
 - Environment: `MCP_V8_SQLITE_PATH`
 - Value: `SQLITE_PATH`
