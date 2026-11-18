@@ -103,8 +103,8 @@ let
     resolver_patch = "discover-root-patch-paths";
     resolver_scope = "all-workspace-roots";
     feature_resolution = "resolver2-host-target-unified-superset";
-    feature_parity = "differs-local-audit-awaiting-ci";
-    local_feature_differences = [
+    feature_parity = "differs-confirmed-ci";
+    observed_feature_differences = [
       "reqwest 0.12.28: plugin adds blocking"
       "schemars 0.8.22: plugin adds chrono,uuid1"
       "chrono 0.4.44: Cargo reports js-sys,wasm-bindgen,windows-link"

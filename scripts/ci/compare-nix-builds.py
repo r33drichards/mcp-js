@@ -12,6 +12,8 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument('--implementation', choices=['crane', 'cargo-nix'], required=True)
 parser.add_argument('--results', type=Path, required=True)
+parser.add_argument('--measure-source-rebuild', action=argparse.BooleanOptionalAction,
+    default=os.environ.get('MEASURE_SOURCE_REBUILD', 'true').lower() == 'true')
 args = parser.parse_args()
 repo = Path.cwd()
 out = args.results.resolve()
@@ -32,6 +34,8 @@ report = {
     'nix_cores': 2,
     'phases': [],
     'status': 'running',
+    'measure_source_rebuild': args.measure_source_rebuild,
+    'cache_retention_policy': 'original artifacts, dependencies and bootstrap only',
 }
 result_file = out / 'results.json'
 
@@ -190,20 +194,36 @@ try:
     test_text = command('runtime-tests', [str(runner / 'bin/run-benchmark-tests')])
     test_text += (out / 'runtime-tests.stderr.log').read_text(errors='replace')
     runtime_results(test_text)
-    # Test reuse when only application source changes, not dependencies/config.
-    original_file.write_bytes(original_bytes + b'\n// CI build-cache comparison: source-only invalidation.\n')
-    changed = build('source-only-rebuild', nix, '.#benchmark-tests', '.#benchmark-runner')
-    root_outputs(changed, 'changed', runtime / 'bin')
-    changed_tests = select(changed, 'share/benchmark-targets.json')
-    if str(changed_tests) == str(tests):
-        raise RuntimeError('Source change did not invalidate the compiled test output')
-    after = set(command('changed-closure', [str(runtime / 'bin/nix-store'), '--query', '--requisites', str(changed_tests)]).splitlines())
-    report['closure_reuse'] = {'unchanged_paths': len(before & after), 'new_paths': len(after-before), 'old_paths': len(before-after)}
-    changed_warm = build('source-change-exact-warm', nix, '.#benchmark-tests', '.#benchmark-runner')
-    if changed_warm != changed:
-        raise RuntimeError('Changed-source warm build did not retain identical outputs')
-    report['source_change_invalidated'] = True
-    report['changed_outputs'] = changed
+    size_paths = [str(tests)]
+    if args.implementation == 'crane':
+        dependency_path = command('dependency-output', nix + ['eval', '--raw', '.#benchmark-deps.outPath']).strip()
+        root_outputs([dependency_path], 'dependencies', runtime / 'bin')
+        size_paths.append(dependency_path)
+    report['artifact_sizes'] = command('artifact-sizes', nix + [
+        'path-info', '--json', '--closure-size', *size_paths], json_output=True)
+    if args.measure_source_rebuild:
+        # Test reuse when only application source changes, not dependencies/config.
+        original_file.write_bytes(original_bytes + b'\n// CI build-cache comparison: source-only invalidation.\n')
+        changed = build('source-only-rebuild', nix, '.#benchmark-tests', '.#benchmark-runner')
+        root_outputs(changed, 'changed', runtime / 'bin')
+        changed_tests = select(changed, 'share/benchmark-targets.json')
+        if str(changed_tests) == str(tests):
+            raise RuntimeError('Source change did not invalidate the compiled test output')
+        after = set(command('changed-closure', [str(runtime / 'bin/nix-store'), '--query', '--requisites', str(changed_tests)]).splitlines())
+        report['closure_reuse'] = {'unchanged_paths': len(before & after), 'new_paths': len(after-before), 'old_paths': len(before-after)}
+        changed_warm = build('source-change-exact-warm', nix, '.#benchmark-tests', '.#benchmark-runner')
+        if changed_warm != changed:
+            raise RuntimeError('Changed-source warm build did not retain identical outputs')
+        report['source_change_invalidated'] = True
+        report['changed_outputs'] = changed
+        # Keep the evidence, not the second full target tree, across CI jobs.
+        removed_roots = []
+        for root in roots.glob('changed-*'):
+            root.unlink()
+            removed_roots.append(str(root))
+        report['removed_changed_roots'] = removed_roots
+    else:
+        report['source_rebuild_skipped'] = True
     report['status'] = 'success'
 except Exception as error:
     report['status'] = 'failure'

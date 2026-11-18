@@ -95,3 +95,18 @@ for the Rust build. Run it with `python3 -m unittest discover -s nix/experiments
 That failed CI attempt successfully saved valid dependencies: 11,055,888,024
 store bytes compressed to 3,103,598,059 bytes, in roughly 107 seconds. The next
 attempt is therefore a restored-dependency trial, not another cold build.
+
+Measured commit 73f70995 passed the full suite: 81 harnesses, one example,
+860 passed, 32 ignored, 82 real result summaries. Its restored-dependency
+artifact build took 620.101 s, uncached execution 322.007 s, source-only
+rebuild 622.274 s, and exact warm reuse 1.518 s (changed-source warm 5.726 s).
+Actual CI graph comparison confirmed all documented feature differences.
+However, retaining both original and artificial source-change artifact trees
+made the final cache 53,083,246,640 bytes (11,848,528,890 compressed), exceeding
+the 10 GB cache limit. The measurements succeeded; cache upload did not.
+
+The shared coordinator now releases the artificial changed-source GC roots
+after measuring them and retains original artifacts/dependencies/bootstrap.
+For a cache population/restore trial, dispatch with measure_source_rebuild=false:
+it skips only the extra source-mutation benchmark and still executes the
+complete real suite every time. This is the same policy as the Crane branch.
