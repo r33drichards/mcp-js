@@ -108,6 +108,8 @@ jobs:
             target: fuzz_js_cluster
           - crate: server/engine-cluster-tests/fuzz
             target: fuzz_js_scenario
+          - crate: server/engine-cluster-tests/fuzz
+            target: fuzz_js_unmodeled
           - crate: server/cluster-tests/fuzz
             target: peer_network
     steps:
