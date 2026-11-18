@@ -415,3 +415,57 @@ async fn runtime_large_values_are_blob_references_and_missing_blobs_fail() {
     blobs.0.lock().unwrap().clear();
     assert!(reopened.get(b"artifact").is_err());
 }
+
+#[test]
+fn runtime_sqlite_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    runtime_contract(Arc::new(
+        SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap(),
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_sqlite_large_values_reopen_and_cas_without_blob_storage() {
+    use mcp_metadata_store::RuntimeStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite");
+    let store = Arc::new(SqliteStore::open(&path, "runtime").unwrap());
+    let tree = RuntimeStore::new(store.clone()).unwrap().tree("artifacts");
+    let first = vec![42; 500_000];
+    tree.insert(b"large", &first).unwrap();
+    drop(tree);
+
+    // A fresh connection must read the payload from SQLite, with no blob client.
+    let reopened = RuntimeStore::new(Arc::new(SqliteStore::open(&path, "runtime").unwrap()))
+        .unwrap()
+        .tree("artifacts");
+    assert_eq!(reopened.get(b"large").unwrap(), Some(first.clone()));
+    let second = vec![43; 600_000];
+    assert!(reopened
+        .compare_and_swap(b"large", Some(first.clone()), Some(second.clone()))
+        .unwrap()
+        .is_ok());
+    assert!(reopened
+        .compare_and_swap(b"large", Some(first), Some(vec![0]))
+        .unwrap()
+        .is_err());
+    assert_eq!(reopened.iter().collect::<Result<Vec<_>, _>>().unwrap(),
+        vec![(b"large".to_vec(), second.clone())]);
+    let raw = store.get("artifacts", b"large").await.unwrap().unwrap();
+    assert_eq!(raw[0], 1, "SQLite must store the inline envelope, not an S3 reference");
+    assert_eq!(&raw[1..], second);
+    reopened.remove(b"large").unwrap();
+    assert!(reopened.get(b"large").unwrap().is_none());
+    assert!(reopened
+        .compare_and_swap(b"large", None, Some(second.clone()))
+        .unwrap()
+        .is_ok());
+    assert_eq!(reopened.get(b"large").unwrap(), Some(second));
+    assert!(SqliteStore::open(&path, "other")
+        .unwrap()
+        .get("artifacts", b"large")
+        .await
+        .unwrap()
+        .is_none());
+}
