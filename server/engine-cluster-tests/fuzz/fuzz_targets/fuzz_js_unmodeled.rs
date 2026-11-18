@@ -58,9 +58,12 @@ fuzz_target!(|data: &[u8]| {
     // Filesystem/engine failures are outside the catch; only ordinary JS
     // exceptions from the bounded pure-JS body carry the explicit marker.
     let source = format!(
-        "(async () => {{ {fs_statement} try {{ {} }} catch (e) {{ return '__mcp_js_expected_exception__' + e.name; }} }})()",
+        "export const __mcp_http_result = await (async () => {{ {fs_statement} try {{ {} }} catch (e) {{ return '__mcp_js_expected_exception__' + e.name; }} }})();",
         statements.join("\n")
     );
+    // The bounded generator can exceed the validator when JSON escaping expands
+    // control bytes; skip that candidate rather than treating it as a crash.
+    if source.len() > 512 { return; }
     let mut faults = Vec::new();
     if payload.get(3).copied().unwrap_or(0) & 1 != 0 {
         faults.push(Fault::Partition {

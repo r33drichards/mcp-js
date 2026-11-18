@@ -446,7 +446,13 @@ async fn run_js(engine: &Engine, code: &str) -> JsResult {
             match info.status.as_str() {
                 "completed" => {
                     if let Some(result) = &info.result {
-                        if result.contains(JS_EXCEPTION_MARKER) {
+                        // Only a complete generated exception tag qualifies; ordinary
+                        // output mentioning the marker is still an ordinary result.
+                        if matches!(
+                            result.strip_prefix(JS_EXCEPTION_MARKER),
+                            Some("Error" | "TypeError" | "RangeError" | "ReferenceError" |
+                                 "SyntaxError" | "URIError" | "EvalError" | "AggregateError")
+                        ) {
                             return JsResult::JsException(result.clone());
                         }
                     }

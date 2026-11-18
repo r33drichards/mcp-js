@@ -5,10 +5,16 @@ program, seed, and short partition/heal schedule. The same serialized scenario
 runs in fixtures, fuzzing, and replay. Unlike modelable fuzz_js_scenario, it
 does not compare arbitrary JS output or filesystem contents to a reference
 model. It checks unexpected engine failures, acknowledged heads in the legal
-history, and replica convergence after recovery. An ordinary JS exception within the pure-JS body is caught and tagged
-explicitly; filesystem/engine failures remain outside that catch. an engine timeout is classified as a resource limit, not as proof
-of correctness. Unknown outcomes remain unknown. It does not prove blob
-replication or complete storage crash recovery.
+history, and replica convergence after recovery. An ordinary JS exception
+within the generated pure-JS body is caught and tagged through the reserved
+__mcp_http_result module export; a bare async IIFE return is not part of
+Engine's structured result. Only a complete tag with a recognized error name
+is classified as an expected exception. Filesystem/engine failures remain
+outside that catch. An engine timeout is classified as a resource limit, not
+as proof of correctness. This tag is a test protocol, not an attestation of
+exception provenance for arbitrary user-supplied JS: a deliberately forged
+full tag is indistinguishable. Unknown outcomes remain unknown. This does
+not prove blob replication or complete storage crash recovery.
 
 Bounds: at most 512 UTF-8 source bytes, two executions, 64 MiB engine heap,
 30-second engine timeout, one write per generated statement, three generated

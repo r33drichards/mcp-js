@@ -163,7 +163,7 @@ fn unmodeled_js_classifies_exception_without_claiming_exact_output() {
     scenario.workload.count = 1;
     scenario.workload.op = Op::RunJsUnmodeled {
         node: "leader".into(),
-        source: "(async () => { try { throw new TypeError('expected'); } catch (e) { return '__mcp_js_expected_exception__' + e.name; } })()".into(),
+        source: "export const __mcp_http_result = await (async () => { try { throw new TypeError('expected'); } catch (e) { return '__mcp_js_expected_exception__' + e.name; } })();".into(),
     };
     scenario.faults.clear();
     scenario.asserts = vec![
@@ -175,6 +175,25 @@ fn unmodeled_js_classifies_exception_without_claiming_exact_output() {
     let result = parsed.run_and_dump("unmodeled-exception");
     result.expect_status("all assertions passed");
     assert_eq!(result.last_outcome().map(|(kind, _)| kind), Some("js_exception"));
+}
+
+#[test]
+fn unmodeled_js_ordinary_result_with_marker_is_not_exception() {
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.workload.op = Op::RunJsUnmodeled {
+        node: "leader".into(),
+        source: "export const __mcp_http_result = 'ordinary __mcp_js_expected_exception__TypeError text';".into(),
+    };
+    scenario.faults.clear();
+    scenario.asserts = vec![
+        Assertion::NoUnexpectedJsFailure,
+        Assertion::AckedCommitsInLegalHistory,
+        Assertion::ReplicasConvergeAfterRecovery,
+    ];
+    let result = scenario.run_and_dump("unmodeled-marker-ordinary");
+    result.expect_status("all assertions passed");
+    assert_eq!(result.last_outcome().map(|(kind, _)| kind), Some("acked"));
 }
 
 #[test]
