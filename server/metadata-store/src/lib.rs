@@ -1,10 +1,12 @@
 //! Async, binary-safe metadata persistence. Snapshot payloads use separate blob
 //! storage. A failed compare must leave all companion writes untouched.
 use async_trait::async_trait;
+#[cfg(feature="dynamodb")]
 pub mod dynamodb;
 pub mod sled_store;
 pub mod sqlite;
 pub use sqlite::SqliteStore;
+#[cfg(feature="dynamodb")]
 pub use dynamodb::DynamoDbStore;
 pub use sled_store::SledStore;
 pub type Result<T> = std::result::Result<T, String>;
@@ -28,6 +30,15 @@ impl Write {
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
+    /// Standalone backends provide current point reads; Raft adapters must
+    /// explicitly advertise weaker local-committed reads until a barrier exists.
+    fn supports_linearizable_reads(&self) -> bool { true }
+    /// A Raft mismatch against pending state is not a committed ownership observation.
+    fn provisional_conflicts(&self) -> bool { false }
+    /// Pure validation before proposal/transport. Known size/shape rejections
+    /// are errors, distinct from an uncertain acknowledgement after mutation.
+    fn validate_transaction(&self, _primary: &Write, _expected: Option<&[u8]>, _companions: &[Write]) -> Result<()> { Ok(()) }
+
     async fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>>;
     async fn put(&self, write: Write) -> Result<()>;
     /// Byte-lexicographic order, optionally reversed. Limit applies after prefix
@@ -60,3 +71,5 @@ pub use runtime_tree::{RuntimeStore, RuntimeTree};
 pub mod blob;
 
 pub mod content;
+
+pub mod publication;

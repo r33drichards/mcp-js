@@ -1,24 +1,31 @@
 # Shared content-addressed storage and metadata
 
-Status: proposal; documentation only. Stacked on
+Status: design with a shared-core implementation in dependent PRs. Stacked on
 [#328](https://github.com/r33drichards/mcp-js/pull/328), which separates server
-artifact/console payloads from their database references. This document does not
-implement new formats, change configuration, enable SQLite-backed Raft, or claim
-stronger consistency than the existing cluster provides.
+artifact/console payloads from their database references. The progress section
+separates the implemented core from planned migrations. SQLite-backed Raft and
+stronger cluster read guarantees are not enabled.
 
 ## Implementation progress
 
-The first implementation extracts `metadata_store::blob::BlobStorage`, keeps
-`HeapStorage` and `RuntimeBlobs` as compatibility names, shares backend
-construction across storage domains, and adds immutable-write contracts for
-memory/directory/S3 plus authoritative-first cache writes. Existing object keys
-and reference formats remain readable. The dependent content layer adds typed,
-versioned SHA-256 references for new runtime objects, payload verification and
-immutable writes. Artifact metadata stays in the database while payload bytes
-deduplicate independently of timestamps/MIME type. New direct execution registries
-also use filesystem objects. Publication semantics and the Raft adapter follow
-in a dependent change; heap/fs identities and existing runtime readers remain
-compatible.
+- [#332](https://github.com/r33drichards/mcp-js/pull/332): shared
+  `metadata_store::blob::BlobStorage`, `HeapStorage`/`RuntimeBlobs` compatibility
+  names, common backend construction, immutable directory/S3 writes, and
+  authoritative-first cache writes.
+- [#333](https://github.com/r33drichards/mcp-js/pull/333): typed SHA-256 content
+  references for new runtime objects, verification and deduplication independent
+  of artifact metadata, filesystem objects for direct execution registries, and
+  legacy reference readers. Heap/filesystem snapshot identities are preserved.
+- The dependent publication implementation adds the revision/receipt facade and
+  optional `RaftMetadataStore`, with deterministic consensus-harness contracts.
+  Stronger Raft reads fail as unsupported; pending mismatches remain provisional.
+
+The publication facade and Raft adapter are explicit Rust APIs. Existing domain
+cluster routes and persisted metadata formats are retained; server bootstrap does
+not silently switch runtime metadata to Raft. Domain-by-domain adoption,
+barrier-protected Raft reads, backend relocation, and shared garbage collection
+remain separate migrations. This implements the shared core and tests its
+composition, not every migration described below.
 
 ## Problem and direction
 

@@ -12,6 +12,7 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
+hex = "0.4"
 mcp-metadata-store = { path = "metadata-store" }
 aws-sdk-dynamodb = "1"
 subtle = "2.6"

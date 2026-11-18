@@ -19,7 +19,7 @@ use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_RAFT_BODY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_APPEND_BYTES: usize = 12 * 1024 * 1024;
+pub(crate) const MAX_APPEND_BYTES: usize = 12 * 1024 * 1024;
 const MAX_APPEND_ENTRIES: usize = 32;
 const MAX_RAFT_TERM: u64 = (1 << 63) - 1;
 

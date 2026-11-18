@@ -1,9 +1,12 @@
+#[cfg(feature="dynamodb")]
 use aws_sdk_dynamodb::{
     Client,
     config::{Credentials, Region},
     types::{AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType},
 };
-use mcp_metadata_store::{DynamoDbStore, MetadataStore, SledStore, SqliteStore, Write};
+use mcp_metadata_store::{MetadataStore, SledStore, SqliteStore, Write};
+#[cfg(feature="dynamodb")]
+use mcp_metadata_store::DynamoDbStore;
 use std::sync::Arc;
 
 async fn contract(store: Arc<dyn MetadataStore>) {
@@ -231,6 +234,7 @@ async fn sqlite_binary_prefix_boundaries_and_storage_error_rollback() {
     assert!(SqliteStore::open(dir.path().join("missing").join("db"), "test").is_err());
 }
 
+#[cfg(feature="dynamodb")]
 async fn dynamodb_contract(endpoint: String) {
     // Explicit fake credentials and endpoint: these tests never use AWS IAM.
     assert!(endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("http://localhost:"));
@@ -304,6 +308,15 @@ async fn dynamodb_contract(endpoint: String) {
     ))
     .await;
     let runtime_store = Arc::new(DynamoDbStore::new(client.clone(), &table, "runtime-test").unwrap());
+    {
+        use mcp_metadata_store::publication::{MetadataPublication,Publication,PublishOutcome};
+        let publication=MetadataPublication::new(runtime_store.clone(),"contract").unwrap();
+        let mut request=Publication {operation_id:"once".into(),key:b"head".to_vec(),expected_revision:None,value:Some(vec![7;200_000]),companions:vec![Write::new("reflog",b"entry",b"event")]};
+        assert_eq!(publication.publish(&request).await.unwrap(),PublishOutcome::Committed {revision:1});
+        assert_eq!(publication.publish(&request).await.unwrap(),PublishOutcome::Committed {revision:1});
+        request.operation_id="oversized".into();request.key=b"large".to_vec();request.value=Some(vec![0;500_000]);
+        assert!(publication.publish(&request).await.unwrap_err().contains("size limit exceeded"));
+    }
     tokio::task::spawn_blocking(move || {
         runtime_contract(runtime_store.clone());
         let blobs = Arc::new(TestBlobs::default());
@@ -355,6 +368,7 @@ async fn dynamodb_contract(endpoint: String) {
 }
 
 #[tokio::test]
+#[cfg(feature="dynamodb")]
 #[ignore = "requires a loopback DynamoDB Local/LocalStack endpoint"]
 async fn dynamodb_endpoint_contract() {
     dynamodb_contract(std::env::var("DYNAMODB_TEST_ENDPOINT").expect("set DYNAMODB_TEST_ENDPOINT"))

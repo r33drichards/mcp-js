@@ -16,3 +16,9 @@ pub mod scheduled_protocol;
 pub mod scheduled_worker;
 
 pub mod http_functions;
+
+pub mod raft_metadata;
+
+#[cfg(test)]
+#[path = "../cluster-tests/src/publication_tests.rs"]
+mod publication_tests;
