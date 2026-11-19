@@ -48,6 +48,7 @@ async fn call(engine: &Arc<Engine>, args: Value) -> Value {
             arguments_json: args.to_string(),
             session_id: Some("wait-proof".into()),
             mcp_headers: None,
+            host_tools: None,
         })
         .await
         .unwrap()
@@ -215,7 +216,7 @@ async fn waiting_request_does_not_block_other_tools_or_cancellation() {
     }).await.unwrap();
     let cancelled = tokio::time::timeout(std::time::Duration::from_secs(1), engine.invoke_tool_response(ToolCallRequest {
         name: "cancel_execution".into(), arguments_json: json!({"execution_id": id}).to_string(),
-        session_id: Some("another-session".into()), mcp_headers: None,
+        session_id: Some("another-session".into()), mcp_headers: None, host_tools: None,
     })).await.expect("wait must not hold lifecycle lock").unwrap();
     assert!(cancelled.json.get("error").is_none(), "{}", cancelled.json);
     let result = waiting.await.unwrap();

@@ -10,12 +10,19 @@ for (const method of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'exe
   childProcess[method] = () => { throw new Error('Unexpected subprocess'); };
 }
 syncBuiltinESMExports();
-const { Engine, EngineConfigBuilder, ExecutionLimitsBuilder, createToolRuntime } = await import('@wholelottahoopla/mcp-js-node');
+const { Engine, EngineConfigBuilder, ExecutionLimitsBuilder, ToolCallRequestBuilder, createToolRuntime } = await import('@wholelottahoopla/mcp-js-node');
 const engine = Engine.createStateless(64n, 1n);
 try {
   const result = JSON.parse(engine.callTool('run_js', JSON.stringify({ code: 'console.log(await Promise.resolve(6 * 7))' }), undefined, undefined));
   assert.equal(result.error, undefined);
   assert.equal(result.output.trim(), '42');
+  const request = new ToolCallRequestBuilder()
+    .name('run_js')
+    .argumentsJson(JSON.stringify({ code: 'console.log(7 * 6)' }))
+    .build();
+  const typed = JSON.parse(await engine.invokeTool(request));
+  assert.deepEqual(typed, result);
+
   const definition = {
     name: 'echo',
     description: 'Echo a message',

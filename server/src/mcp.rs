@@ -154,6 +154,7 @@ async fn invoke_runtime_tool(
             arguments_json,
             session_id,
             mcp_headers: mcp_headers.cloned(),
+            host_tools: None,
         })
         .await
         .unwrap_or_else(|error| json!({ "error": error.to_string() }).into())
@@ -221,6 +222,7 @@ fn spawn_run_js_task(
                         arguments_json,
                         session_id,
                         mcp_headers,
+                        host_tools: None,
                     })
                     .await
                     .unwrap_or_else(|error| json!({ "error": error.to_string() }).into())

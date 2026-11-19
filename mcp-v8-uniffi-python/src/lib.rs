@@ -16,7 +16,7 @@ pub use server::engine::{
     DEFAULT_EXECUTION_TIMEOUT_SECS, DEFAULT_MCP_STUB_PREFIX, DEFAULT_WASM_STUB_PREFIX, Engine,
     ExecutionRequest, FsEntryKind, FsErrorKind, FsMetadata, FsView, McpRequestHeaders,
     RuntimeCapabilities, RuntimeError, RuntimeLifecycleState, RuntimeMode, RuntimeShutdownResult,
-    ToolCallRequest, ToolDefinition,
+    ToolCallRequest, ToolCallRequestBuilder, ToolDefinition,
 };
 
 pub use server::engine::host_tools::{HostToolCall, HostToolRun, host_tool_stub_instructions, host_tool_stubs};

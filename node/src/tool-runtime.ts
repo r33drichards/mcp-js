@@ -1,4 +1,4 @@
-import { HostToolRun, hostToolStubInstructions, hostToolStubs, type EngineLike } from "./index.js";
+import { HostToolRun, ToolCallRequestBuilder, hostToolStubInstructions, hostToolStubs, type EngineLike } from "./index.js";
 
 export interface HostTool {
   name: string;
@@ -15,12 +15,12 @@ export interface ToolRuntimeConfig {
 }
 
 export interface ToolRuntimeResult {
-  status: string;
+  status?: string;
   output?: string;
   output_truncated?: boolean;
   error?: string;
   wait_timed_out?: boolean;
-  execution_id: string;
+  execution_id?: string;
 }
 
 /** Bind a host's tool authority once and allocate a separate channel for each execution. */
@@ -79,7 +79,12 @@ export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig)
 
       const serving = serve();
       try {
-        const run = engine.runHostJs(code, channel);
+        const request = new ToolCallRequestBuilder()
+          .name("run_js")
+          .argumentsJson(JSON.stringify({ code, wait: true }))
+          .hostTools(channel)
+          .build();
+        const run = engine.invokeTool(request);
         const result = await Promise.race([run, serving.then(() => run)]);
         signal?.throwIfAborted();
         return JSON.parse(result) as ToolRuntimeResult;

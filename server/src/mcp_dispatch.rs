@@ -12,6 +12,7 @@
 //! into their respective `CallToolResult` types.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -20,6 +21,7 @@ use crate::engine::artifacts::{
     ArtifactContent, ArtifactMeta, DEFAULT_UPLOAD_TTL_SECS, MAX_ARTIFACT_BYTES,
 };
 use crate::engine::heap_tags::HeapTagEntry;
+use crate::engine::host_tools::HostToolRun;
 
 /// Transport-agnostic tool result: a JSON body plus extra content blocks
 /// (rendered artifacts) the transport appends after the JSON. Image and audio
@@ -99,6 +101,7 @@ pub(crate) async fn submit_run_js(
     session_id: Option<&str>,
     mcp_headers: Option<&Value>,
     args: &Value,
+    host_tools: Option<Arc<HostToolRun>>,
 ) -> Result<String, String> {
     let mut req = runtime.run_js(string_arg(args, "code").unwrap_or_default());
     req = req.maybe_file(string_arg(args, "file"));
@@ -119,7 +122,7 @@ pub(crate) async fn submit_run_js(
         req = req.tags(tags);
     }
     req = req.maybe_mcp_headers(mcp_headers.cloned());
-    req.execute().await
+    req.maybe_host_tools(host_tools).execute().await
 }
 
 pub async fn run_js(
@@ -129,7 +132,7 @@ pub async fn run_js(
     args: &Value,
 ) -> Value {
     let wait = args.get("wait").and_then(Value::as_bool).unwrap_or(false);
-    let execution_id = match submit_run_js(runtime, session_id, mcp_headers, args).await {
+    let execution_id = match submit_run_js(runtime, session_id, mcp_headers, args, None).await {
         Ok(id) => id,
         Err(e) if wait => return json!({"error": e}),
         Err(e) => format!("error: {}", e),

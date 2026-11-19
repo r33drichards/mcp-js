@@ -2020,8 +2020,8 @@ impl<'a> RunJsRequest<'a> {
         self
     }
 
-    pub(super) fn host_tools(mut self, tools: Arc<host_tools::HostToolRun>) -> Self {
-        self.host_tools = Some(tools);
+    pub(crate) fn maybe_host_tools(mut self, tools: Option<Arc<host_tools::HostToolRun>>) -> Self {
+        self.host_tools = tools;
         self
     }
 

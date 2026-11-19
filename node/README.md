@@ -108,7 +108,10 @@ JSON; native API failures reject the Promise (or throw from `callTool`).
 `createToolRuntime(engine, config)` binds one tool catalog and dispatcher.
 Reuse the wrapper for calls that share the same permissions. For an app with
 request-specific tools, create one wrapper per request. Each run has its own
-request channel and can make up to 32 host tool calls. The dispatcher receives
+request channel and can make up to 32 host tool calls. Internally,
+`runJs` uses `ToolCallRequestBuilder` to attach that channel to the regular
+`run_js` request and submits it through `engine.invokeTool(request)`.
+The dispatcher receives
 an AbortSignal that is aborted when the run ends. Pass an AbortSignal as the
 second argument to `runJs` to cancel the execution. Validate arguments and
 enforce permissions in the dispatcher.

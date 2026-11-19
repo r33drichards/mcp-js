@@ -14,7 +14,7 @@ use super::{RuntimeError, ToolDefinition};
 const MAX_CALLS: u32 = 32;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
-#[derive(uniffi::Record)]
+#[derive(Debug, uniffi::Record)]
 pub struct HostToolCall {
     pub id: u32,
     pub name: String,
@@ -23,7 +23,7 @@ pub struct HostToolCall {
 
 type Response = oneshot::Sender<(String, bool)>;
 
-#[derive(uniffi::Object)]
+#[derive(Debug, uniffi::Object)]
 pub struct HostToolRun {
     server: String,
     names: HashSet<String>,
