@@ -63,6 +63,98 @@ impl FsMountHandle {
     pub fn new(mount: SessionMount) -> Self {
         Self(Arc::new(tokio::sync::Mutex::new(mount)))
     }
+
+    /// Engine-owned mounts run service futures independently of the isolate,
+    /// so a synchronous guest call cannot stall a pending async lock holder.
+    pub(super) fn on_runtime(mut mount: SessionMount, runtime: tokio::runtime::Handle) -> Self {
+        mount.io_tasks = Some(Arc::new(FsIoTasks {
+            runtime,
+            state: std::sync::Mutex::new(FsIoState::default()),
+        }));
+        Self::new(mount)
+    }
+
+    pub(super) fn attach(self, state: &mut OpState) -> Result<(), String> {
+        // Before guest execution begins, copy the tracker out of the mount.
+        // Guest ops must never queue on the mount mutex just to find it: a
+        // queued isolate-owned waiter can block a subsequent sync call too.
+        let io = self
+            .0
+            .try_lock()
+            .map_err(|_| "fs: cannot attach a mount while it is in use".to_string())?
+            .io_tasks
+            .clone();
+        if let Some(io) = io {
+            state.put(io);
+        }
+        state.put(self);
+        Ok(())
+    }
+
+    pub(super) async fn io_tasks(&self) -> Option<Arc<FsIoTasks>> {
+        self.0.lock().await.io_tasks.clone()
+    }
+}
+
+#[derive(Default)]
+struct FsIoState {
+    tasks: tokio::task::JoinSet<()>,
+    closed: bool,
+}
+
+pub(super) struct FsIoTasks {
+    runtime: tokio::runtime::Handle,
+    state: std::sync::Mutex<FsIoState>,
+}
+
+struct AbortFsTask(tokio::task::AbortHandle);
+impl Drop for AbortFsTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl FsIoTasks {
+    /// Stop and drain service futures before publishing any terminal outcome.
+    /// Aborting alone is insufficient: a task may still be in its final poll.
+    pub(super) async fn finish(&self) {
+        let mut tasks = {
+            let mut state = self.state.lock().unwrap();
+            state.closed = true;
+            std::mem::take(&mut state.tasks)
+        };
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
+
+    async fn run<T, E, Fut>(&self, operation: Fut) -> Result<T, JsErrorBox>
+    where
+        T: Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let _abort_on_drop = {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                return Err(JsErrorBox::generic("fs: execution has finished"));
+            }
+            // Reap completed tasks so long-running scripts do not retain one
+            // tracking record per operation.
+            while state.tasks.try_join_next().is_some() {}
+            AbortFsTask(state.tasks.spawn_on(
+                async move {
+                    let result = operation.await;
+                    let _ = send.send(result);
+                },
+                &self.runtime,
+            ))
+        };
+        receive
+            .await
+            .map_err(|_| JsErrorBox::generic("fs task cancelled or panicked"))?
+            .map_err(|e| JsErrorBox::generic(e.to_string()))
+    }
 }
 
 /// Hook capabilities of the filesystem executor: pre hooks may rewrite
@@ -439,9 +531,8 @@ impl FsStat {
 
 /// One filesystem namespace: the hook chain plus the backend it authorizes.
 ///
-/// Overlay-backed services must be driven from the current-thread isolate
-/// runtime (the CAS overlay uses deno_unsync); host-backed services may run on
-/// any runtime.
+/// The service is independent of V8 and may run on any Tokio runtime. Only
+/// the deno_core op driver must stay on the current-thread isolate runtime.
 #[derive(Clone)]
 pub struct FsService {
     config: FsConfig,
@@ -632,7 +723,11 @@ impl FsService {
         let path = self.gate("appendFile", path, None, None, None).await?.path;
         if let Some(m) = &self.mount {
             let mut guard = m.0.lock().await;
-            let mut existing = guard.read(Path::new(&path)).await.unwrap_or_default();
+            // Only an absent file starts empty. A cold storage failure must
+            // not silently truncate the existing contents during append.
+            let mut existing = guard.read_opt(Path::new(&path)).await
+                .map_err(|e| FsError::overlay("appendFile", &path, e))?
+                .unwrap_or_default();
             existing.extend_from_slice(data);
             return guard
                 .write(Path::new(&path), &existing)
@@ -852,11 +947,10 @@ async fn symlink_impl(_target: &str, _link: &str) -> std::io::Result<()> {
 
 // ── Async deno_core ops ──────────────────────────────────────────────────
 //
-// Each op resolves the session's service and runs one operation. Overlay-backed
-// services run inline: the CAS overlay uses deno_unsync, which asserts the
-// current-thread isolate runtime, and tokio::spawn would move the work onto the
-// multi-thread runtime and abort the process. Host-backed services are
-// offloaded so blocking-ish host I/O does not stall the isolate.
+// Keep the deno_core op driver on the isolate runtime, but drive engine-owned
+// mount service futures on the server runtime. Otherwise a pending async op
+// can hold the mount mutex while a sync op blocks the isolate waiting for it.
+// The mount tracks these tasks and drains them before snapshot publication.
 
 fn service(state: &Rc<RefCell<OpState>>) -> Result<FsService, JsErrorBox> {
     Ok(FsService::new(extract_config(state)?, extract_mount(state)))
@@ -870,12 +964,32 @@ where
 {
     let service = service(state)?;
     if service.has_mount() {
-        return op(service).await.map_err(FsError::js);
+        return run_mount_op(state, op(service)).await;
     }
     tokio::spawn(op(service))
         .await
         .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
         .map_err(FsError::js)
+}
+
+async fn run_mount_op<T, E, Fut>(
+    state: &Rc<RefCell<OpState>>,
+    operation: Fut,
+) -> Result<T, JsErrorBox>
+where
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, E>> + Send + 'static,
+{
+    let io = state.borrow().try_borrow::<Arc<FsIoTasks>>().cloned();
+    match io {
+        Some(io) => io.run(operation).await,
+        // Standalone embedders retain inline behavior without an attached
+        // independently driven runtime; no public mount/config shape changes.
+        None => operation
+            .await
+            .map_err(|e| JsErrorBox::generic(e.to_string())),
+    }
 }
 
 fn sync_service(state: &mut OpState) -> Result<FsService, JsErrorBox> {
@@ -1243,30 +1357,31 @@ async fn op_fs_write_stream_open(
     let mount = extract_mount(&state);
     let writers = extract_writers(&state)?;
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        let path = check_policy(
-            &config.hooks,
-            "writeFile",
-            &path,
-            None,
-            None,
-            None,
-            config.mcp_headers.as_ref(),
-        )
-        .await
-        .map_err(JsErrorBox::generic)?
-        .path;
-        let store = m.0.lock().await.store_handle();
-        let ow = OpenWrite::Overlay {
-            path: path.clone(),
-            writer: FileWriter::new(store),
-        };
-        let mut g = writers.0.lock().await;
-        let id = g.next;
-        g.next = g.next.wrapping_add(1);
-        g.map.insert(id, ow);
-        return Ok(id);
+        return run_mount_op(&state, async move {
+            let path = check_policy(
+                &config.hooks,
+                "writeFile",
+                &path,
+                None,
+                None,
+                None,
+                config.mcp_headers.as_ref(),
+            )
+            .await?
+            .path;
+            let store = m.0.lock().await.store_handle();
+            let ow = OpenWrite::Overlay {
+                path,
+                writer: FileWriter::new(store),
+            };
+            let mut g = writers.0.lock().await;
+            let id = g.next;
+            g.next = g.next.wrapping_add(1);
+            g.map.insert(id, ow);
+            Ok::<u32, String>(id)
+        })
+        .await;
     }
 
     tokio::spawn(async move {
@@ -1306,11 +1421,11 @@ async fn op_fs_write_stream_chunk_buffer(
     #[buffer(copy)] data: Vec<u8>,
 ) -> Result<String, JsErrorBox> {
     let writers = extract_writers(&state)?;
-    // Run inline: the overlay FileWriter uses deno_unsync, which requires the
-    // current-thread isolate runtime; tokio::spawn would abort the process.
-    feed_stream(&writers, id, &data)
-        .await
-        .map_err(JsErrorBox::generic)
+    run_mount_op(
+        &state,
+        async move { feed_stream(&writers, id, &data).await },
+    )
+    .await
 }
 
 /// Feed a chunk of text to an open write stream.
@@ -1322,11 +1437,10 @@ async fn op_fs_write_stream_chunk_text(
     #[string] data: String,
 ) -> Result<String, JsErrorBox> {
     let writers = extract_writers(&state)?;
-    // Run inline: the overlay FileWriter uses deno_unsync, which requires the
-    // current-thread isolate runtime; tokio::spawn would abort the process.
-    feed_stream(&writers, id, data.as_bytes())
-        .await
-        .map_err(JsErrorBox::generic)
+    run_mount_op(&state, async move {
+        feed_stream(&writers, id, data.as_bytes()).await
+    })
+    .await
 }
 
 /// Finish an open write stream: flush the final chunk and install the file.
@@ -1338,33 +1452,29 @@ async fn op_fs_write_stream_close(
 ) -> Result<String, JsErrorBox> {
     let mount = extract_mount(&state);
     let writers = extract_writers(&state)?;
-    // Run inline: the overlay writer.finish() / put_entry path uses deno_unsync,
-    // which requires the current-thread isolate runtime; tokio::spawn would abort.
-    let ow = writers
-        .0
-        .lock()
-        .await
-        .map
-        .remove(&id)
-        .ok_or_else(|| JsErrorBox::generic("fs write stream: invalid handle".to_string()))?;
-    match ow {
-        OpenWrite::Overlay { path, writer } => {
-            let entry = writer
-                .finish()
-                .await
-                .map_err(|e| JsErrorBox::generic(e.to_string()))?;
-            if let Some(m) = mount {
-                m.0.lock().await.put_entry(Path::new(&path), entry);
+    run_mount_op(&state, async move {
+        let ow = writers
+            .0
+            .lock()
+            .await
+            .map
+            .remove(&id)
+            .ok_or_else(|| "fs write stream: invalid handle".to_string())?;
+        match ow {
+            OpenWrite::Overlay { path, writer } => {
+                let entry = writer.finish().await.map_err(|e| e.to_string())?;
+                if let Some(m) = mount {
+                    m.0.lock().await.put_entry(Path::new(&path), entry);
+                }
+            }
+            OpenWrite::Real(mut f) => {
+                use tokio::io::AsyncWriteExt;
+                f.flush().await.map_err(|e| e.to_string())?;
             }
         }
-        OpenWrite::Real(mut f) => {
-            use tokio::io::AsyncWriteExt;
-            f.flush()
-                .await
-                .map_err(|e| JsErrorBox::generic(e.to_string()))?;
-        }
-    }
-    Ok("{}".to_string())
+        Ok::<String, String>("{}".to_string())
+    })
+    .await
 }
 
 /// Feed bytes to writer `id`: take it out of the registry, feed, put it back, so
@@ -2041,5 +2151,63 @@ mod tests {
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"destination\":\"/tmp/new.txt\""));
+    }
+}
+
+#[cfg(test)]
+mod lazy_io_tests {
+    use super::super::fs_store::FsStore;
+    use super::*;
+
+    #[tokio::test]
+    async fn lazy_fs_drain_prevents_late_mutation_of_the_actual_mount() {
+        let mount = FsMountHandle::on_runtime(
+            SessionMount::empty(FsStore::in_memory()),
+            tokio::runtime::Handle::current(),
+        );
+        let io = mount.io_tasks().await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_mount = mount.clone();
+        let task_entered = entered.clone();
+        let task_release = release.clone();
+        let pending = io.run(async move {
+            let mut guard = task_mount.0.lock().await;
+            task_entered.notify_one();
+            task_release.notified().await;
+            guard
+                .write(Path::new("pending"), b"must not be installed")
+                .await
+                .map_err(|e| FsError::overlay("writeFile", "pending", e))
+        });
+        tokio::pin!(pending);
+        tokio::select! {
+            _ = entered.notified() => {},
+            _ = &mut pending => panic!("operation must stay pending"),
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), io.finish())
+            .await
+            .unwrap();
+        // This is the actual mutable mount, not an immutable prior root.
+        assert!(
+            mount.0.try_lock().is_ok(),
+            "drain must drop the lock holder"
+        );
+        release.notify_one();
+        assert!(pending.await.is_err());
+        tokio::task::yield_now().await;
+        assert!(
+            mount
+                .0
+                .lock()
+                .await
+                .read(Path::new("pending"))
+                .await
+                .is_err()
+        );
+        assert!(
+            io.run(async { Ok::<(), String>(()) }).await.is_err(),
+            "closed mount rejects new ops"
+        );
     }
 }
