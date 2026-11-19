@@ -854,6 +854,7 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             let iteration = sc.workload.count + retry;
             op_id += 1;
             events.push(ScenarioEvent::Invoke { at_ms: now_ms(start), op_id, node: target.clone() });
+            let mut fresh_head_advanced = false;
             let outcome = if crashed.iter().any(|n| n == &target || n == &follower) {
                 // Old handles are not generation-fenced after a crash. Fail
                 // closed until host-owned fresh incarnations are implemented.
@@ -867,10 +868,13 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
                             None => Outcome::Failed { error: "fresh JS returned invalid head".into() },
                             Some(ca) => match observer_store.resolve("main").await {
                                 Err(_) => Outcome::Unknown,
-                                Ok(expect) => match observer_store.cas("main", expect, ca, None).await {
-                                    Ok(true) => Outcome::Acked { head },
-                                    Ok(false) => Outcome::Conflict,
-                                    Err(_) => Outcome::Unknown,
+                                Ok(expect) => {
+                                    fresh_head_advanced = expect.as_ref() != Some(&ca);
+                                    match observer_store.cas("main", expect, ca, None).await {
+                                        Ok(true) => Outcome::Acked { head },
+                                        Ok(false) => Outcome::Conflict,
+                                        Err(_) => Outcome::Unknown,
+                                    }
                                 },
                             },
                         }
@@ -884,7 +888,9 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             let terminal_failure = matches!(&outcome, Outcome::Failed { .. });
             match &outcome {
                 Outcome::Acked { head } => {
-                    fresh_write_acked = true;
+                    // An acknowledged CAS of the existing head is a no-op,
+                    // not a fresh snapshot publication.
+                    fresh_write_acked = fresh_head_advanced;
                     acked.push(head.clone());
                     if let Op::RunJs { program, .. } = &sc.workload.op {
                         for step in &program.0 {
