@@ -500,3 +500,44 @@ fn post_recovery_js_write_cannot_replace_missing_precrash_ack() {
     assert!(matches!(&result.status, Err(error) if error.contains("FreshWriteSucceeds")),
         "a fresh write is not recovery evidence without a pre-crash ACK: status={:?} events={:?}", result.status, result.events);
 }
+
+#[test]
+fn unavailable_replicas_do_not_count_as_converged() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+    let result = Scenario {
+        seed: 42,
+        topology: Topology {
+            voters: ["n0", "n1", "n2"].map(str::to_owned).to_vec(),
+            clients: vec!["observer".into()],
+        },
+        workload: Workload {
+            every_ms: 250,
+            count: 0,
+            op: Op::RunJs {
+                node: "leader".into(),
+                program: Program(vec![Step::Write {
+                    path: "/data/iteration".into(),
+                    bytes: "never-published".into(),
+                }]),
+            },
+        },
+        faults: ["n0", "n1", "n2"].into_iter().enumerate()
+            .map(|(i, name)| Fault::Crash {
+                at_ms: 900 + i as u64 * 100,
+                node: CrashTarget::Node(name.into()),
+            }).collect(),
+        recovery: Recovery {
+            stop_workload: true,
+            heal_all: true,
+            restart_crashed: false,
+            deadline_ms: 300,
+        },
+        asserts: vec![Assertion::ReplicasConvergeAfterRecovery],
+    }
+    .run_and_dump("real-sled-unavailable-replicas");
+    assert!(result.events.iter().any(|event| matches!(event,
+        ScenarioEvent::Assert { name, passed: false, .. }
+            if name == "ReplicasConvergeAfterRecovery"
+    )), "unavailable replicas falsely converged: status={:?} events={:?}",
+        result.status, result.events);
+}
