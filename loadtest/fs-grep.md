@@ -80,3 +80,15 @@ Wikipedia shards. It distributes Wikipedia across 24 GitHub-hosted runners and
 uses a local Moto S3 endpoint on each runner. The PR comment combines the slice
 timings and match counts. Wikipedia timings are sums of the individual slice
 timings. Remove and reapply the label to run it again against the latest commit.
+
+### Simulate S3 latency
+
+The PR workflow adds a log-normal delay independently to each S3 HTTP request
+during the timed scans. Its default median is 20 ms and its 95th percentile is
+60 ms. Individual delays are capped at 30 seconds. Set the repository Actions variable `FS_GREP_S3_LATENCY` to a
+`MEDIAN/P95` pair in milliseconds, or to `off`. The PR comment records the
+profile. For a local run against Moto, use `--s3-latency 20/60` with the same
+loopback endpoint from the example above.
+
+This models variable per-request latency. It leaves bandwidth, packet loss,
+local disk, ingestion and cache hits outside the simulation.

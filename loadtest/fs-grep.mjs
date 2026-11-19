@@ -3,6 +3,7 @@ import { spawn, execFile } from "node:child_process";
 import { once } from "node:events";
 import { createReadStream } from "node:fs";
 import { access, mkdir, mkdtemp, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -22,6 +23,7 @@ const { values: options } = parseArgs({
   options: {
     binary: { type: "string", default: "target/release/server" },
     "s3-bucket": { type: "string" },
+    "s3-latency": { type: "string", default: "off" },
     "data-dir": { type: "string", default: ".fs-grep-data" },
     "mdn-files": { type: "string" },
     "skip-mdn": { type: "boolean" },
@@ -118,7 +120,57 @@ async function* partitions(root, fileLimit = Infinity) {
   if (paths.length) yield { paths, bytes };
 }
 
-async function startServer(binary, dir, policy, backend, bucket, cache) {
+function s3LatencyProfile(value) {
+  if (value === "off") return;
+  assert.match(value, /^\d+\/\d+$/, "--s3-latency expects MEDIAN/P95 in milliseconds or off");
+  const [median, p95] = value.split("/").map(Number);
+  assert(median > 0 && p95 > median && p95 <= 1000, "Expected 0 < median < p95 <= 1000 ms");
+  assert(process.env.AWS_ENDPOINT_URL, "--s3-latency requires AWS_ENDPOINT_URL");
+  const endpoint = new URL(process.env.AWS_ENDPOINT_URL);
+  assert(
+    endpoint.protocol === "http:" && ["localhost", "127.0.0.1"].includes(endpoint.hostname)
+      && endpoint.href === endpoint.origin + "/",
+    "--s3-latency requires a plain HTTP loopback AWS_ENDPOINT_URL for an S3 emulator",
+  );
+  return { endpoint, median, sigma: Math.log(p95 / median) / 1.6448536269514722 };
+}
+
+async function startS3Proxy({ endpoint, median, sigma }) {
+  const proxy = createHttpServer((incoming, outgoing) => {
+    // Box–Muller generates a fresh standard normal draw for each S3 request.
+    const normal = Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+    const delay = Math.min(30000, Math.max(1, Math.round(median * Math.exp(sigma * normal))));
+    let upstream;
+    const timer = setTimeout(() => {
+      upstream = httpRequest(endpoint, {
+        method: incoming.method, path: incoming.url, headers: incoming.headers,
+      }, (response) => {
+        outgoing.writeHead(response.statusCode, response.headers);
+        pipeline(response, outgoing).catch(() => outgoing.destroy());
+      });
+      incoming.pipe(upstream);
+      upstream.on("error", () => {
+        if (outgoing.headersSent) outgoing.destroy();
+        else outgoing.writeHead(502).end();
+      });
+    }, delay);
+    outgoing.on("close", () => {
+      clearTimeout(timer);
+      upstream?.destroy();
+    });
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  return {
+    endpoint: `http://127.0.0.1:${proxy.address().port}`,
+    stop: () => new Promise((done) => {
+      proxy.close(done);
+      proxy.closeAllConnections();
+    }),
+  };
+}
+
+async function startServer(binary, dir, policy, backend, bucket, cache, endpoint) {
   await mkdir(dir, { recursive: true });
   const listener = createServer().listen(0, "127.0.0.1");
   await once(listener, "listening");
@@ -132,7 +184,8 @@ async function startServer(binary, dir, policy, backend, bucket, cache) {
     "--fs-passthrough", "--policies-json", policy,
   ];
   if (backend === "s3") args.push("--s3-bucket", bucket, "--cache-dir", cache);
-  const child = spawn(binary, args, { stdio: ["ignore", "ignore", "pipe"] });
+  const env = endpoint ? { ...process.env, AWS_ENDPOINT_URL: endpoint, AWS_S3_FORCE_PATH_STYLE: "1" } : process.env;
+  const child = spawn(binary, args, { env, stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   let spawnError;
   child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr = (stderr + chunk).slice(-12000); });
@@ -253,11 +306,12 @@ async function scan(server, source, backend, pass) {
 
 async function main() {
   if (options.help) {
-    console.log("node loadtest/fs-grep.mjs --s3-bucket BUCKET [--binary PATH] [--data-dir PATH] [--mdn-files N] [--wiki-shards N] [--wiki-articles N] [--wiki-revision SHA] [--wiki-slice INDEX/TOTAL] [--skip-mdn]");
+    console.log("node loadtest/fs-grep.mjs --s3-bucket BUCKET [--binary PATH] [--data-dir PATH] [--mdn-files N] [--wiki-shards N] [--wiki-articles N] [--wiki-revision SHA] [--wiki-slice INDEX/TOTAL] [--skip-mdn] [--s3-latency MEDIAN/P95|off]");
     return;
   }
   const bucket = options["s3-bucket"];
   assert(bucket, "Pass --s3-bucket with an existing benchmark bucket");
+  const latency = s3LatencyProfile(options["s3-latency"]);
   const mdnLimit = limit("mdn-files");
   const wikiLimit = limit("wiki-shards");
   const articleLimit = limit("wiki-articles");
@@ -302,6 +356,7 @@ async function main() {
 
   const work = await mkdtemp(join(await realpath(tmpdir()), "mcp-fs-grep-"));
   const servers = new Map();
+  let proxy;
   try {
     const wikiRoot = join(work, "wiki");
     const rego = join(work, "fs.rego");
@@ -357,7 +412,11 @@ allow if {
     await servers.get("s3").stop();
     servers.delete("s3");
     await rm(seedCache, { recursive: true, force: true });
-    servers.set("s3", await startServer(binary, s3Dir, policy, "s3", bucket, join(work, "scan-cache")));
+    if (latency) {
+      proxy = await startS3Proxy(latency);
+      console.error(`S3 scan latency: log-normal added delay, median/p95 ${options["s3-latency"]} ms`);
+    }
+    servers.set("s3", await startServer(binary, s3Dir, policy, "s3", bucket, join(work, "scan-cache"), proxy?.endpoint));
     for (const source of mdnRoot ? [mdnSource, wikiSource] : [wikiSource]) {
       let expected;
       for (const [backend, server] of servers) {
@@ -370,6 +429,7 @@ allow if {
     }
   } finally {
     await Promise.all([...servers.values()].map((server) => server.stop()));
+    await proxy?.stop();
     await rm(work, { recursive: true, force: true });
   }
 }

@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  S3_LATENCY: ${{ vars.FS_GREP_S3_LATENCY || '20/60' }}
+
 concurrency:
   group: fs-grep-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
   cancel-in-progress: true
@@ -94,7 +97,7 @@ jobs:
           if [[ "$SLICE" != 0 ]]; then options+=(--skip-mdn); fi
           node loadtest/fs-grep.mjs --binary benchmark-bin/server --s3-bucket fs-grep-benchmark \
             --wiki-revision "$WIKI_REVISION" --wiki-slice "$SLICE/$(jq length <<< "$SLICES")" \
-            "${options[@]}" | tee "$RUNNER_TEMP/fs-grep-$SLICE.jsonl"
+            --s3-latency "$S3_LATENCY" "${options[@]}" | tee "$RUNNER_TEMP/fs-grep-$SLICE.jsonl"
       - uses: actions/upload-artifact@v4
         with:
           name: fs-grep-result-${{ matrix.slice }}
@@ -170,7 +173,10 @@ jobs:
                   }
                 }
               }
-              lines.push('', 'End-to-end includes snapshot loading and staging. JavaScript scan measures the recursive search itself. Wikipedia timings sum the slices that ran on separate runners. The S3 configuration uses Moto.');
+              const latency = process.env.S3_LATENCY;
+              assert(latency === 'off' || /^\d+\/\d+$/.test(latency));
+              lines.push('', latency === 'off' ? 'S3 used Moto with no added delay.' : `S3 used Moto with a log-normal added delay per request (median/p95 ${latency} ms).`);
+              lines.push('', 'End-to-end includes snapshot loading and staging. JavaScript scan measures the recursive search itself. Wikipedia timings sum the slices that ran on separate runners.');
             }
             await github.rest.issues.createComment({
               ...context.repo,
