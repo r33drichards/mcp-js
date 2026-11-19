@@ -275,7 +275,7 @@ fn observer_runs_js_and_publishes_label_on_host() {
         node.start_background_tasks().unwrap();
         let host = ScenarioHost::new(node, db.clone());
         let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
-        for _ in 0..6 {
+        for _ in 0..7 {
             let (stream, _) = listener.accept().await?;
             host.serve_request(stream).await.unwrap();
         }
@@ -315,6 +315,7 @@ fn observer_runs_js_and_publishes_label_on_host() {
         assert_eq!(client.resolve("main").await.unwrap(), None);
         assert!(client.cas("main", None, ca).await.unwrap());
         assert_eq!(client.resolve("main").await.unwrap(), Some(ca));
+        assert!(client.log("main").await.unwrap().iter().any(|entry| entry.to == ca));
         Ok(())
     });
     sim.run().unwrap();
