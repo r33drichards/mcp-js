@@ -44,7 +44,7 @@
         } {
           src = ./server;
           # Vendor hash for the merged server dependency graph (including UniFFI).
-          hash = "sha256-K4zG2Q9+VGhhNMWhZ57mTAky0sCARfVSHp/yWLwp06Q=";
+          hash = "sha256-pVdGRkOBTcHoMH4xcsf+qmLmuB61ZnpKug9/3GCJDWU=";
         });
 
         docsPython = pkgs.python3.withPackages (
@@ -79,7 +79,7 @@
         # which fails inside the Nix sandbox and on network-restricted
         # CI runners.  Pre-fetching and setting RUSTY_V8_ARCHIVE avoids
         # any network access during build.
-        rustyV8Version = "146.9.0";
+        rustyV8Version = "152.2.0";
         rustyV8Target = {
           "x86_64-linux"   = "x86_64-unknown-linux-gnu";
           "aarch64-linux"  = "aarch64-unknown-linux-gnu";
@@ -89,10 +89,10 @@
         rustyV8Archive = pkgs.fetchurl {
           url = "https://github.com/denoland/rusty_v8/releases/download/v${rustyV8Version}/librusty_v8_release_${rustyV8Target}.a.gz";
           hash = {
-            "x86_64-linux"   = "sha256-Yu8vHivMad6I+uo1iXMIRBVrziVVUZ+7IiXYpbiB/pg=";
-            "aarch64-linux"  = "sha256-Jk7v/5DEnFmbLCGGzIaZVjtzeL6k66CY/p6mXZvFt9I=";
-            "x86_64-darwin"  = "sha256-YOv8BnCfL7vFkmiar+VDbxdiJ95OpXZvGKm9OfDjtP0=";
-            "aarch64-darwin" = "sha256-5N5IQxBpGKWBEemXd4Y7nLdXzCg+ZcBb11Td0mbjokI=";
+            "x86_64-linux"   = "sha256-tmg+mvy3f72MssOs9F001SApqyFrMyUiyVF5wS8P7Tw=";
+            "aarch64-linux"  = "sha256-xAGWu/GCUy5YP2W32vAZb9uzNU5vrFmzHQU5wg+THz0=";
+            "x86_64-darwin"  = "sha256-BMvBw2xM1UWcVASXddkoiTN8adk2+wsBH5sm8dRUYQ0=";
+            "aarch64-darwin" = "sha256-pKVIREStS18Q3HvtFBI23Z2+q/IAbRRSDxm5NdTbQic=";
           }.${system};
         };
 
