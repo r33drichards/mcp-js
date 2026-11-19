@@ -204,7 +204,7 @@ fn host_owned_engine_runs_js_on_patched_sled() {
             );
             node.start_background_tasks().unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let (engine, store, pump) = engine_with_cluster_host(node, db);
+            let (engine, store, pump, console_pump, console_bridge) = engine_with_cluster_host(node, db);
             let program = Program(vec![Step::Write {
                 path: "/data/iteration".into(),
                 bytes: "host-owned".into(),
@@ -237,6 +237,9 @@ fn host_owned_engine_runs_js_on_patched_sled() {
                 .unwrap()
                 .unwrap();
             assert_eq!(store.read_file(&entry).await.unwrap(), b"host-owned");
+            console_bridge.revoke();
+            console_pump.abort();
+            let _ = console_pump.await;
             pump.abort();
             let _ = pump.await;
             done.store(true, Ordering::SeqCst);
@@ -622,29 +625,13 @@ fn dropping_scenario_host_stops_its_blob_pump() {
 fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
     use engine_cluster_tests::scenario::{ScenarioHost, ScenarioHostClient};
     use server::cluster::{ClusterConfig, ClusterNode, Role};
-    use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     use std::time::Duration;
     use turmoil::net::TcpListener;
 
     let stage = Arc::new(AtomicUsize::new(0));
     let generation = Arc::new(AtomicUsize::new(0));
     let request_done = Arc::new(AtomicUsize::new(0));
-    let test_done = Arc::new(AtomicBool::new(false));
-    {
-        let stage = stage.clone();
-        let generation = generation.clone();
-        let request_done = request_done.clone();
-        let test_done = test_done.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(20));
-            if !test_done.load(Ordering::SeqCst) {
-                eprintln!("[DEBUG-stale-worker] stalled: stage={} generation={} request_done={}",
-                    stage.load(Ordering::SeqCst), generation.load(Ordering::SeqCst),
-                    request_done.load(Ordering::SeqCst));
-                std::process::abort();
-            }
-        });
-    }
     let mut sim = turmoil::Builder::new().simulation_duration(Duration::from_secs(30)).build();
     let host_stage = stage.clone();
     let opened = generation.clone();
@@ -688,7 +675,7 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
                         .flat_map(|entry| entry.unwrap().1.to_vec()))
                     .collect();
                 assert!(!String::from_utf8_lossy(&output).contains("stale-after-crash"),
-                    "old V8 worker wrote to reopened generation: {output:?}");
+                    "old V8 worker wrote to reopened generation");
                 stage.store(3, Ordering::SeqCst);
             }
             let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
@@ -731,5 +718,4 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
         if stage.load(Ordering::SeqCst) == 3 { break; }
     }
     assert_eq!(stage.load(Ordering::SeqCst), 3, "reopened host did not check console");
-    test_done.store(true, Ordering::SeqCst);
 }

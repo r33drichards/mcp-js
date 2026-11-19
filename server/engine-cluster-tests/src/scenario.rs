@@ -431,10 +431,13 @@ fn engine_with_cluster(node: Arc<ClusterNode>, tag: &str) -> (Arc<Engine>, Arc<F
 pub fn engine_with_cluster_host(
     node: Arc<ClusterNode>,
     db: sled::Db,
-) -> (Arc<Engine>, Arc<FsStore>, tokio::task::JoinHandle<()>) {
+) -> (Arc<Engine>, Arc<FsStore>, tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>, Arc<server::engine::console::HostConsoleBridge>) {
     use server::engine::heap_storage::{HostBlobStorage, SledHeapStorage};
+    use server::engine::console::HostConsoleBridge;
 
-    let registry = ExecutionRegistry::from_db(db.clone());
+    let registry = Arc::new(ExecutionRegistry::from_db(db.clone()));
+    let (console_bridge, console_pump) = HostConsoleBridge::new(registry.clone());
+    let console_pump = tokio::spawn(console_pump);
     let labels = LabelStore::from_db(db.clone()).with_cluster(node);
     let storage = Arc::new(SledHeapStorage::new(db).expect("host blob tree"));
     let (worker_storage, pump) = HostBlobStorage::bridge(storage);
@@ -444,10 +447,11 @@ pub fn engine_with_cluster_host(
     let engine = Engine::from_engine(
         Engine::new_stateless(64 * 1024 * 1024, 30, 4)
             .with_fs_config(fs_config)
-            .with_execution_registry(Arc::new(registry))
+            .with_execution_registry(registry)
+            .with_host_console_bridge(console_bridge.clone())
             .with_fs_snapshots(store.clone(), Arc::new(labels)),
     );
-    (engine, store, pump)
+    (engine, store, pump, console_pump, console_bridge)
 }
 
 #[cfg(feature = "real-sled")]
@@ -486,6 +490,8 @@ pub struct ScenarioHost {
     store: Arc<FsStore>,
     generation: u64,
     _pump: tokio::task::JoinHandle<()>,
+    _console_pump: tokio::task::JoinHandle<()>,
+    console_bridge: Arc<server::engine::console::HostConsoleBridge>,
 }
 
 #[cfg(feature = "real-sled")]
@@ -495,13 +501,15 @@ impl ScenarioHost {
     }
 
     pub fn new_with_generation(node: Arc<ClusterNode>, db: sled::Db, generation: u64) -> Self {
-        let (engine, store, pump) = engine_with_cluster_host(node.clone(), db);
+        let (engine, store, pump, console_pump, console_bridge) = engine_with_cluster_host(node.clone(), db);
         Self {
             node,
             engine,
             store,
             generation,
             _pump: pump,
+            _console_pump: console_pump,
+            console_bridge,
         }
     }
 
@@ -1318,6 +1326,8 @@ async fn check_assertion(
 #[cfg(feature = "real-sled")]
 impl Drop for ScenarioHost {
     fn drop(&mut self) {
+        self.console_bridge.revoke();
         self._pump.abort();
+        self._console_pump.abort();
     }
 }

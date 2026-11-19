@@ -133,6 +133,15 @@ impl ExecutionRegistry {
         Ok(tree)
     }
 
+    /// Append one WAL page on the owning host, never from a V8 worker.
+    pub fn write_console_page(&self, id: &str, seq: u64, bytes: &[u8]) -> Result<(), String> {
+        let tree = self.db.open_tree(format!("ex:{}", id))
+            .map_err(|e| format!("Failed to open console tree: {}", e))?;
+        tree.insert(seq.to_be_bytes(), bytes)
+            .map_err(|e| format!("Failed to write console page: {}", e))?;
+        Ok(())
+    }
+
     /// Open the tree of outstanding artifact upload grants.
     pub fn artifact_uploads_tree(&self) -> Result<sled::Tree, String> {
         self.db
