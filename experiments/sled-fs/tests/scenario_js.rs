@@ -414,3 +414,41 @@ fn owner_two_crashes_keep_distinct_acknowledged_js_snapshots() {
     }
     assert_eq!(generation.load(Ordering::SeqCst), 3, "host did not reopen twice");
 }
+
+#[test]
+fn invalid_snapshot_head_is_not_reported_as_absent_file() {
+    use engine_cluster_tests::scenario::{ScenarioHost, ScenarioHostClient};
+    use server::cluster::{ClusterConfig, ClusterNode};
+    use std::time::Duration;
+    use turmoil::net::TcpListener;
+
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(5))
+        .build();
+    sim.host("n0", || async {
+        let db = sled::Config::new()
+            .path("/invalid-head-rpc")
+            .flush_every_ms(None)
+            .open()
+            .unwrap();
+        let node = ClusterNode::new(
+            ClusterConfig { node_id: "n0".into(), ..ClusterConfig::default() },
+            db.clone(),
+        );
+        let host = ScenarioHost::new(node, db);
+        let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
+        let (stream, _) = listener.accept().await?;
+        host.serve_request(stream).await.unwrap();
+        Ok(())
+    });
+    sim.client("observer", async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let error = ScenarioHostClient::new("n0")
+            .read_file("not-a-ca-id", "/data/iteration")
+            .await
+            .expect_err("malformed head must not be treated as an absent file");
+        assert!(error.contains("invalid"), "{error}");
+        Ok(())
+    });
+    sim.run().unwrap();
+}
