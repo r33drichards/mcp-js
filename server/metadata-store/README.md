@@ -41,9 +41,11 @@ Old inline records and legacy S3 references remain readable. New artifact/consol
 writes always use the selected blob backend. Changing that backend requires
 moving existing objects; no read-error fallback or automatic migration is
 performed. Processes sharing metadata must also share the same S3 bucket or
-filesystem payload directory. Runtime objects are not automatically
-garbage-collected; overwrites and failed reference publication may leave
-unreferenced objects. New content-addressed references use `runtime/v2/` keys;
+filesystem payload directory. Overwrites and failed reference publication may
+leave unreferenced objects. Local managed roots offer an explicit reader-safe
+collector; it requires all registered metadata owners and has no automatic timer.
+See [runtime blob maintenance](../../docs/runtime-blob-maintenance.md). S3 and
+cross-domain reclamation remain unsupported. New content-addressed references use `runtime/v2/` keys;
 include that prefix in existing `runtime/` object permissions.
 
 Execution records and upload grants remain database values. There is no 128 KiB
@@ -144,14 +146,21 @@ backend construction also gives runtime S3 storage the existing cache support.
 digest when reading. New console pages hold compact typed references. Artifact
 metadata stays in the database and points to payload-only objects, so timestamps
 and MIME types do not change payload identity; listing metadata needs no blob
-fetch. UUID, inline and old DynamoDB S3 references remain readable. Heap/fs
+fetch. New descriptors live in a separate `runtime_refs:v1:<hex tree name>`
+index; arbitrary legacy inline bytes are never interpreted using a magic prefix.
+Inline records and explicit old DynamoDB S3 envelope references remain readable;
+legacy object names must be exactly `runtime/<canonical UUID>`. Earlier unmerged
+marker-only PR formats are ambiguous and need an explicit migration if used. Heap/fs
 snapshot hashes and formats are unchanged. Compatibility is one-way: old binaries
 do not understand the new runtime reference format. Shared deployments must
 pause runtime writes while upgrading their readers. Rolling back requires
 restoring compatible metadata/object formats.
 Direct execution registries initialize
-filesystem payload storage by default; explicit raw-tree APIs retain legacy
-encoding support.
+filesystem payload storage by default; explicit raw-tree APIs and `from_store`
+without an attached blob backend retain inline behavior. Console objects use
+256 KiB pages and indexed lengths/newline counts for lazy byte/line windows.
+Blob work has bounded concurrency and a queue-inclusive deadline, independently
+of the metadata reactor.
 
 `publication::MetadataPublication` is an opt-in revisioned metadata facade.
 Publication commits the primary, operation receipt and index companions atomically
@@ -167,8 +176,8 @@ publication facade, writing the object before metadata. The optional server
 are local committed reads; stronger reads are rejected and pending CAS conflicts
 remain explicitly provisional. It is exercised by the V8-free consensus harness,
 not implicitly enabled for existing server domains. No SQLite Raft persistence
-or automatic blob replication is introduced. Shared GC and migration of existing
-domain routing are separate work.
+or automatic blob replication is introduced. Cross-domain GC and migration of
+existing domain routing are separate work.
 
 The metadata crate's default `dynamodb` feature preserves the existing SDK-backed
 backend. Consensus-only consumers can disable default features to avoid compiling

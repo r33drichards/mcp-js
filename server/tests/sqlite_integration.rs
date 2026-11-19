@@ -281,14 +281,23 @@ async fn sqlite_runtime_records_console_artifacts_and_upload_grants_survive_rest
             let row = row.unwrap();
             assert_eq!(row[0], 1, "execution result must be inline, without S3");
             assert!(row.len() > 128 * 1024);
-            let artifact = store.get("artifacts", b"saved.bin").await.unwrap().unwrap();
+            let artifact = store
+                .get("runtime_refs:v1:617274696661637473", b"saved.bin")
+                .await
+                .unwrap()
+                .unwrap();
             assert!(
                 artifact.len() < 1024,
                 "only artifact metadata belongs in the database"
             );
             assert!(
                 !store
-                    .scan(&format!("ex:{id}"), b"", false, None)
+                    .scan(
+                        &format!("runtime_refs:v1:{}", hex::encode(format!("ex:{id}"))),
+                        b"",
+                        false,
+                        None
+                    )
                     .await
                     .unwrap()
                     .is_empty()
@@ -302,7 +311,12 @@ async fn sqlite_runtime_records_console_artifacts_and_upload_grants_survive_rest
                 1
             );
             for (_, reference) in store
-                .scan(&format!("ex:{id}"), b"", false, None)
+                .scan(
+                    &format!("runtime_refs:v1:{}", hex::encode(format!("ex:{id}"))),
+                    b"",
+                    false,
+                    None,
+                )
                 .await
                 .unwrap()
             {
@@ -761,7 +775,11 @@ async fn runtime_filesystem_payloads_survive_restart_and_never_live_in_the_datab
         );
         if selection == "flag" {
             let db = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
-            let value = db.get("artifacts", b"file.bin").await.unwrap().unwrap();
+            let value = db
+                .get("runtime_refs:v1:617274696661637473", b"file.bin")
+                .await
+                .unwrap()
+                .unwrap();
             assert!(
                 value.len() < 1024,
                 "database must contain only artifact metadata"
@@ -803,6 +821,11 @@ async fn runtime_filesystem_payloads_survive_restart_and_never_live_in_the_datab
         .unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let db = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
-    assert!(db.get("artifacts", b"file.txt").await.unwrap().is_none());
+    assert!(
+        db.get("runtime_refs:v1:617274696661637473", b"file.txt")
+            .await
+            .unwrap()
+            .is_none()
+    );
     server.stop().await;
 }

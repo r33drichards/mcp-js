@@ -414,3 +414,7 @@ combined with `--cluster-port`
 or `--dynamodb-table`; the Raft log and scheduler keep their existing stores.
 Existing sled data is not migrated automatically.
 See [metadata backend configuration](server/metadata-store/README.md).
+
+Local artifact and console objects have an explicit, reader-safe reclamation API;
+see [runtime blob maintenance](docs/runtime-blob-maintenance.md) for ownership,
+retention, and backend restrictions.

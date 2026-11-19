@@ -64,9 +64,15 @@ pub struct Artifact {
 #[derive(Debug, Clone)]
 pub enum ArtifactContent {
     /// `image/*` artifact → MCP `ImageContent` (base64 data + mime type).
-    Image { data_base64: String, mime_type: String },
+    Image {
+        data_base64: String,
+        mime_type: String,
+    },
     /// `audio/*` artifact → MCP `AudioContent` (base64 data + mime type).
-    Audio { data_base64: String, mime_type: String },
+    Audio {
+        data_base64: String,
+        mime_type: String,
+    },
     /// UTF-8 payload of any other mime type → MCP `TextContent` (raw text).
     Text(String),
     /// Any other binary payload → MCP `TextContent` carrying base64.
@@ -158,15 +164,21 @@ impl ArtifactStore {
     ) -> Result<ArtifactMeta, String> {
         validate(key, mime_type, bytes.len())?;
 
+        let _lease = self.tree.read_lease()?;
         let payload = if self.tree.has_objects() {
-            Some(self.tree.put_object(mcp_metadata_store::content::ObjectKind::Artifact, bytes)?)
-        } else { None }; // Explicit raw-tree callers retain legacy encodings.
+            Some(
+                self.tree
+                    .put_object(mcp_metadata_store::content::ObjectKind::Artifact, bytes)?,
+            )
+        } else {
+            None
+        }; // Explicit raw-tree callers retain legacy encodings.
         let inline = payload.is_none();
         let header = StoredHeader {
             mime_type: mime_type.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             execution_id: execution_id.map(str::to_string),
-            payload,
+            payload: None,
         };
         let header_json = serde_json::to_vec(&header)
             .map_err(|e| format!("artifact: failed to encode header: {}", e))?;
@@ -174,10 +186,12 @@ impl ArtifactStore {
         let mut value = Vec::with_capacity(4 + header_json.len() + bytes.len());
         value.extend_from_slice(&(header_json.len() as u32).to_be_bytes());
         value.extend_from_slice(&header_json);
-        if inline { value.extend_from_slice(bytes); }
+        if inline {
+            value.extend_from_slice(bytes);
+        }
 
         self.tree
-            .insert_metadata(key.as_bytes(), value)
+            .insert_object_metadata(key.as_bytes(), value, payload)
             .map_err(|e| format!("artifact: failed to store '{}': {}", key, e))?;
 
         Ok(ArtifactMeta {
@@ -191,16 +205,21 @@ impl ArtifactStore {
 
     /// Fetch an artifact by key. `Ok(None)` when the key doesn't exist.
     pub fn get(&self, key: &str) -> Result<Option<Artifact>, String> {
-        let Some(value) = self
+        let _lease = self.tree.read_lease()?;
+        let Some((value, reference)) = self
             .tree
-            .get(key.as_bytes())
+            .get_with_object(key.as_bytes())
             .map_err(|e| format!("artifact: failed to read '{}': {}", key, e))?
         else {
             return Ok(None);
         };
-        let (meta, payload_start) = decode_header(key, &value)?;
-        let header: StoredHeader = serde_json::from_slice(&value[4..payload_start]).map_err(|e|e.to_string())?;
-        let bytes = match header.payload {
+        let (mut meta, payload_start) = decode_header(key, &value)?;
+        if let Some(reference) = &reference {
+            meta.size_bytes = reference.size_bytes;
+        }
+        let header: StoredHeader =
+            serde_json::from_slice(&value[4..payload_start]).map_err(|e| e.to_string())?;
+        let bytes = match reference.or(header.payload) {
             Some(reference) => self.tree.get_object(reference)?,
             None => value[payload_start..].to_vec(),
         };
@@ -210,11 +229,14 @@ impl ArtifactStore {
     /// List metadata for all stored artifacts, sorted by key.
     pub fn list(&self) -> Result<Vec<ArtifactMeta>, String> {
         let mut out = Vec::new();
-        for item in self.tree.iter() {
-            let (k, value) =
+        for item in self.tree.iter_with_objects() {
+            let (k, value, reference) =
                 item.map_err(|e| format!("artifact: failed to iterate store: {}", e))?;
             let key = String::from_utf8_lossy(&k).to_string();
-            let (meta, _) = decode_header(&key, &value)?;
+            let (mut meta, _) = decode_header(&key, &value)?;
+            if let Some(reference) = reference {
+                meta.size_bytes = reference.size_bytes;
+            }
             out.push(meta);
         }
         Ok(out)
@@ -289,7 +311,11 @@ fn decode_header(key: &str, value: &[u8]) -> Result<(ArtifactMeta, usize), Strin
         ArtifactMeta {
             key: key.to_string(),
             mime_type: header.mime_type,
-            size_bytes: header.payload.as_ref().map(|r|r.size_bytes).unwrap_or((value.len() - payload_start) as u64),
+            size_bytes: header
+                .payload
+                .as_ref()
+                .map(|r| r.size_bytes)
+                .unwrap_or((value.len() - payload_start) as u64),
             created_at: header.created_at,
             execution_id: header.execution_id,
         },
@@ -390,7 +416,11 @@ impl UploadGrants {
         if grant.reserved || grant.expires_at <= chrono::Utc::now().timestamp() {
             return None;
         }
-        let claimed = encode_grant(&UploadGrant { reserved: true, ..grant.clone() }).ok()?;
+        let claimed = encode_grant(&UploadGrant {
+            reserved: true,
+            ..grant.clone()
+        })
+        .ok()?;
         self.tree
             .compare_and_swap(token.as_bytes(), Some(current), Some(claimed))
             .ok()?
@@ -553,7 +583,12 @@ fn op_artifact_list(state: &mut OpState) -> Result<String, JsErrorBox> {
 
 deno_core::extension!(
     artifacts_ext,
-    ops = [op_artifact_write, op_artifact_meta, op_artifact_read, op_artifact_list],
+    ops = [
+        op_artifact_write,
+        op_artifact_meta,
+        op_artifact_read,
+        op_artifact_list
+    ],
 );
 
 /// Create the artifacts extension for use in `RuntimeOptions::extensions`.
@@ -643,7 +678,12 @@ mod tests {
     fn put_get_roundtrip() {
         let store = temp_store();
         let meta = store
-            .put("chart", "image/png", &[0x89, 0x50, 0x4e, 0x47], Some("exec-1"))
+            .put(
+                "chart",
+                "image/png",
+                &[0x89, 0x50, 0x4e, 0x47],
+                Some("exec-1"),
+            )
             .unwrap();
         assert_eq!(meta.key, "chart");
         assert_eq!(meta.mime_type, "image/png");
@@ -680,7 +720,11 @@ mod tests {
         let store = temp_store();
         assert!(store.put("", "image/png", b"x", None).is_err());
         assert!(store.put("k", "png", b"x", None).is_err());
-        assert!(store.put(&"k".repeat(MAX_KEY_BYTES + 1), "image/png", b"x", None).is_err());
+        assert!(
+            store
+                .put(&"k".repeat(MAX_KEY_BYTES + 1), "image/png", b"x", None)
+                .is_err()
+        );
         let big = vec![0u8; MAX_ARTIFACT_BYTES + 1];
         assert!(store.put("k", "image/png", &big, None).is_err());
         // The mime type is served back as an HTTP header — whitespace and
@@ -695,10 +739,17 @@ mod tests {
         store.put("i", "image/png", &[0x89], None).unwrap();
         store.put("a", "audio/wav", &[0x00], None).unwrap();
         store.put("t", "application/json", b"{}", None).unwrap();
-        store.put("b", "application/octet-stream", &[0xff, 0xfe], None).unwrap();
+        store
+            .put("b", "application/octet-stream", &[0xff, 0xfe], None)
+            .unwrap();
         for key in ["i", "a", "t", "b"] {
             let artifact = store.get(key).unwrap().unwrap();
-            assert_eq!(artifact.encoding(), artifact.content().encoding(), "key {}", key);
+            assert_eq!(
+                artifact.encoding(),
+                artifact.content().encoding(),
+                "key {}",
+                key
+            );
         }
     }
 
@@ -706,7 +757,9 @@ mod tests {
     fn text_and_binary_rendering() {
         let store = temp_store();
         store.put("t", "text/csv", b"a,b\n1,2\n", None).unwrap();
-        store.put("b", "application/octet-stream", &[0xff, 0xfe, 0x00], None).unwrap();
+        store
+            .put("b", "application/octet-stream", &[0xff, 0xfe, 0x00], None)
+            .unwrap();
 
         let t = store.get("t").unwrap().unwrap();
         assert!(matches!(t.content(), ArtifactContent::Text(ref s) if s == "a,b\n1,2\n"));
@@ -725,12 +778,17 @@ mod tests {
     #[test]
     fn upload_grant_is_single_use() {
         let grants = temp_grants();
-        let (token, grant) = grants.issue("form.pdf", Some("application/pdf"), 60).unwrap();
+        let (token, grant) = grants
+            .issue("form.pdf", Some("application/pdf"), 60)
+            .unwrap();
         assert_eq!(token.len(), 64);
         assert_eq!(grant.key, "form.pdf");
 
         let reservation = grants.reserve(&token).unwrap();
-        assert_eq!(reservation.grant().mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(
+            reservation.grant().mime_type.as_deref(),
+            Some("application/pdf")
+        );
         reservation.complete();
         assert!(grants.reserve(&token).is_none());
         assert!(grants.reserve("not-a-token").is_none());
@@ -779,8 +837,16 @@ mod tests {
 
         // A grant already past its expiry can't be reserved, and a sweep
         // removes it while leaving live grants alone.
-        let stale = UploadGrant { key: "k".into(), mime_type: None, expires_at: 1, reserved: false };
-        grants.tree.insert("stale", serde_json::to_vec(&stale).unwrap()).unwrap();
+        let stale = UploadGrant {
+            key: "k".into(),
+            mime_type: None,
+            expires_at: 1,
+            reserved: false,
+        };
+        grants
+            .tree
+            .insert("stale", serde_json::to_vec(&stale).unwrap())
+            .unwrap();
         assert!(grants.reserve("stale").is_none());
         let (live, _) = grants.issue("k", None, 60).unwrap();
         grants.purge_expired(chrono::Utc::now().timestamp());
@@ -795,9 +861,18 @@ mod tests {
     #[test]
     fn upload_sweep_is_time_gated() {
         let grants = temp_grants();
-        let stale = UploadGrant { key: "k".into(), mime_type: None, expires_at: 1, reserved: false };
-        let insert_stale =
-            || grants.tree.insert("stale", serde_json::to_vec(&stale).unwrap()).unwrap();
+        let stale = UploadGrant {
+            key: "k".into(),
+            mime_type: None,
+            expires_at: 1,
+            reserved: false,
+        };
+        let insert_stale = || {
+            grants
+                .tree
+                .insert("stale", serde_json::to_vec(&stale).unwrap())
+                .unwrap()
+        };
 
         // Far enough past any real sweep that this one is due; an immediate
         // second call is inside the interval and must not scan again.

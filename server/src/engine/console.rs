@@ -17,7 +17,8 @@ use deno_core::{JsRuntime, OpState, op2, v8};
 /// Page size for buffered payload writes. When the in-memory buffer reaches
 /// this size, a full page is persisted. Remaining bytes are flushed on
 /// execution end.
-const PAGE_SIZE: usize = 4096;
+pub const BLOB_PAGE_SIZE: usize = 256 * 1024;
+const INLINE_PAGE_SIZE: usize = 4096;
 
 #[derive(Clone, Default)]
 pub struct ProcessExitState {
@@ -48,6 +49,7 @@ impl ProcessExitState {
 /// Buffers console output bytes and persists them in fixed-size pages.
 pub struct ConsoleLogState {
     tree: mcp_metadata_store::RuntimeTree,
+    page_size: usize,
     error: RefCell<Option<String>>,
     seq: AtomicU64,
     buffer: RefCell<Vec<u8>>,
@@ -65,18 +67,27 @@ unsafe impl Sync for ConsoleLogState {}
 impl ConsoleLogState {
     pub fn new(tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
         let tree = tree.into();
+        let page_size = if tree.has_objects() {
+            BLOB_PAGE_SIZE
+        } else {
+            INLINE_PAGE_SIZE
+        };
         Self {
             tree,
+            page_size,
             error: RefCell::new(None),
             seq: AtomicU64::new(0),
-            buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
+            buffer: RefCell::new(Vec::with_capacity(page_size)),
             stderr_tree: None,
             stderr_seq: AtomicU64::new(0),
-            stderr_buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
+            stderr_buffer: RefCell::new(Vec::with_capacity(page_size)),
         }
     }
 
-    pub fn new_with_stderr(tree: impl Into<mcp_metadata_store::RuntimeTree>, stderr_tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
+    pub fn new_with_stderr(
+        tree: impl Into<mcp_metadata_store::RuntimeTree>,
+        stderr_tree: impl Into<mcp_metadata_store::RuntimeTree>,
+    ) -> Self {
         let mut state = Self::new(tree);
         state.stderr_tree = Some(stderr_tree.into());
         state
@@ -88,25 +99,50 @@ impl ConsoleLogState {
         buffer: &RefCell<Vec<u8>>,
         data: &[u8],
         error: &RefCell<Option<String>>,
+        page_size: usize,
     ) {
-        if error.borrow().is_some() { return; }
+        if error.borrow().is_some() {
+            return;
+        }
         let mut buffer = buffer.borrow_mut();
-        buffer.extend_from_slice(data);
-        while buffer.len() >= PAGE_SIZE {
-            let page: Vec<u8> = buffer.drain(..PAGE_SIZE).collect();
-            let seq = seq.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = tree.insert(seq.to_be_bytes(), page) { *error.borrow_mut() = Some(e); }
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let count = (page_size - buffer.len()).min(remaining.len());
+            buffer.extend_from_slice(&remaining[..count]);
+            remaining = &remaining[count..];
+            if buffer.len() == page_size {
+                let page = std::mem::replace(&mut *buffer, Vec::with_capacity(page_size));
+                let index = seq.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = tree.insert(index.to_be_bytes(), page) {
+                    *error.borrow_mut() = Some(e);
+                    break;
+                }
+            }
         }
     }
 
     /// Append bytes to the stdout buffer, persisting full pages.
     pub fn write(&self, data: &[u8]) {
-        Self::write_buffer(&self.tree, &self.seq, &self.buffer, data, &self.error);
+        Self::write_buffer(
+            &self.tree,
+            &self.seq,
+            &self.buffer,
+            data,
+            &self.error,
+            self.page_size,
+        );
     }
 
     pub fn write_stderr(&self, data: &[u8]) {
         if let Some(tree) = &self.stderr_tree {
-            Self::write_buffer(tree, &self.stderr_seq, &self.stderr_buffer, data, &self.error);
+            Self::write_buffer(
+                tree,
+                &self.stderr_seq,
+                &self.stderr_buffer,
+                data,
+                &self.error,
+                self.page_size,
+            );
         } else {
             self.write(data);
         }
@@ -116,13 +152,22 @@ impl ConsoleLogState {
         self.stderr_tree.is_some()
     }
 
-    fn flush_buffer(tree: &mcp_metadata_store::RuntimeTree, seq: &AtomicU64, buffer: &RefCell<Vec<u8>>, error: &RefCell<Option<String>>) {
-        if error.borrow().is_some() { return; }
+    fn flush_buffer(
+        tree: &mcp_metadata_store::RuntimeTree,
+        seq: &AtomicU64,
+        buffer: &RefCell<Vec<u8>>,
+        error: &RefCell<Option<String>>,
+    ) {
+        if error.borrow().is_some() {
+            return;
+        }
         let mut buffer = buffer.borrow_mut();
         if !buffer.is_empty() {
             let page: Vec<u8> = buffer.drain(..).collect();
             let seq = seq.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = tree.insert(seq.to_be_bytes(), page) { *error.borrow_mut() = Some(e); }
+            if let Err(e) = tree.insert(seq.to_be_bytes(), page) {
+                *error.borrow_mut() = Some(e);
+            }
         }
     }
 
@@ -132,7 +177,10 @@ impl ConsoleLogState {
         if let Some(tree) = &self.stderr_tree {
             Self::flush_buffer(tree, &self.stderr_seq, &self.stderr_buffer, &self.error);
         }
-        match self.error.borrow().as_ref() { Some(e) => Err(format!("console persistence failed: {e}")), None => Ok(()) }
+        match self.error.borrow().as_ref() {
+            Some(e) => Err(format!("console persistence failed: {e}")),
+            None => Ok(()),
+        }
     }
 }
 
@@ -180,11 +228,7 @@ fn op_process_set_exit_code(state: &mut OpState, #[smi] code: i32) {
 }
 
 #[op2(fast)]
-fn op_process_exit(
-    scope: &mut v8::PinScope<'_, '_>,
-    state: &mut OpState,
-    #[smi] code: i32,
-) {
+fn op_process_exit(scope: &mut v8::PinScope<'_, '_>, state: &mut OpState, #[smi] code: i32) {
     if let Some(exit_state) = state.try_borrow::<ProcessExitState>() {
         exit_state.request_exit(code);
         scope.terminate_execution();
@@ -195,7 +239,12 @@ fn op_process_exit(
 
 deno_core::extension!(
     console_ext,
-    ops = [op_console_write, op_process_exec_path, op_process_set_exit_code, op_process_exit],
+    ops = [
+        op_console_write,
+        op_process_exec_path,
+        op_process_set_exit_code,
+        op_process_exit
+    ],
 );
 
 /// Create the console extension for use in `RuntimeOptions::extensions`.
@@ -381,7 +430,9 @@ pub fn inject_console(runtime: &mut JsRuntime) -> Result<(), String> {
 }
 
 /// Overload for JsRuntimeForSnapshot (stateful mode).
-pub fn inject_console_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+pub fn inject_console_snapshot(
+    runtime: &mut deno_core::JsRuntimeForSnapshot,
+) -> Result<(), String> {
     runtime
         .execute_script("<console-setup>", CONSOLE_JS_WRAPPER.to_string())
         .map_err(|e| format!("Failed to install console wrapper: {}", e))?;
@@ -817,7 +868,9 @@ pub fn inject_web_apis(runtime: &mut JsRuntime) -> Result<(), String> {
     Ok(())
 }
 
-pub fn inject_web_apis_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+pub fn inject_web_apis_snapshot(
+    runtime: &mut deno_core::JsRuntimeForSnapshot,
+) -> Result<(), String> {
     runtime
         .execute_script("<web-apis-setup>", WEB_APIS_JS.to_string())
         .map_err(|e| format!("Failed to install Blob/File/FormData: {}", e))?;
