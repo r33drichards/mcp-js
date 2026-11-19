@@ -659,6 +659,7 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
                                 .flat_map(|entry| entry.unwrap().1.to_vec()))
                             .collect();
                         if String::from_utf8_lossy(&output).contains("worker-entered") {
+                            eprintln!("PROBE test: watcher saw worker-entered t={}ms", server::engine::console::probe_ms());
                             stage.store(1, Ordering::SeqCst);
                             break;
                         }
@@ -690,7 +691,7 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
                     }
                     tree_counts.push(format!("{}:{}", String::from_utf8_lossy(&name), count));
                 }
-                eprintln!("PROBE stale hits: {:?} tree_counts: {:?}", stale_hits, tree_counts);
+                eprintln!("PROBE stale hits: {:?} tree_counts: {:?} t={}ms", stale_hits, tree_counts, server::engine::console::probe_ms());
                 assert!(stale_hits.is_empty(),
                     "old V8 worker wrote to reopened generation: {stale_hits:?}");
                 stage.store(3, Ordering::SeqCst);
@@ -711,6 +712,7 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
         }
         let code = "console.log('worker-entered' + 'x'.repeat(5000));             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);             console.log('stale-after-crash' + 'y'.repeat(5000));";
         let _ = client.run_js(code).await;
+        eprintln!("PROBE test: client run_js returned t={}ms", server::engine::console::probe_ms());
         finished.store(1, Ordering::SeqCst);
         Ok(())
     });
@@ -721,14 +723,19 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
     assert_eq!(stage.load(Ordering::SeqCst), 1, "old worker never entered JS");
     assert_eq!(request_done.load(Ordering::SeqCst), 0,
         "JS completed before the controller crash; no in-flight worker was tested");
+    eprintln!("PROBE test: crashing t={}ms", server::engine::console::probe_ms());
     sim.crash("n0");
+    eprintln!("PROBE test: crash returned t={}ms", server::engine::console::probe_ms());
     sim.bounce("n0");
+    eprintln!("PROBE test: bounced t={}ms", server::engine::console::probe_ms());
     for _ in 0..50_000 {
         sim.step().unwrap();
         if generation.load(Ordering::SeqCst) == 2 { break; }
     }
     assert_eq!(generation.load(Ordering::SeqCst), 2, "fresh DB did not reopen");
+    eprintln!("PROBE test: reopened t={}ms", server::engine::console::probe_ms());
     std::thread::sleep(Duration::from_secs(4));
+    eprintln!("PROBE test: awake, stage=2 t={}ms", server::engine::console::probe_ms());
     stage.store(2, Ordering::SeqCst);
     for _ in 0..50_000 {
         sim.step().unwrap();
