@@ -58,7 +58,13 @@ async fn exchange<Req: Serialize, Resp: DeserializeOwned>(
     path: &str,
     req: &Req,
 ) -> Option<Resp> {
-    tokio::time::timeout(Duration::from_millis(150), async {
+    exchange_with_timeout(peer, path, req, Duration::from_millis(150)).await
+}
+
+async fn exchange_with_timeout<Req: Serialize, Resp: DeserializeOwned>(
+    peer: &str, path: &str, req: &Req, deadline: Duration,
+) -> Option<Resp> {
+    tokio::time::timeout(deadline, async {
         let (name, port) = peer.rsplit_once(':')?;
         let port: u16 = port.parse().ok()?;
         let mut stream = TcpStream::connect((name, port)).await.ok()?;
@@ -444,11 +450,166 @@ pub fn engine_with_cluster_host(
     (engine, store, pump)
 }
 
+#[cfg(feature = "real-sled")]
+const HOST_PORT: u16 = 4301;
+
+#[cfg(feature = "real-sled")]
+#[derive(Serialize, Deserialize)]
+enum HostRequest {
+    Status,
+    RunJs { code: String },
+    ReadFile { head: String, path: String },
+}
+
+#[cfg(feature = "real-sled")]
+#[derive(Serialize, Deserialize)]
+enum HostResponse {
+    Status(Role, u64),
+    RunJs(JsResult),
+    ReadFile(Option<Vec<u8>>),
+}
+
+/// All handles, including the sled-backed label and blob stores, stay on the
+/// owning simulated host. Observer clients exchange only serialized messages.
+#[cfg(feature = "real-sled")]
+pub struct ScenarioHost {
+    node: Arc<ClusterNode>,
+    engine: Arc<Engine>,
+    store: Arc<FsStore>,
+    _pump: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "real-sled")]
+impl ScenarioHost {
+    pub fn new(node: Arc<ClusterNode>, db: sled::Db) -> Self {
+        let (engine, store, pump) = engine_with_cluster_host(node.clone(), db);
+        Self {
+            node,
+            engine,
+            store,
+            _pump: pump,
+        }
+    }
+
+    /// Serve one request and close the connection. A host loop owns this value.
+    pub async fn serve_request(&self, mut stream: TcpStream) -> Result<(), String> {
+        let mut raw = Vec::new();
+        let (offset, length) = loop {
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("request ended before body".into());
+            }
+            raw.extend_from_slice(&chunk[..n]);
+            if raw.len() > 1024 * 1024 {
+                return Err("request too large".into());
+            }
+            if let Some(end) = raw.windows(4).position(|x| x == b"\r\n\r\n") {
+                let header = std::str::from_utf8(&raw[..end]).map_err(|e| e.to_string())?;
+                if !header.starts_with("POST /scenario HTTP/1.1") {
+                    return Err("unexpected request path".into());
+                }
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("Content-Length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .ok_or("missing content length")?;
+                let offset = end + 4;
+                if raw.len() >= offset + length {
+                    break (offset, length);
+                }
+            }
+        };
+        let request: HostRequest =
+            serde_json::from_slice(&raw[offset..offset + length]).map_err(|e| e.to_string())?;
+        let response = match request {
+            HostRequest::Status => {
+                let status = self.node.status().await;
+                HostResponse::Status(status.role, status.term)
+            }
+            HostRequest::RunJs { code } => HostResponse::RunJs(run_js(&self.engine, &code).await),
+            HostRequest::ReadFile { head, path } => {
+                HostResponse::ReadFile(read_file_at(&self.store, &head, &path).await)
+            }
+        };
+        let body = serde_json::to_vec(&response).map_err(|e| e.to_string())?;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stream.write_all(&body).await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "real-sled")]
+pub struct ScenarioHostClient {
+    peer: String,
+}
+
+#[cfg(feature = "real-sled")]
+impl ScenarioHostClient {
+    pub fn new(name: &str) -> Self {
+        Self {
+            peer: format!("{name}:{HOST_PORT}"),
+        }
+    }
+
+    async fn call(&self, request: HostRequest, deadline: Duration) -> Result<HostResponse, String> {
+        exchange_with_timeout(&self.peer, "/scenario", &request, deadline)
+            .await
+            .ok_or_else(|| format!("host {} unavailable", self.peer))
+    }
+
+    pub async fn status(&self) -> Result<(Role, u64), String> {
+        match self
+            .call(HostRequest::Status, Duration::from_secs(2))
+            .await?
+        {
+            HostResponse::Status(role, term) => Ok((role, term)),
+            _ => Err("unexpected host status response".into()),
+        }
+    }
+
+    pub async fn run_js(&self, code: &str) -> Result<JsResult, String> {
+        match self
+            .call(
+                HostRequest::RunJs { code: code.into() },
+                Duration::from_secs(35),
+            )
+            .await?
+        {
+            HostResponse::RunJs(result) => Ok(result),
+            _ => Err("unexpected host JS response".into()),
+        }
+    }
+
+    pub async fn read_file(&self, head: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+        let request = HostRequest::ReadFile {
+            head: head.into(),
+            path: path.into(),
+        };
+        match self.call(request, Duration::from_secs(2)).await? {
+            HostResponse::ReadFile(bytes) => Ok(bytes),
+            _ => Err("unexpected host file response".into()),
+        }
+    }
+}
+
 // The generated program catches only pure-JS exceptions. Native filesystem and
 // engine failures are outside that catch and must not be text-classified.
 const JS_EXCEPTION_MARKER: &str = "__mcp_js_expected_exception__";
 
-enum JsResult {
+#[derive(Debug, Serialize, Deserialize)]
+pub enum JsResult {
     Head(String),
     JsException(String),
     Failed(String),
