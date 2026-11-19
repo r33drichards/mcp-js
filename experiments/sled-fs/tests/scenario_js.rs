@@ -337,7 +337,7 @@ fn owner_two_crashes_keep_distinct_acknowledged_js_snapshots() {
         let opened = opened.clone();
         async move {
             let db = sled::Config::new().path("/crash-js").flush_every_ms(None).open().unwrap();
-            opened.fetch_add(1, Ordering::SeqCst);
+            let incarnation = opened.fetch_add(1, Ordering::SeqCst) + 1;
             let node = ClusterNode::new(ClusterConfig {
                 node_id: "n0".into(),
                 election_timeout_min: Duration::from_millis(50),
@@ -345,7 +345,7 @@ fn owner_two_crashes_keep_distinct_acknowledged_js_snapshots() {
                 ..ClusterConfig::default()
             }, db.clone());
             node.start_background_tasks().unwrap();
-            let host = ScenarioHost::new(node, db);
+            let host = ScenarioHost::new_with_generation(node, db, incarnation as u64);
             let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
             loop {
                 let (stream, _) = listener.accept().await?;
@@ -361,6 +361,7 @@ fn owner_two_crashes_keep_distinct_acknowledged_js_snapshots() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(matches!(client.status().await, Ok((Role::Leader, _))));
+        assert_eq!(client.generation().await.unwrap(), 1);
         let old_code = Program(vec![Step::Write {
             path: "/data/iteration".into(), bytes: "before-crash".into(),
         }]).render_js(0);
@@ -377,6 +378,7 @@ fn owner_two_crashes_keep_distinct_acknowledged_js_snapshots() {
             if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        assert_eq!(client.generation().await.unwrap(), 2);
         assert_eq!(client.resolve("main").await.unwrap(), Some(old_ca));
         assert_eq!(client.read_file(&old_head, "/data/iteration").await.unwrap(), Some(b"before-crash".to_vec()));
         let new_code = Program(vec![Step::Write {
@@ -395,6 +397,7 @@ fn owner_two_crashes_keep_distinct_acknowledged_js_snapshots() {
             if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        assert_eq!(client.generation().await.unwrap(), 3);
         assert_eq!(client.resolve("main").await.unwrap(), Some(new_ca));
         assert_eq!(client.read_file(&new_head, "/data/iteration").await.unwrap(), Some(b"after-recovery".to_vec()));
         signal.store(5, Ordering::SeqCst);
