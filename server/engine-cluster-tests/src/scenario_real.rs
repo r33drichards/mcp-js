@@ -114,8 +114,8 @@ pub(super) fn run_scenario(sc: &Scenario) -> ScenarioResult {
         let next = { control.borrow_mut().pending.pop_front() };
         if let Some((seq, action)) = next {
             match action {
-                HostAction::Crash(name) => sim.crash(&name),
-                HostAction::Bounce(name) => sim.bounce(&name),
+                HostAction::Crash(name) => sim.crash(name.as_str()),
+                HostAction::Bounce(name) => sim.bounce(name.as_str()),
             }
             control.borrow_mut().done = seq;
         }
