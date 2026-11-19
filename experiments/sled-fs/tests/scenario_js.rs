@@ -311,3 +311,97 @@ fn observer_runs_js_and_publishes_label_on_host() {
     });
     sim.run().unwrap();
 }
+
+#[test]
+fn owner_two_crashes_keep_distinct_acknowledged_js_snapshots() {
+    use engine_cluster_tests::scenario::{JsResult, ScenarioHost, ScenarioHostClient};
+    use server::cluster::{ClusterConfig, ClusterNode, Role};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::time::Duration;
+    use turmoil::net::TcpListener;
+
+    let stage = Arc::new(AtomicUsize::new(0));
+    let generation = Arc::new(AtomicUsize::new(0));
+    let mut sim = turmoil::Builder::new().simulation_duration(Duration::from_secs(80)).build();
+    let opened = generation.clone();
+    sim.host("n0", move || {
+        let opened = opened.clone();
+        async move {
+            let db = sled::Config::new().path("/crash-js").flush_every_ms(None).open().unwrap();
+            opened.fetch_add(1, Ordering::SeqCst);
+            let node = ClusterNode::new(ClusterConfig {
+                node_id: "n0".into(),
+                election_timeout_min: Duration::from_millis(50),
+                election_timeout_max: Duration::from_millis(50),
+                ..ClusterConfig::default()
+            }, db.clone());
+            node.start_background_tasks().unwrap();
+            let host = ScenarioHost::new(node, db);
+            let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
+            loop {
+                let (stream, _) = listener.accept().await?;
+                host.serve_request(stream).await.unwrap();
+            }
+        }
+    });
+    let signal = stage.clone();
+    sim.client("observer", async move {
+        let client = ScenarioHostClient::new("n0");
+        for _ in 0..100 {
+            if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(matches!(client.status().await, Ok((Role::Leader, _))));
+        let old_code = Program(vec![Step::Write {
+            path: "/data/iteration".into(), bytes: "before-crash".into(),
+        }]).render_js(0);
+        let old_head = match client.run_js(&old_code).await.unwrap() {
+            JsResult::Head(head) => head,
+            other => panic!("initial JS: {other:?}"),
+        };
+        let old_ca = server::engine::parse_ca_hex(&old_head).unwrap();
+        assert!(client.cas("main", None, old_ca).await.unwrap());
+        assert_eq!(client.read_file(&old_head, "/data/iteration").await.unwrap(), Some(b"before-crash".to_vec()));
+        signal.store(1, Ordering::SeqCst);
+        while signal.load(Ordering::SeqCst) < 2 { tokio::time::sleep(Duration::from_millis(20)).await; }
+        for _ in 0..100 {
+            if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(client.resolve("main").await.unwrap(), Some(old_ca));
+        assert_eq!(client.read_file(&old_head, "/data/iteration").await.unwrap(), Some(b"before-crash".to_vec()));
+        let new_code = Program(vec![Step::Write {
+            path: "/data/iteration".into(), bytes: "after-recovery".into(),
+        }]).render_js(1);
+        let new_head = match client.run_js(&new_code).await.unwrap() {
+            JsResult::Head(head) => head,
+            other => panic!("recovery JS: {other:?}"),
+        };
+        let new_ca = server::engine::parse_ca_hex(&new_head).unwrap();
+        assert_ne!(new_ca, old_ca, "post-recovery head must advance");
+        assert!(client.cas("main", Some(old_ca), new_ca).await.unwrap());
+        signal.store(3, Ordering::SeqCst);
+        while signal.load(Ordering::SeqCst) < 4 { tokio::time::sleep(Duration::from_millis(20)).await; }
+        for _ in 0..100 {
+            if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(client.resolve("main").await.unwrap(), Some(new_ca));
+        assert_eq!(client.read_file(&new_head, "/data/iteration").await.unwrap(), Some(b"after-recovery".to_vec()));
+        signal.store(5, Ordering::SeqCst);
+        Ok(())
+    });
+    for target in [1, 3, 5] {
+        for _ in 0..50_000 {
+            sim.step().unwrap();
+            if stage.load(Ordering::SeqCst) == target { break; }
+        }
+        assert_eq!(stage.load(Ordering::SeqCst), target, "phase {target} did not finish");
+        if target < 5 {
+            sim.crash("n0");
+            stage.store(target + 1, Ordering::SeqCst);
+            sim.bounce("n0");
+        }
+    }
+    assert_eq!(generation.load(Ordering::SeqCst), 3, "host did not reopen twice");
+}
