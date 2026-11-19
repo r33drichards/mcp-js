@@ -725,7 +725,15 @@ const HOSTS: [&str; 4] = ["n0", "n1", "n2", "observer"];
 fn blank(status: Err2) -> ScenarioResult { ScenarioResult { status, events: Vec::new(), acked: Vec::new(), unknown: Vec::new(), failed: Vec::new(), final_heads: BTreeMap::new(), model: BTreeMap::new(), artifact_dir: None } }
 type Err2 = Result<String, String>;
 
-/// Execute the scenario against the real cluster under turmoil.
+#[cfg(feature = "real-sled")]
+#[path = "scenario_real.rs"]
+mod real;
+
+#[cfg(feature = "real-sled")]
+fn run_scenario(scenario: &Scenario) -> ScenarioResult { real::run_scenario(scenario) }
+
+/// Ordinary sled control: the original scenario runner remains unchanged.
+#[cfg(not(feature = "real-sled"))]
 fn run_scenario(scenario: &Scenario) -> ScenarioResult {
     RUN_ID.with(|c| {
         *c.borrow_mut() = format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
