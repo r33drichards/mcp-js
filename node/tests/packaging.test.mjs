@@ -65,13 +65,25 @@ test('native gate rejects absent, text, wrong architecture and executable files'
 test('portability gate rejects build-host paths and unresolved libraries', () => {
   const dynamic = '(NEEDED) Shared library: [libc.so.6]';
   const ldd = 'libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6';
-  checkDependencies(dynamic, ldd, Buffer.from('portable binary'));
+  checkDependencies(dynamic, ldd);
   for (const bad of ['(RUNPATH) [/nix/store/lib]', '(RPATH) [/tmp/lib]', '(NEEDED) Shared library: [/tmp/lib.so]']) {
     assert.throws(() => checkDependencies(bad, ldd));
   }
   for (const bad of ['libfoo => not found', 'libc.so.6 => /nix/store/abc/libc.so.6', 'libc.so.6 => /home/runner/work/libc.so.6', 'statically linked', '']) {
     assert.throws(() => checkDependencies(dynamic, bad));
   }
+});
+
+test('musl gate rejects glibc and requires a dynamic musl libc dependency', () => {
+  const musl = '(NEEDED) Shared library: [libc.so]';
+  const muslReport = 'libc.so => /lib/ld-musl-x86_64.so.1 (0x1000)';
+  const glibc = '(NEEDED) Shared library: [libc.so.6]';
+  const glibcReport = 'libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6';
+  checkDependencies(musl, muslReport, 'musl');
+  assert.throws(() => checkDependencies(glibc, glibcReport, 'musl'));
+  assert.throws(() => checkDependencies(musl, glibcReport, 'musl'));
+  assert.throws(() => checkDependencies(musl, muslReport, 'glibc'));
+  assert.throws(() => checkDependencies(musl, muslReport, 'unknown'));
 });
 
 test('tarball includes native library, ESM, types and license only', () => {
@@ -108,7 +120,7 @@ test('release artifact staging follows the Nix result symlink', () => {
   }
 });
 
-test('GitHub release stages both tested SDKs without changing their bytes', () => {
+test('GitHub release stages all tested SDK variants without changing their bytes', () => {
   const workflow = readFileSync(new URL('../../.github/workflows/npm-publish.yml', import.meta.url), 'utf8');
   const match = workflow.match(/- name: Stage tar.gz release assets\n[\s\S]*?        run: \|\n((?:          .*\n)+)/);
   assert.ok(match, 'Missing GitHub release asset staging script');
@@ -123,6 +135,8 @@ test('GitHub release stages both tested SDKs without changing their bytes', () =
     const artifacts = join(directory, 'release-artifacts');
     mkdirSync(artifacts);
     const version = '1.2.3-rc.1';
+    const musl = `wholelottahoopla-mcp-js-node-${version}-linux-x64-musl`;
+    writeFileSync(join(artifacts, `${musl}.tgz`), 'tested musl payload');
     for (const sdk of ['client', 'node']) {
       writeFileSync(join(artifacts, `wholelottahoopla-mcp-js-${sdk}-${version}.tgz`), `tested ${sdk} payload`);
     }
@@ -137,6 +151,7 @@ test('GitHub release stages both tested SDKs without changing their bytes', () =
         `tested ${sdk} payload`,
       );
     }
+    assert.equal(readFileSync(join(artifacts, `${musl}.tar.gz`), 'utf8'), 'tested musl payload');
     assert.equal(readFileSync(output, 'utf8'), 'prerelease=true\nmake_latest=false\n');
   } finally {
     rmSync(directory, { recursive: true, force: true });

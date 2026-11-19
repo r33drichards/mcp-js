@@ -187,8 +187,14 @@
           generate-nix-options > nix/options.nix
         '';
       in {
-        devShells.default = import ./shell.nix { inherit pkgs rustToolchain rustyV8Archive; };
-        devShells.fuzz = import ./shell.nix { inherit pkgs rustyV8Archive; rustToolchain = rustNightly; };
+        devShells = {
+          default = import ./shell.nix { inherit pkgs rustToolchain rustyV8Archive; };
+          fuzz = import ./shell.nix { inherit pkgs rustyV8Archive; rustToolchain = rustNightly; };
+        } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          musl-sdk = import ./nix/musl-sdk-shell.nix {
+            inherit pkgs rustToolchain rustyV8Version;
+          };
+        };
 
         # SQLite compiled to WASM via Emscripten — used by the sqlite-wasm example.
         packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };

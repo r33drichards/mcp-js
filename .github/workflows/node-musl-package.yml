@@ -1,0 +1,80 @@
+name: Node musl SDK package
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "node/**"
+      - "server/**"
+      - "mcp-v8-uniffi-python/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "LICENSE"
+      - "flake.nix"
+      - "flake.lock"
+      - "shell.nix"
+      - "nix/musl-sdk-shell.nix"
+      - ".github/workflows/node-musl-package.yml"
+      - ".github/workflows/npm-publish.yml"
+  workflow_call:
+    inputs:
+      version:
+        description: Package version for untagged validation
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package-consumer-musl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+      - name: Stage package version
+        env:
+          REF: ${{ github.ref }}
+          TAG: ${{ github.ref_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" == refs/tags/v* ]]; then
+            version="$(node node/scripts/release-tag.mjs "$TAG" | jq -er '.version')"
+            git fetch --no-tags origin main
+            tag_commit="$(git rev-list -n 1 "$TAG")"
+            test "$tag_commit" = "$GITHUB_SHA"
+            git merge-base --is-ancestor "$tag_commit" origin/main
+          else
+            version="${REQUESTED_VERSION:-$(node -p 'require("./node/package.json").version')}"
+          fi
+          node node/scripts/release-tag.mjs --stage node "$version"
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/node-musl
+            target/node-bindgen
+          key: node-sdk-musl-v1-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'nix/musl-sdk-shell.nix', 'node/scripts/build-bindgen.sh', 'node/patches/**') }}
+      - name: Install and audit locked dependencies
+        run: |
+          npm ci --include=dev --prefix node
+          npm audit --omit=dev --prefix node
+          npm run test:unit --prefix node
+      - name: Build and test the exact tarball on Alpine
+        run: bash node/scripts/package-musl.sh release-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball-node-musl
+          path: release-artifacts/*-linux-x64-musl.tgz
+          if-no-files-found: error
+          retention-days: 7

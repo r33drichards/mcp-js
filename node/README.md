@@ -6,14 +6,15 @@ declarations, not an HTTP client, Python bridge, or runtime CLI wrapper.
 
 ## Supported target and release status
 
-This packaging path targets **Linux x64 with glibc 2.39 or newer only**. macOS, Windows,
-ARM64 and musl/Alpine are not supported by this package. Tagged release builds
-replace the development version in the manifest with the tag version.
+Release assets target **Linux x64**. The standard SDK requires glibc 2.39
+or newer. Releases that include a `linux-x64-musl` asset also support Alpine
+through that tarball. Both variants use the same package name and API; use
+the tarball for your host's libc. Tagged builds use the tag version.
 
 Colocated loading makes the package movable; it does **not** make the shared
-library self-contained. The engine still needs compatible glibc, libstdc++,
-and any other ELF dependencies on the consumer host. CI targets Ubuntu 24.04;
-no older glibc baseline or broader Linux compatibility is claimed. A source
+library self-contained. The engine still needs compatible libc and any
+other ELF dependencies on the consumer host. The glibc build targets
+Ubuntu 24.04. The musl release is tested in the Bun Alpine image. A source
 build using Nix can carry Nix-store RPATHs and dependencies. `prepack` rejects
 all RPATH/RUNPATH entries, path-based DT_NEEDED entries, Nix-store resolutions,
 and unresolved dependencies. Such a build is not release-ready. Rebuild for
@@ -30,11 +31,29 @@ listed on the release, including any prerelease suffix:
 npm install '@wholelottahoopla/mcp-js-node@https://github.com/r33drichards/mcp-js/releases/download/vVERSION/wholelottahoopla-mcp-js-node-VERSION.tar.gz'
 ```
 
-The package embeds the engine in-process through UniFFI. Use a compatible
-Linux x64 glibc host. For remote execution, use the
+For Alpine on x64, select the musl asset explicitly:
+
+```sh
+bun add '@wholelottahoopla/mcp-js-node@https://github.com/r33drichards/mcp-js/releases/download/vVERSION/wholelottahoopla-mcp-js-node-VERSION-linux-x64-musl.tar.gz'
+```
+
+The package embeds the engine in-process through UniFFI. For remote execution, use the
 [HTTP client](../clients/typescript/README.md) together with a server.
 
 ## Build and validate
+
+To build the musl asset on a Linux x64 host with Nix, Node.js, and Docker:
+
+```sh
+npm ci --include=dev --prefix node
+bash node/scripts/package-musl.sh release-artifacts
+```
+
+This builds against the pinned upstream musl V8 archive, then packs and
+installs the SDK inside Alpine. Both Node.js and Bun must execute JavaScript
+and call a host tool successfully before the script copies out the tarball.
+
+### glibc
 
 From the repository root:
 
