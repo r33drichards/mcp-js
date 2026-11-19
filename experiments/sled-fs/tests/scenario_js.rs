@@ -26,7 +26,7 @@ fn real_sled_reopens_after_crash_and_acknowledges_new_js_write() {
         },
         faults: vec![Fault::Crash {
             at_ms: 900,
-            node: CrashTarget::Node("n1".into()),
+            node: CrashTarget::CurrentLeader,
         }],
         recovery: Recovery {
             stop_workload: true,
@@ -49,6 +49,14 @@ fn real_sled_reopens_after_crash_and_acknowledges_new_js_write() {
         "old and fresh JS writes need acknowledgments: {:?}",
         result.events
     );
+    assert_ne!(result.acked[0], result.acked[1]);
+    let elected = result.events.iter().find_map(|e| match e {
+        engine_cluster_tests::scenario::ScenarioEvent::Election { leader, .. } => Some(leader),
+        _ => None,
+    }).unwrap();
+    assert!(result.events.iter().any(|e| matches!(e,
+        engine_cluster_tests::scenario::ScenarioEvent::Crash { node, .. } if node == elected
+    )), "the JS owner must actually crash: {:?}", result.events);
 }
 
 #[test]
