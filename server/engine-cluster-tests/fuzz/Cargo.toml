@@ -1,0 +1,28 @@
+[package]
+name = "engine-cluster-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1"
+server = { path = "../.." }
+turmoil = "=0.7.2"
+tokio = { version = "1", features = ["full"] }
+sled = "0.34"
+serde = "1"
+serde_json = "1"
+deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "4a09194d0fb8dbe062fe066d82d7ad6bcaa4f39a" }
+
+
+
+[[bin]]
+name = "fuzz_js_cluster"
+path = "fuzz_targets/fuzz_js_cluster.rs"
+test = false
+doc = false
+bench = false

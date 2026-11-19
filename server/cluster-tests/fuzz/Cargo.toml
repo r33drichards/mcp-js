@@ -1,0 +1,27 @@
+[package]
+name = "cluster-network-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+scheduler-raft-audit = { path = ".." }
+turmoil = "=0.7.2"
+tokio = { version = "1", features = ["full"] }
+sled = "0.34"
+serde = "1"
+serde_json = "1"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "peer_network"
+path = "fuzz_targets/peer_network.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,31 @@
+[package]
+name = "engine-cluster-tests"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["fuzz"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+icu_calendar = "=2.1.0"
+icu_collections = "=2.1.1"
+icu_locale = "=2.1.0"
+icu_locale_core = "=2.0.1"
+icu_normalizer = "=2.1.0"
+icu_properties = "=2.1.0"
+icu_provider = "=2.0.0"
+writeable = "=0.6.3"
+yoke = "=0.8.2"
+zerofrom = "=0.1.7"
+zerotrie = "=0.2.3"
+zerovec = "=0.11.4"
+tinystr = "=0.8.1"
+sled = "0.34"
+deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "4a09194d0fb8dbe062fe066d82d7ad6bcaa4f39a" }
+tokio = { version = "1", features = ["full"] }
+server = { path = ".." }
+
+[dev-dependencies]
+turmoil = "0.7.2"
