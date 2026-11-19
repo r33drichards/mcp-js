@@ -416,19 +416,22 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
 
     // Read the old acknowledged content after a real owner bounce, before any
     // new JS executes. A recovered head alone is not recovered snapshot bytes.
-    let mut recovered_bytes = true;
-    if crashed.contains(&op_node) && !acked.is_empty() {
-        let old_head = acked.last().unwrap().clone();
-        for (path, expected) in &model {
-            if client
-                .read_file(&old_head, path)
-                .await
-                .ok()
-                .flatten()
-                .as_deref()
-                != Some(expected.as_slice())
-            {
-                recovered_bytes = false;
+    let owner_crashed = crashed.contains(&op_node);
+    let mut recovered_bytes = !owner_crashed
+        || (!acked.is_empty() && model.values().any(|bytes| !bytes.is_empty()));
+    if owner_crashed {
+        if let Some(old_head) = acked.last() {
+            for (path, expected) in &model {
+                if client
+                    .read_file(old_head, path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    != Some(expected.as_slice())
+                {
+                    recovered_bytes = false;
+                }
             }
         }
         events.push(ScenarioEvent::Assert {
