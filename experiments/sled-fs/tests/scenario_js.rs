@@ -277,11 +277,13 @@ fn observer_runs_js_on_host_through_simulated_network() {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let client = ScenarioHostClient::new("n0");
         assert_eq!(client.status().await.unwrap().0, Role::Leader);
-        let code = Program(vec![Step::Write {
-            path: "/data/iteration".into(),
-            bytes: "rpc-owned".into(),
-        }])
-        .render_js(0);
+        let code = format!(
+            "console.log('scoped console');{}",
+            Program(vec![Step::Write {
+                path: "/data/iteration".into(),
+                bytes: "rpc-owned".into(),
+            }]).render_js(0),
+        );
         let head = match client.run_js(&code).await.unwrap() {
             JsResult::Head(head) => head,
             other => panic!("host JS returned {other:?}"),
