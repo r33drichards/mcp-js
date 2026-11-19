@@ -7,9 +7,8 @@ declarations, not an HTTP client, Python bridge, or runtime CLI wrapper.
 ## Supported target and release status
 
 This packaging path targets **Linux x64 with glibc 2.39 or newer only**. macOS, Windows,
-ARM64 and musl/Alpine are not supported by this package. No registry publication
-is performed by the build or CI. Version 0.1.0 is initial package metadata, not
-an assertion that a registry release exists.
+ARM64 and musl/Alpine are not supported by this package. Tagged release builds
+replace the development version in the manifest with the tag version.
 
 Colocated loading makes the package movable; it does **not** make the shared
 library self-contained. The engine still needs compatible glibc, libstdc++,
@@ -21,6 +20,19 @@ and unresolved dependencies. Such a build is not release-ready. Rebuild for
 the intended distribution baseline or deliberately stage compatible dependencies
 with appropriate licensing, then rerun all gates. Do not bypass the checks with
 `--ignore-scripts`; removing RPATH alone does not establish portability.
+
+## Install from GitHub Releases
+
+On a release that includes SDK assets, replace `VERSION` with the version
+listed on the release, including any prerelease suffix:
+
+```sh
+npm install '@wholelottahoopla/mcp-js-node@https://github.com/r33drichards/mcp-js/releases/download/vVERSION/wholelottahoopla-mcp-js-node-VERSION.tar.gz'
+```
+
+The package embeds the engine in-process through UniFFI. Use a compatible
+Linux x64 glibc host. For remote execution, use the
+[HTTP client](../clients/typescript/README.md) together with a server.
 
 ## Build and validate
 

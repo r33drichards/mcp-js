@@ -95,3 +95,9 @@ jobs:
           set -euo pipefail
           gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$VERSION"
           echo "Dispatched Release Rust Server on refs/tags/${VERSION}; it will attach binaries to the release."
+
+      - name: Dispatch SDK release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh workflow run npm-publish.yml --repo "$GITHUB_REPOSITORY" --ref "$VERSION"

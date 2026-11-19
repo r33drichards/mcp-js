@@ -8,6 +8,13 @@ tiny, fully-typed [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/)
 runtime — mirroring how the Rust client (`mcp-v8-client`) is generated with
 progenitor from the same spec.
 
+On a GitHub release that includes SDK assets, you can also install the HTTP
+client directly. Replace `VERSION` with the release version:
+
+```sh
+bun add '@wholelottahoopla/mcp-js-client@https://github.com/r33drichards/mcp-js/releases/download/vVERSION/wholelottahoopla-mcp-js-client-VERSION.tar.gz'
+```
+
 ## Package output
 
 `npm run build` compiles `src/index.ts` to ESM at `dist/index.js`, emits
