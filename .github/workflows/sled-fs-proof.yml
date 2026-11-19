@@ -1,0 +1,31 @@
+name: Sled filesystem proof
+on:
+  pull_request:
+    paths:
+      - 'experiments/sled-fs/**'
+      - 'server/src/cluster.rs'
+      - 'server/cluster-tests/**'
+      - '.github/workflows/sled-fs-proof.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'experiments/sled-fs/**'
+      - 'server/src/cluster.rs'
+      - 'server/cluster-tests/**'
+      - '.github/workflows/sled-fs-proof.yml'
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cap-lints warn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: '1.100.0'
+          shared-key: sled-fs-proof
+          workspaces: experiments/sled-fs -> target
+      - run: cargo test --manifest-path experiments/sled-fs/Cargo.toml --locked -j 2 --features cluster -- --test-threads=1
+      - run: cargo test --manifest-path experiments/sled-fs/Cargo.toml --locked -j 2 -- --test-threads=1
+      - run: cargo test --manifest-path experiments/sled-fs/Cargo.toml --locked -j 2 -p sled --features testing --lib --test test_log --test test_tree -- --test-threads=1
