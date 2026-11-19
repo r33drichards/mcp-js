@@ -17,6 +17,10 @@ use super::execution::ExecutionRegistry;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
+/// Probe: process-global epoch for ordering diagnostics across crates.
+pub static PROBE_T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+pub fn probe_ms() -> u128 { PROBE_T0.get_or_init(std::time::Instant::now).elapsed().as_millis() }
+
 /// Page size for WAL-style writes to sled. When the in-memory buffer reaches
 /// this size, a full page is flushed to sled. Remaining bytes are flushed on
 /// execution end.
@@ -81,9 +85,10 @@ impl HostConsoleBridge {
                 } else {
                     Err("console owner generation revoked".to_string())
                 };
-                eprintln!("PROBE pump: id={} seq={} bytes={} ok={}", page.execution_id, page.seq, page.bytes.len(), result.is_ok());
+                eprintln!("PROBE pump: id={} seq={} bytes={} ok={} t={}ms thread={:?}", page.execution_id, page.seq, page.bytes.len(), result.is_ok(), probe_ms(), std::thread::current().name());
                 let _ = page.reply.send(result);
             }
+            eprintln!("PROBE pump: EXITED t={}ms", probe_ms());
         };
         (service, pump)
     }
@@ -102,14 +107,14 @@ impl HostConsoleBridge {
 impl HostConsoleWriter {
     fn write_page(&self, seq: u64, bytes: Vec<u8>) -> Result<(), String> {
         if !self.alive.load(Ordering::SeqCst) {
-            eprintln!("PROBE write_page: REVOKED id={} seq={}", self.execution_id, seq);
+            eprintln!("PROBE write_page: REVOKED id={} seq={} t={}ms", self.execution_id, seq, probe_ms());
             return Err("console owner generation revoked".to_string());
         }
-        eprintln!("PROBE write_page: SEND id={} seq={} bytes={}", self.execution_id, seq, bytes.len());
+        eprintln!("PROBE write_page: SEND id={} seq={} bytes={} t={}ms", self.execution_id, seq, bytes.len(), probe_ms());
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         self.tx.send(ConsolePage { execution_id: self.execution_id.clone(), seq, bytes, reply })
-            .map_err(|_| "console owner stopped".to_string())?;
-        response.recv().map_err(|_| "console owner stopped".to_string())?
+            .map_err(|_| { eprintln!("PROBE write_page: SEND-FAILED id={} seq={} t={}ms", self.execution_id, seq, probe_ms()); "console owner stopped".to_string() })?;
+        response.recv().map_err(|_| { eprintln!("PROBE write_page: RECV-FAILED id={} seq={} t={}ms", self.execution_id, seq, probe_ms()); "console owner stopped".to_string() })?
     }
 }
 
