@@ -3,6 +3,7 @@
 use super::*;
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone)]
 enum HostAction {
@@ -64,14 +65,17 @@ pub(super) fn run_scenario(sc: &Scenario) -> ScenarioResult {
             election_timeout_max: Duration::from_millis(timeout),
             learner: false,
         };
+        let opened = Arc::new(AtomicU64::new(0));
         sim.host(name, move || {
             let cfg = cfg.clone();
+            let opened = opened.clone();
             async move {
                 // Turmoil gives each named host its own persistent simulated FS.
                 let db = sled::Config::new().path("/scenario-db")
                     .flush_every_ms(None).open()?;
+                let generation = opened.fetch_add(1, Ordering::SeqCst) + 1;
                 let node = ClusterNode::new(cfg, db.clone()).with_peer_rpc(Arc::new(SimRpc));
-                let host = Arc::new(ScenarioHost::new(node.clone(), db));
+                let host = Arc::new(ScenarioHost::new_with_generation(node.clone(), db, generation));
                 let raft = TcpListener::bind(("0.0.0.0", PORT)).await?;
                 let observer = TcpListener::bind(("0.0.0.0", HOST_PORT)).await?;
                 node.start_background_tasks().expect("start election and heartbeat loops");
@@ -239,6 +243,15 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
     });
     let op_node = sc.workload.op.resolve_node(&leader);
     let client = ScenarioHostClient::new(&op_node);
+    let mut generation_before = std::collections::HashMap::new();
+    for name in ["n0", "n1", "n2"] {
+        match ScenarioHostClient::new(name).generation().await {
+            Ok(generation) if generation > 0 => {
+                generation_before.insert(name.to_owned(), generation);
+            }
+            other => return blank(Err(format!("initial host {name} generation unavailable: {other:?}"))),
+        }
+    }
     let mut faults = sc.faults.clone();
     faults.sort_by_key(Fault::at_ms);
     let mut ops_done = 0usize;
@@ -367,13 +380,36 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
             at_ms: now_ms(start),
         });
     }
+    let mut restarts_ready = true;
     if sc.recovery.restart_crashed {
         for name in &crashed {
             control_host(&control, HostAction::Bounce(name.clone())).await;
-            events.push(ScenarioEvent::Restart {
+            let previous = generation_before.get(name).copied().unwrap_or(0);
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_millis(sc.recovery.deadline_ms);
+            let mut ready = false;
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(generation) = ScenarioHostClient::new(name).generation().await {
+                    if previous > 0 && generation > previous {
+                        generation_before.insert(name.clone(), generation);
+                        ready = true;
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            events.push(ScenarioEvent::Assert {
                 at_ms: now_ms(start),
-                node: name.clone(),
+                name: "FreshReopenGenerationReady".into(),
+                passed: ready,
             });
+            restarts_ready &= ready;
+            if ready {
+                events.push(ScenarioEvent::Restart {
+                    at_ms: now_ms(start),
+                    node: name.clone(),
+                });
+            }
         }
     }
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -468,7 +504,9 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let mut status = if !recovered_bytes {
+    let mut status = if !restarts_ready {
+        Err("crashed host did not serve a fresh sled generation".into())
+    } else if !recovered_bytes {
         Err("pre-crash acknowledged snapshot bytes were not recovered".into())
     } else if !converged {
         Err(format!(
