@@ -469,7 +469,7 @@ enum HostRequest {
 enum HostResponse {
     Status(Role, u64),
     RunJs(JsResult),
-    ReadFile(Option<Vec<u8>>),
+    ReadFile(Result<Option<Vec<u8>>, String>),
     Resolve(Result<Option<CaId>, String>),
     Cas(Result<bool, String>),
     Log(Result<Vec<RefLogEntry>, String>),
@@ -539,7 +539,7 @@ impl ScenarioHost {
             }
             HostRequest::RunJs { code } => HostResponse::RunJs(run_js(&self.engine, &code).await),
             HostRequest::ReadFile { head, path } => {
-                HostResponse::ReadFile(read_file_at(&self.store, &head, &path).await)
+                HostResponse::ReadFile(read_file_at_checked(&self.store, &head, &path).await)
             }
             HostRequest::Resolve { label } => {
                 let labels = self.engine.label_store().ok_or("host label store missing")?;
@@ -638,7 +638,7 @@ impl ScenarioHostClient {
             path: path.into(),
         };
         match self.call(request, Duration::from_secs(2)).await? {
-            HostResponse::ReadFile(bytes) => Ok(bytes),
+            HostResponse::ReadFile(result) => result,
             _ => Err("unexpected host file response".into()),
         }
     }
@@ -707,6 +707,21 @@ async fn read_file_at(store: &FsStore, head_hex: &str, path: &str) -> Option<Vec
         .collect();
     let entry = store.resolve_file(Some(ca), &comps).await.ok()??;
     store.read_file(&entry).await.ok()
+}
+
+#[cfg(feature = "real-sled")]
+async fn read_file_at_checked(store: &FsStore, head_hex: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    let ca = parse_ca_hex(head_hex)
+        .ok_or_else(|| format!("invalid snapshot head: {head_hex}"))?;
+    let comps: Vec<String> = path
+        .trim_start_matches('/')
+        .split('/')
+        .map(str::to_string)
+        .collect();
+    let Some(entry) = store.resolve_file(Some(ca), &comps).await.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    store.read_file(&entry).await.map(Some).map_err(|e| e.to_string())
 }
 
 async fn current_leader(nodes: &HashMap<String, Arc<ClusterNode>>) -> Option<String> {
