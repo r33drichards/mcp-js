@@ -86,9 +86,11 @@ try {
   await assert.rejects(cancelled.runJs(code, controller.signal), { name: 'AbortError' });
 
 } finally {
-  engine.close();
-  engine.uniffiDestroy();
+  engine.dispose();
+  engine.dispose();
 }
+assert.throws(() => engine.lifecycleState(), "dispose must release the native handle");
+
 const hookDirectory = mkdtempSync(join(tmpdir(), 'mcp-host-hooks-'));
 try {
   const hookFile = join(hookDirectory, 'hooks.js');
@@ -146,8 +148,7 @@ allow if {
     assert.match(denied.error, /is not allowed/);
     assert.equal(calls, 1);
   } finally {
-    hookedEngine.close();
-    hookedEngine.uniffiDestroy();
+    hookedEngine.dispose();
   }
 } finally {
   rmSync(hookDirectory, { recursive: true, force: true });

@@ -92,10 +92,12 @@ try {
   ));
   console.log(result.output); // 42
 } finally {
-  engine.close();
-  engine.uniffiDestroy();
+  engine.dispose();
 }
 ```
+
+`engine.dispose()` shuts down the runtime and releases the native handle.
+Call it when your application is finished with the engine. Repeated calls are safe.
 
 `callToolAsync` returns a Promise and does not block the Node event loop. The
 same positional arguments are accepted by synchronous `callTool`, which is
@@ -151,8 +153,7 @@ try {
   `);
   console.log(result.output);
 } finally {
-  engine.close();
-  engine.uniffiDestroy();
+  engine.dispose();
 }
 ```
 

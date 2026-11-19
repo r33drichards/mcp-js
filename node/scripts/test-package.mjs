@@ -25,7 +25,7 @@ try {
   if (readFileSync(join(temp, 'node_modules/@wholelottahoopla/mcp-js-node/LICENSE'), 'utf8') !== readFileSync(join(root, '../LICENSE'), 'utf8')) throw new Error('Installed license differs from repository license');
   checkDependencies(run('readelf', ['-d', installedLibrary]), run('ldd', [installedLibrary]));
   cpSync(join(root, 'tests/consumer.mjs'), join(temp, 'consumer.mjs'));
-  writeFileSync(join(temp, 'consumer.ts'), 'import { Engine } from "@wholelottahoopla/mcp-js-node";\nconst engine = Engine.createStateless(64n, 1n);\nengine.callTool("run_js", "{}", undefined, undefined);\nengine.close();\n');
+  writeFileSync(join(temp, 'consumer.ts'), 'import { Engine } from "@wholelottahoopla/mcp-js-node";\nconst engine = Engine.createStateless(64n, 1n);\nengine.callTool("run_js", "{}", undefined, undefined);\nengine.dispose();\n');
   run(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--noEmit', '--strict', '--skipLibCheck', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'consumer.ts']);
   // Hide source outputs: loading must use only the installed tarball, not the checkout.
   const hidden = [];
