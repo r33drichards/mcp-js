@@ -87,6 +87,64 @@ impl HeapStorage for MemoryHeapStorage {
     }
 }
 
+/// Persistent blob storage backed by a host-owned sled database.
+/// Under Turmoil, invoke this only on the owning simulated host; V8 workers
+/// must use a host-command bridge rather than this sled handle.
+#[derive(Clone)]
+pub struct SledHeapStorage {
+    db: sled::Db,
+    blobs: sled::Tree,
+}
+
+impl SledHeapStorage {
+    pub fn new(db: sled::Db) -> Result<Self, String> {
+        let blobs = db.open_tree("fs_blobs").map_err(|e| e.to_string())?;
+        Ok(Self { db, blobs })
+    }
+}
+
+#[async_trait]
+impl HeapStorage for SledHeapStorage {
+    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.blobs
+            .insert(name.as_bytes(), data)
+            .map_err(|e| e.to_string())?;
+        self.db.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.blobs
+            .get(name.as_bytes())
+            .map_err(|e| e.to_string())?
+            .map(|v| v.to_vec())
+            .ok_or_else(|| format!("not found: {name}"))
+    }
+
+    async fn list(&self) -> Result<Vec<String>, String> {
+        self.blobs
+            .iter()
+            .map(|result| {
+                let (name, _) = result.map_err(|e| e.to_string())?;
+                String::from_utf8(name.to_vec()).map_err(|e| e.to_string())
+            })
+            .collect()
+    }
+
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        self.blobs
+            .remove(name.as_bytes())
+            .map_err(|e| e.to_string())?;
+        self.db.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn contains(&self, name: &str) -> Result<bool, String> {
+        self.blobs
+            .contains_key(name.as_bytes())
+            .map_err(|e| e.to_string())
+    }
+}
 #[derive(Clone)]
 pub struct FileHeapStorage {
     dir: PathBuf,
