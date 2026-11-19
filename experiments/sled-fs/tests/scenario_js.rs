@@ -154,3 +154,87 @@ fn blocking_worker_blobs_are_flushed_by_host_and_reopen() {
     });
     sim.run().unwrap();
 }
+
+#[test]
+fn host_owned_engine_runs_js_on_patched_sled() {
+    use engine_cluster_tests::scenario::engine_with_cluster_host;
+    use server::cluster::{ClusterConfig, ClusterNode};
+    use server::engine::parse_ca_hex;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let done = Arc::new(AtomicBool::new(false));
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(45))
+        .build();
+    let host_done = done.clone();
+    sim.host("n0", move || {
+        let done = host_done.clone();
+        async move {
+            let db = sled::Config::new()
+                .path("/host-engine")
+                .flush_every_ms(None)
+                .open()
+                .unwrap();
+            let node = ClusterNode::new(
+                ClusterConfig {
+                    node_id: "n0".into(),
+                    election_timeout_min: Duration::from_millis(50),
+                    election_timeout_max: Duration::from_millis(50),
+                    ..ClusterConfig::default()
+                },
+                db.clone(),
+            );
+            node.start_background_tasks().unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let (engine, store, pump) = engine_with_cluster_host(node, db);
+            let program = Program(vec![Step::Write {
+                path: "/data/iteration".into(),
+                bytes: "host-owned".into(),
+            }]);
+            let id = engine
+                .run_js(program.render_js(0))
+                .maybe_fs(Some("main".into()))
+                .execute()
+                .await
+                .unwrap();
+            let mut head = None;
+            for _ in 0..1200 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                let info = engine.get_execution(id.clone()).unwrap();
+                if info.status == "failed" {
+                    panic!("host JS failed: {:?}", info.error);
+                }
+                if info.status == "completed" {
+                    head = info.fs;
+                    break;
+                }
+            }
+            let head = head.expect("host JS did not publish a snapshot head");
+            let entry = store
+                .resolve_file(
+                    Some(parse_ca_hex(&head).unwrap()),
+                    &["data".into(), "iteration".into()],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(store.read_file(&entry).await.unwrap(), b"host-owned");
+            pump.abort();
+            let _ = pump.await;
+            done.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    });
+    sim.client("observer", async move {
+        for _ in 0..2000 {
+            if done.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Err("host JS did not finish".into())
+    });
+    sim.run().unwrap();
+}
