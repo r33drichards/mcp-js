@@ -652,16 +652,21 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
             if incarnation == 1 {
                 let watched = db.clone();
                 tokio::spawn(async move {
+                    let mut polls = 0usize;
                     loop {
+                        polls += 1;
                         let output: Vec<u8> = watched.tree_names().into_iter()
                             .filter(|name| name.starts_with(b"ex:"))
                             .flat_map(|name| watched.open_tree(name).unwrap().iter()
                                 .flat_map(|entry| entry.unwrap().1.to_vec()))
                             .collect();
                         if String::from_utf8_lossy(&output).contains("worker-entered") {
-                            eprintln!("PROBE test: watcher saw worker-entered t={}ms", server::engine::console::probe_ms());
+                            eprintln!("PROBE test: watcher saw worker-entered t={}ms polls={} bytes={}", server::engine::console::probe_ms(), polls, output.len());
                             stage.store(1, Ordering::SeqCst);
                             break;
+                        }
+                        if polls == 1 || polls == 10 || polls == 100 || polls == 1000 || polls == 10000 {
+                            eprintln!("PROBE test: watcher poll#{} bytes={} t={}ms", polls, output.len(), server::engine::console::probe_ms());
                         }
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
