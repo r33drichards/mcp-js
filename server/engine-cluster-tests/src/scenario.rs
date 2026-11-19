@@ -459,6 +459,8 @@ enum HostRequest {
     Status,
     RunJs { code: String },
     ReadFile { head: String, path: String },
+    Resolve { label: String },
+    Cas { label: String, expect: Option<CaId>, new: CaId },
 }
 
 #[cfg(feature = "real-sled")]
@@ -467,6 +469,8 @@ enum HostResponse {
     Status(Role, u64),
     RunJs(JsResult),
     ReadFile(Option<Vec<u8>>),
+    Resolve(Result<Option<CaId>, String>),
+    Cas(Result<bool, String>),
 }
 
 /// All handles, including the sled-backed label and blob stores, stay on the
@@ -535,6 +539,14 @@ impl ScenarioHost {
             HostRequest::ReadFile { head, path } => {
                 HostResponse::ReadFile(read_file_at(&self.store, &head, &path).await)
             }
+            HostRequest::Resolve { label } => {
+                let labels = self.engine.label_store().ok_or("host label store missing")?;
+                HostResponse::Resolve(labels.resolve(&label).await)
+            }
+            HostRequest::Cas { label, expect, new } => {
+                let labels = self.engine.label_store().ok_or("host label store missing")?;
+                HostResponse::Cas(labels.cas(&label, expect, new, None).await)
+            }
         };
         let body = serde_json::to_vec(&response).map_err(|e| e.to_string())?;
         let header = format!(
@@ -589,6 +601,21 @@ impl ScenarioHostClient {
         {
             HostResponse::RunJs(result) => Ok(result),
             _ => Err("unexpected host JS response".into()),
+        }
+    }
+
+    pub async fn resolve(&self, label: &str) -> Result<Option<CaId>, String> {
+        match self.call(HostRequest::Resolve { label: label.into() }, Duration::from_secs(2)).await? {
+            HostResponse::Resolve(result) => result,
+            _ => Err("unexpected host resolve response".into()),
+        }
+    }
+
+    pub async fn cas(&self, label: &str, expect: Option<CaId>, new: CaId) -> Result<bool, String> {
+        let request = HostRequest::Cas { label: label.into(), expect, new };
+        match self.call(request, Duration::from_secs(5)).await? {
+            HostResponse::Cas(result) => result,
+            _ => Err("unexpected host CAS response".into()),
         }
     }
 
