@@ -240,7 +240,7 @@ fn host_owned_engine_runs_js_on_patched_sled() {
 }
 
 #[test]
-fn observer_runs_js_on_host_through_simulated_network() {
+fn observer_runs_js_and_publishes_label_on_host() {
     use engine_cluster_tests::scenario::{JsResult, ScenarioHost, ScenarioHostClient};
     use server::cluster::{ClusterConfig, ClusterNode, Role};
     use std::time::Duration;
@@ -267,7 +267,7 @@ fn observer_runs_js_on_host_through_simulated_network() {
         node.start_background_tasks().unwrap();
         let host = ScenarioHost::new(node, db.clone());
         let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
-        for _ in 0..3 {
+        for _ in 0..6 {
             let (stream, _) = listener.accept().await?;
             host.serve_request(stream).await.unwrap();
         }
@@ -303,6 +303,10 @@ fn observer_runs_js_on_host_through_simulated_network() {
                 .unwrap(),
             b"rpc-owned"
         );
+        let ca = server::engine::parse_ca_hex(&head).unwrap();
+        assert_eq!(client.resolve("main").await.unwrap(), None);
+        assert!(client.cas("main", None, ca).await.unwrap());
+        assert_eq!(client.resolve("main").await.unwrap(), Some(ca));
         Ok(())
     });
     sim.run().unwrap();
