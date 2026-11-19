@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT"
 description = "Derive a UniFFI-exported builder object for a uniffi::Record"
 
+[lints]
+workspace = true
+
 [lib]
 proc-macro = true
 

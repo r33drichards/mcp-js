@@ -3,6 +3,9 @@ name = "server"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [lib]
 name = "server"
 path = "src/lib.rs"

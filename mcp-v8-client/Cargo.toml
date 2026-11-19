@@ -10,6 +10,9 @@ readme = "README.md"
 keywords = ["api-client", "openapi", "mcp", "v8", "javascript"]
 categories = ["api-bindings", "web-programming::http-client"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "mcp-v8-cli"
 path = "src/main.rs"
