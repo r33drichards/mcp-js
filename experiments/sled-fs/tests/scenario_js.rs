@@ -57,6 +57,14 @@ fn real_sled_reopens_after_crash_and_acknowledges_new_js_write() {
     assert!(result.events.iter().any(|e| matches!(e,
         engine_cluster_tests::scenario::ScenarioEvent::Crash { node, .. } if node == elected
     )), "the JS owner must actually crash: {:?}", result.events);
+    let ready = result.events.iter().position(|e| matches!(e,
+        engine_cluster_tests::scenario::ScenarioEvent::Assert { name, passed: true, .. }
+            if name == "FreshReopenGenerationReady"
+    )).expect("reopened owner never served its new generation: expected a readiness event");
+    let restart = result.events.iter().position(|e| matches!(e,
+        engine_cluster_tests::scenario::ScenarioEvent::Restart { node, .. } if node == elected
+    )).expect("crashed owner never restarted");
+    assert!(ready < restart, "restart was recorded before the reopened host served requests");
 }
 
 #[test]
