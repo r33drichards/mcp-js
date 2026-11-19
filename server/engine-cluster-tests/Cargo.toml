@@ -6,6 +6,9 @@ edition = "2024"
 [workspace]
 members = ["fuzz"]
 
+[features]
+real-sled = ["turmoil/unstable-fs"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

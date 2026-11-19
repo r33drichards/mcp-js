@@ -69,7 +69,7 @@ use self::artifacts::{
     Artifact, ArtifactMeta, ArtifactState, ArtifactStore, UploadGrant, UploadGrants,
     UploadReservation,
 };
-use self::console::ConsoleLogState;
+use self::console::{ConsoleLogState, HostConsoleBridge, HostConsoleWriter};
 use self::execution::{
     ConsoleOutputPage, ExecutionId, ExecutionInfo, ExecutionRegistry, ExecutionSummary,
 };
@@ -1022,6 +1022,7 @@ pub struct ExecutionConfig<'a> {
     pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
     pub console_tree: Option<sled::Tree>,
     pub console_error_tree: Option<sled::Tree>,
+    pub host_console_writer: Option<HostConsoleWriter>,
     pub process_exit_state: Option<&'a console::ProcessExitState>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub bootstrap_script: Option<&'a str>,
@@ -1053,6 +1054,7 @@ impl<'a> ExecutionConfig<'a> {
             subprocess_config: None,
             console_tree: None,
             console_error_tree: None,
+            host_console_writer: None,
             process_exit_state: None,
             module_loader_config: None,
             bootstrap_script: None,
@@ -1104,8 +1106,18 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    pub fn maybe_console_tree(mut self, tree: Option<sled::Tree>) -> Self {
+        self.console_tree = tree;
+        self
+    }
+
     pub fn console_tree(mut self, tree: sled::Tree) -> Self {
         self.console_tree = Some(tree);
+        self
+    }
+
+    pub fn maybe_host_console_writer(mut self, writer: Option<HostConsoleWriter>) -> Self {
+        self.host_console_writer = writer;
         self
     }
 
@@ -1211,6 +1223,7 @@ pub fn execute_stateless(
         subprocess_config,
         console_tree,
         console_error_tree,
+        host_console_writer,
         process_exit_state,
         module_loader_config,
         bootstrap_script,
@@ -1225,7 +1238,7 @@ pub fn execute_stateless(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut extensions = Vec::new();
-        if console_tree.is_some() || process_exit_state.is_some() {
+        if console_tree.is_some() || host_console_writer.is_some() || process_exit_state.is_some() {
             extensions.push(console::create_extension());
         }
         if fetch_config.is_some() {
@@ -1280,7 +1293,9 @@ pub fn execute_stateless(
         let rt = isolate_runtime()?;
 
         // Put console log state in OpState.
-        if let Some(tree) = console_tree {
+        if let Some(writer) = host_console_writer {
+            runtime.op_state().borrow_mut().put(ConsoleLogState::new_with_host(writer));
+        } else if let Some(tree) = console_tree {
             let console_state = match console_error_tree {
                 Some(stderr_tree) => ConsoleLogState::new_with_stderr(tree, stderr_tree),
                 None => ConsoleLogState::new(tree),
@@ -1503,6 +1518,7 @@ pub fn execute_stateful(
         subprocess_config,
         console_tree,
         console_error_tree,
+        host_console_writer,
         process_exit_state,
         module_loader_config,
         bootstrap_script,
@@ -1535,7 +1551,7 @@ pub fn execute_stateful(
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
 
         let mut extensions = Vec::new();
-        if console_tree.is_some() || process_exit_state.is_some() {
+        if console_tree.is_some() || host_console_writer.is_some() || process_exit_state.is_some() {
             extensions.push(console::create_extension());
         }
         if fetch_config.is_some() {
@@ -1591,7 +1607,9 @@ pub fn execute_stateful(
         let rt = isolate_runtime()?;
 
         // Put console log state in OpState.
-        if let Some(tree) = console_tree {
+        if let Some(writer) = host_console_writer {
+            runtime.op_state().borrow_mut().put(ConsoleLogState::new_with_host(writer));
+        } else if let Some(tree) = console_tree {
             let console_state = match console_error_tree {
                 Some(stderr_tree) => ConsoleLogState::new_with_stderr(tree, stderr_tree),
                 None => ConsoleLogState::new(tree),
@@ -1888,6 +1906,7 @@ pub struct Engine {
     fs_config: Option<Arc<fs::FsConfig>>,
     /// Execution registry for async execution tracking and console output.
     execution_registry: Option<Arc<ExecutionRegistry>>,
+    host_console_bridge: Option<Arc<HostConsoleBridge>>,
     /// Module loader configuration controlling external module access and OPA auditing.
     module_loader_config: Arc<module_loader::ModuleLoaderConfig>,
     /// MCP client manager for programmatic tool calling from JS.
@@ -2105,6 +2124,7 @@ impl Engine {
             net_tcp_config: None,
             fs_config: None,
             execution_registry: None,
+            host_console_bridge: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
                 hooks: None,
@@ -2158,6 +2178,7 @@ impl Engine {
             net_tcp_config: None,
             fs_config: None,
             execution_registry: None,
+            host_console_bridge: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
                 hooks: None,
@@ -2264,6 +2285,12 @@ impl Engine {
     /// Set the execution registry for async execution tracking.
     pub fn with_execution_registry(mut self, registry: Arc<ExecutionRegistry>) -> Self {
         self.execution_registry = Some(registry);
+        self
+    }
+
+    /// Route console pages through the owning simulated host, not V8 workers.
+    pub fn with_host_console_bridge(mut self, bridge: Arc<HostConsoleBridge>) -> Self {
+        self.host_console_bridge = Some(bridge);
         self
     }
 
@@ -2755,7 +2782,9 @@ impl Engine {
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
-                let ct = console_tree;
+                let writer = self.host_console_bridge.as_ref()
+                    .map(|bridge| bridge.for_execution(id.clone()));
+                let ct = if writer.is_some() { None } else { Some(console_tree) };
                 let mlc = self.module_loader_config.clone();
                 let mc = self
                     .mcp_client_manager
@@ -2787,7 +2816,8 @@ impl Engine {
                             .maybe_fs_config(fsc.as_deref())
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())
-                            .console_tree(ct)
+                            .maybe_console_tree(ct)
+                            .maybe_host_console_writer(writer)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
                             .maybe_artifact_state(ast),
@@ -2885,7 +2915,9 @@ impl Engine {
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
-                let ct = console_tree;
+                let writer = self.host_console_bridge.as_ref()
+                    .map(|bridge| bridge.for_execution(id.clone()));
+                let ct = if writer.is_some() { None } else { Some(console_tree) };
                 let mlc = self.module_loader_config.clone();
                 let mc = self
                     .mcp_client_manager
@@ -2918,7 +2950,8 @@ impl Engine {
                             .maybe_fs_config(fsc.as_deref())
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())
-                            .console_tree(ct)
+                            .maybe_console_tree(ct)
+                            .maybe_host_console_writer(writer)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
                             .maybe_artifact_state(ast),

@@ -98,10 +98,15 @@ impl ExecutionRegistry {
     pub fn new(db_path: &str) -> Result<Self, String> {
         let db = sled::open(db_path)
             .map_err(|e| format!("Failed to open execution db at {}: {}", db_path, e))?;
-        Ok(Self {
+        Ok(Self::from_db(db))
+    }
+
+    /// Reuse a host-owned sled database instead of opening a second path.
+    pub fn from_db(db: sled::Db) -> Self {
+        Self {
             executions: Arc::new(DashMap::new()),
             db,
-        })
+        }
     }
 
     /// Register a new execution. Returns the sled tree for console output.
@@ -126,6 +131,16 @@ impl ExecutionRegistry {
         self.executions.insert(id.to_string(), record);
 
         Ok(tree)
+    }
+
+    /// Append one WAL page on the owning host, never from a V8 worker.
+    pub fn write_console_page(&self, id: &str, seq: u64, bytes: &[u8]) -> Result<(), String> {
+        eprintln!("PROBE registry.write_console_page id={} seq={} bytes={} t={}ms", id, seq, bytes.len(), crate::engine::console::probe_ms());
+        let tree = self.db.open_tree(format!("ex:{}", id))
+            .map_err(|e| format!("Failed to open console tree: {}", e))?;
+        tree.insert(seq.to_be_bytes(), bytes)
+            .map_err(|e| format!("Failed to write console page: {}", e))?;
+        Ok(())
     }
 
     /// Open the tree of outstanding artifact upload grants.

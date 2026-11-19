@@ -562,7 +562,7 @@ impl Config {
         let blob_dir: PathBuf = self.get_path().join("blobs");
 
         if !fs::exists(&blob_dir) {
-            fs::create_dir_all(blob_dir)?;
+            fs::create_dir_all(&blob_dir)?;
         }
 
         self.verify_config()?;
@@ -578,7 +578,20 @@ impl Config {
             options.create_new(true);
         }
 
-        self.try_lock(options.open(&self.db_path())?)
+        let file = self.try_lock(options.open(&self.db_path())?)?;
+
+        #[cfg(feature = "turmoil-fs")]
+        {
+            // Persist newly created blob and journal names before a durable write is acknowledged.
+            fs::sync_dir(&blob_dir)?;
+            let mut dir = self.get_path();
+            loop {
+                fs::sync_dir(&dir)?;
+                if !dir.pop() { break; }
+            }
+        }
+
+        Ok(file)
     }
 
     fn try_lock(&self, file: File) -> Result<File> {
@@ -687,6 +700,8 @@ impl Config {
         io_fail!(self, "write_config crc");
         f.write_all(&crc_arr)?;
         io_fail!(self, "write_config post");
+        #[cfg(feature = "turmoil-fs")]
+        f.sync_all()?;
         Ok(())
     }
 

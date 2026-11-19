@@ -12,8 +12,14 @@ use std::sync::{
 };
 
 use deno_core::{JsRuntime, OpState, op2, v8};
+use tokio::sync::mpsc;
+use super::execution::ExecutionRegistry;
 
 // ── Configuration ────────────────────────────────────────────────────────
+
+/// Probe: process-global epoch for ordering diagnostics across crates.
+pub static PROBE_T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+pub fn probe_ms() -> u128 { PROBE_T0.get_or_init(std::time::Instant::now).elapsed().as_millis() }
 
 /// Page size for WAL-style writes to sled. When the in-memory buffer reaches
 /// this size, a full page is flushed to sled. Remaining bytes are flushed on
@@ -47,8 +53,74 @@ impl ProcessExitState {
 
 /// Per-execution console output state, stored in deno_core's `OpState`.
 /// Buffers console output bytes and flushes them to sled in fixed-size pages.
+/// DB-free worker client. The owner-host pump alone opens and writes console trees.
+#[derive(Clone)]
+pub struct HostConsoleWriter {
+    tx: mpsc::UnboundedSender<ConsolePage>,
+    alive: Arc<AtomicBool>,
+    execution_id: String,
+}
+
+struct ConsolePage {
+    execution_id: String,
+    seq: u64,
+    bytes: Vec<u8>,
+    reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+}
+
+pub struct HostConsoleBridge {
+    tx: mpsc::UnboundedSender<ConsolePage>,
+    alive: Arc<AtomicBool>,
+}
+
+impl HostConsoleBridge {
+    pub fn new(registry: Arc<ExecutionRegistry>) -> (Arc<Self>, impl std::future::Future<Output = ()>) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ConsolePage>();
+        let alive = Arc::new(AtomicBool::new(true));
+        let service = Arc::new(Self { tx, alive: alive.clone() });
+        let pump = async move {
+            while let Some(page) = rx.recv().await {
+                let result = if alive.load(Ordering::SeqCst) {
+                    registry.write_console_page(&page.execution_id, page.seq, &page.bytes)
+                } else {
+                    Err("console owner generation revoked".to_string())
+                };
+                eprintln!("PROBE pump: id={} seq={} bytes={} ok={} t={}ms thread={:?}", page.execution_id, page.seq, page.bytes.len(), result.is_ok(), probe_ms(), std::thread::current().name());
+                let _ = page.reply.send(result);
+            }
+            eprintln!("PROBE pump: EXITED t={}ms", probe_ms());
+        };
+        (service, pump)
+    }
+
+    pub fn for_execution(&self, execution_id: String) -> HostConsoleWriter {
+        HostConsoleWriter {
+            tx: self.tx.clone(),
+            alive: self.alive.clone(),
+            execution_id,
+        }
+    }
+
+    pub fn revoke(&self) { self.alive.store(false, Ordering::SeqCst); }
+}
+
+impl HostConsoleWriter {
+    pub fn write_page(&self, seq: u64, bytes: Vec<u8>) -> Result<(), String> {
+        if !self.alive.load(Ordering::SeqCst) {
+            eprintln!("PROBE write_page: REVOKED id={} seq={} t={}ms", self.execution_id, seq, probe_ms());
+            return Err("console owner generation revoked".to_string());
+        }
+        eprintln!("PROBE write_page: SEND id={} seq={} bytes={} t={}ms", self.execution_id, seq, bytes.len(), probe_ms());
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.tx.send(ConsolePage { execution_id: self.execution_id.clone(), seq, bytes, reply })
+            .map_err(|_| { eprintln!("PROBE write_page: SEND-FAILED id={} seq={} t={}ms", self.execution_id, seq, probe_ms()); "console owner stopped".to_string() })?;
+        response.recv().map_err(|_| { eprintln!("PROBE write_page: RECV-FAILED id={} seq={} t={}ms", self.execution_id, seq, probe_ms()); "console owner stopped".to_string() })?
+    }
+}
+
 pub struct ConsoleLogState {
-    tree: sled::Tree,
+    tree: Option<sled::Tree>,
+    host_writer: Option<HostConsoleWriter>,
     seq: AtomicU64,
     buffer: RefCell<Vec<u8>>,
     stderr_tree: Option<sled::Tree>,
@@ -65,7 +137,26 @@ unsafe impl Sync for ConsoleLogState {}
 impl ConsoleLogState {
     pub fn new(tree: sled::Tree) -> Self {
         Self {
-            tree,
+            tree: Some(tree),
+            host_writer: None,
+            seq: AtomicU64::new(0),
+            buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
+            stderr_tree: None,
+            stderr_seq: AtomicU64::new(0),
+            stderr_buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
+        }
+    }
+
+    pub fn new_with_host(writer: HostConsoleWriter) -> Self {
+        let mut state = Self::new_without_tree();
+        state.host_writer = Some(writer);
+        state
+    }
+
+    fn new_without_tree() -> Self {
+        Self {
+            tree: None,
+            host_writer: None,
             seq: AtomicU64::new(0),
             buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
             stderr_tree: None,
@@ -81,7 +172,8 @@ impl ConsoleLogState {
     }
 
     fn write_buffer(
-        tree: &sled::Tree,
+        tree: Option<&sled::Tree>,
+        writer: Option<&HostConsoleWriter>,
         seq: &AtomicU64,
         buffer: &RefCell<Vec<u8>>,
         data: &[u8],
@@ -91,18 +183,22 @@ impl ConsoleLogState {
         while buffer.len() >= PAGE_SIZE {
             let page: Vec<u8> = buffer.drain(..PAGE_SIZE).collect();
             let seq = seq.fetch_add(1, Ordering::Relaxed);
-            let _ = tree.insert(seq.to_be_bytes(), page);
+            if let Some(tree) = tree {
+                let _ = tree.insert(seq.to_be_bytes(), page);
+            } else if let Some(writer) = writer {
+                let _ = writer.write_page(seq, page);
+            }
         }
     }
 
     /// Append bytes to the stdout buffer, flushing full pages to sled.
     pub fn write(&self, data: &[u8]) {
-        Self::write_buffer(&self.tree, &self.seq, &self.buffer, data);
+        Self::write_buffer(self.tree.as_ref(), self.host_writer.as_ref(), &self.seq, &self.buffer, data);
     }
 
     pub fn write_stderr(&self, data: &[u8]) {
         if let Some(tree) = &self.stderr_tree {
-            Self::write_buffer(tree, &self.stderr_seq, &self.stderr_buffer, data);
+            Self::write_buffer(Some(tree), None, &self.stderr_seq, &self.stderr_buffer, data);
         } else {
             self.write(data);
         }
@@ -112,20 +208,24 @@ impl ConsoleLogState {
         self.stderr_tree.is_some()
     }
 
-    fn flush_buffer(tree: &sled::Tree, seq: &AtomicU64, buffer: &RefCell<Vec<u8>>) {
+    fn flush_buffer(tree: Option<&sled::Tree>, writer: Option<&HostConsoleWriter>, seq: &AtomicU64, buffer: &RefCell<Vec<u8>>) {
         let mut buffer = buffer.borrow_mut();
         if !buffer.is_empty() {
             let page: Vec<u8> = buffer.drain(..).collect();
             let seq = seq.fetch_add(1, Ordering::Relaxed);
-            let _ = tree.insert(seq.to_be_bytes(), page);
+            if let Some(tree) = tree {
+                let _ = tree.insert(seq.to_be_bytes(), page);
+            } else if let Some(writer) = writer {
+                let _ = writer.write_page(seq, page);
+            }
         }
     }
 
     /// Flush any remaining buffered bytes to sled (call on execution end).
     pub fn flush(&self) {
-        Self::flush_buffer(&self.tree, &self.seq, &self.buffer);
+        Self::flush_buffer(self.tree.as_ref(), self.host_writer.as_ref(), &self.seq, &self.buffer);
         if let Some(tree) = &self.stderr_tree {
-            Self::flush_buffer(tree, &self.stderr_seq, &self.stderr_buffer);
+            Self::flush_buffer(Some(tree), None, &self.stderr_seq, &self.stderr_buffer);
         }
     }
 }

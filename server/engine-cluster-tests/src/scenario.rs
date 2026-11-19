@@ -20,7 +20,7 @@ use server::engine::Engine;
 use server::engine::execution::ExecutionRegistry;
 use server::engine::fs::FsConfig;
 use server::engine::fs_store::FsStore;
-use server::engine::fs_labels::CaId;
+use server::engine::fs_labels::{CaId, RefLogEntry};
 use server::engine::fs_labels::LabelStore;
 use server::engine::opa::{EvalMode, PolicyChain};
 use server::engine::parse_ca_hex;
@@ -58,7 +58,13 @@ async fn exchange<Req: Serialize, Resp: DeserializeOwned>(
     path: &str,
     req: &Req,
 ) -> Option<Resp> {
-    tokio::time::timeout(Duration::from_millis(150), async {
+    exchange_with_timeout(peer, path, req, Duration::from_millis(150)).await
+}
+
+async fn exchange_with_timeout<Req: Serialize, Resp: DeserializeOwned>(
+    peer: &str, path: &str, req: &Req, deadline: Duration,
+) -> Option<Resp> {
+    tokio::time::timeout(deadline, async {
         let (name, port) = peer.rsplit_once(':')?;
         let port: u16 = port.parse().ok()?;
         let mut stream = TcpStream::connect((name, port)).await.ok()?;
@@ -419,11 +425,266 @@ fn engine_with_cluster(node: Arc<ClusterNode>, tag: &str) -> (Arc<Engine>, Arc<F
     (engine, store)
 }
 
+/// Build an engine entirely within the simulated host that owns its sled DB.
+/// The returned pump must be dropped with that host incarnation.
+#[cfg(feature = "real-sled")]
+pub fn engine_with_cluster_host(
+    node: Arc<ClusterNode>,
+    db: sled::Db,
+) -> (Arc<Engine>, Arc<FsStore>, tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>, Arc<server::engine::console::HostConsoleBridge>) {
+    use server::engine::heap_storage::{HostBlobStorage, SledHeapStorage};
+    use server::engine::console::HostConsoleBridge;
+
+    let registry = Arc::new(ExecutionRegistry::from_db(db.clone()));
+    let (console_bridge, console_pump) = HostConsoleBridge::new(registry.clone());
+    let console_pump = tokio::spawn(console_pump);
+    let labels = LabelStore::from_db(db.clone()).with_cluster(node);
+    let storage = Arc::new(SledHeapStorage::new(db).expect("host blob tree"));
+    let (worker_storage, pump) = HostBlobStorage::bridge(storage);
+    let pump = tokio::spawn(pump);
+    let store = Arc::new(FsStore::new(Arc::new(worker_storage)));
+    let fs_config = FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
+    let engine = Engine::from_engine(
+        Engine::new_stateless(64 * 1024 * 1024, 30, 4)
+            .with_fs_config(fs_config)
+            .with_execution_registry(registry)
+            .with_host_console_bridge(console_bridge.clone())
+            .with_fs_snapshots(store.clone(), Arc::new(labels)),
+    );
+    (engine, store, pump, console_pump, console_bridge)
+}
+
+#[cfg(feature = "real-sled")]
+const HOST_PORT: u16 = 4301;
+
+#[cfg(feature = "real-sled")]
+#[derive(Serialize, Deserialize)]
+enum HostRequest {
+    Status,
+    Generation,
+    RunJs { code: String },
+    ReadFile { head: String, path: String },
+    Resolve { label: String },
+    Cas { label: String, expect: Option<CaId>, new: CaId },
+    Log { label: String },
+}
+
+#[cfg(feature = "real-sled")]
+#[derive(Serialize, Deserialize)]
+enum HostResponse {
+    Status(Role, u64),
+    Generation(u64),
+    RunJs(JsResult),
+    ReadFile(Result<Option<Vec<u8>>, String>),
+    Resolve(Result<Option<CaId>, String>),
+    Cas(Result<bool, String>),
+    Log(Result<Vec<RefLogEntry>, String>),
+}
+
+/// All handles, including the sled-backed label and blob stores, stay on the
+/// owning simulated host. Observer clients exchange only serialized messages.
+#[cfg(feature = "real-sled")]
+pub struct ScenarioHost {
+    node: Arc<ClusterNode>,
+    engine: Arc<Engine>,
+    store: Arc<FsStore>,
+    generation: u64,
+    _pump: tokio::task::JoinHandle<()>,
+    _console_pump: tokio::task::JoinHandle<()>,
+    console_bridge: Arc<server::engine::console::HostConsoleBridge>,
+}
+
+#[cfg(feature = "real-sled")]
+impl ScenarioHost {
+    pub fn new(node: Arc<ClusterNode>, db: sled::Db) -> Self {
+        Self::new_with_generation(node, db, 1)
+    }
+
+    pub fn new_with_generation(node: Arc<ClusterNode>, db: sled::Db, generation: u64) -> Self {
+        let (engine, store, pump, console_pump, console_bridge) = engine_with_cluster_host(node.clone(), db);
+        Self {
+            node,
+            engine,
+            store,
+            generation,
+            _pump: pump,
+            _console_pump: console_pump,
+            console_bridge,
+        }
+    }
+
+    /// Diagnostic handle for verifying the owning host stops its blob pump.
+    pub fn pump_abort_handle(&self) -> tokio::task::AbortHandle {
+        self._pump.abort_handle()
+    }
+
+    /// Handle to the host console bridge, for tests that must capture a
+    /// console writer before a crash and probe it afterwards.
+    pub fn console_bridge(&self) -> Arc<server::engine::console::HostConsoleBridge> {
+        self.console_bridge.clone()
+    }
+
+    /// Serve one request and close the connection. A host loop owns this value.
+    pub async fn serve_request(&self, mut stream: TcpStream) -> Result<(), String> {
+        let mut raw = Vec::new();
+        let (offset, length) = loop {
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("request ended before body".into());
+            }
+            raw.extend_from_slice(&chunk[..n]);
+            if raw.len() > 1024 * 1024 {
+                return Err("request too large".into());
+            }
+            if let Some(end) = raw.windows(4).position(|x| x == b"\r\n\r\n") {
+                let header = std::str::from_utf8(&raw[..end]).map_err(|e| e.to_string())?;
+                if !header.starts_with("POST /scenario HTTP/1.1") {
+                    return Err("unexpected request path".into());
+                }
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("Content-Length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .ok_or("missing content length")?;
+                let offset = end + 4;
+                if raw.len() >= offset + length {
+                    break (offset, length);
+                }
+            }
+        };
+        let request: HostRequest =
+            serde_json::from_slice(&raw[offset..offset + length]).map_err(|e| e.to_string())?;
+        let response = match request {
+            HostRequest::Status => {
+                let status = self.node.status().await;
+                HostResponse::Status(status.role, status.term)
+            }
+            HostRequest::Generation => HostResponse::Generation(self.generation),
+            HostRequest::RunJs { code } => HostResponse::RunJs(run_js(&self.engine, &code).await),
+            HostRequest::ReadFile { head, path } => {
+                HostResponse::ReadFile(read_file_at_checked(&self.store, &head, &path).await)
+            }
+            HostRequest::Resolve { label } => {
+                let labels = self.engine.label_store().ok_or("host label store missing")?;
+                HostResponse::Resolve(labels.resolve(&label).await)
+            }
+            HostRequest::Cas { label, expect, new } => {
+                let labels = self.engine.label_store().ok_or("host label store missing")?;
+                HostResponse::Cas(labels.cas(&label, expect, new, None).await)
+            }
+            HostRequest::Log { label } => {
+                let labels = self.engine.label_store().ok_or("host label store missing")?;
+                HostResponse::Log(labels.log(&label).await)
+            }
+        };
+        let body = serde_json::to_vec(&response).map_err(|e| e.to_string())?;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stream.write_all(&body).await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "real-sled")]
+pub struct ScenarioHostClient {
+    peer: String,
+}
+
+#[cfg(feature = "real-sled")]
+impl ScenarioHostClient {
+    pub fn new(name: &str) -> Self {
+        Self {
+            peer: format!("{name}:{HOST_PORT}"),
+        }
+    }
+
+    async fn call(&self, request: HostRequest, deadline: Duration) -> Result<HostResponse, String> {
+        exchange_with_timeout(&self.peer, "/scenario", &request, deadline)
+            .await
+            .ok_or_else(|| format!("host {} unavailable", self.peer))
+    }
+
+    pub async fn status(&self) -> Result<(Role, u64), String> {
+        match self
+            .call(HostRequest::Status, Duration::from_secs(2))
+            .await?
+        {
+            HostResponse::Status(role, term) => Ok((role, term)),
+            _ => Err("unexpected host status response".into()),
+        }
+    }
+
+    pub async fn generation(&self) -> Result<u64, String> {
+        match self.call(HostRequest::Generation, Duration::from_secs(2)).await? {
+            HostResponse::Generation(generation) => Ok(generation),
+            _ => Err("unexpected host generation response".into()),
+        }
+    }
+
+    pub async fn run_js(&self, code: &str) -> Result<JsResult, String> {
+        match self
+            .call(
+                HostRequest::RunJs { code: code.into() },
+                Duration::from_secs(35),
+            )
+            .await?
+        {
+            HostResponse::RunJs(result) => Ok(result),
+            _ => Err("unexpected host JS response".into()),
+        }
+    }
+
+    pub async fn resolve(&self, label: &str) -> Result<Option<CaId>, String> {
+        match self.call(HostRequest::Resolve { label: label.into() }, Duration::from_secs(2)).await? {
+            HostResponse::Resolve(result) => result,
+            _ => Err("unexpected host resolve response".into()),
+        }
+    }
+
+    pub async fn cas(&self, label: &str, expect: Option<CaId>, new: CaId) -> Result<bool, String> {
+        let request = HostRequest::Cas { label: label.into(), expect, new };
+        match self.call(request, Duration::from_secs(5)).await? {
+            HostResponse::Cas(result) => result,
+            _ => Err("unexpected host CAS response".into()),
+        }
+    }
+
+    pub async fn log(&self, label: &str) -> Result<Vec<RefLogEntry>, String> {
+        match self.call(HostRequest::Log { label: label.into() }, Duration::from_secs(2)).await? {
+            HostResponse::Log(result) => result,
+            _ => Err("unexpected host log response".into()),
+        }
+    }
+
+    pub async fn read_file(&self, head: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+        let request = HostRequest::ReadFile {
+            head: head.into(),
+            path: path.into(),
+        };
+        match self.call(request, Duration::from_secs(2)).await? {
+            HostResponse::ReadFile(result) => result,
+            _ => Err("unexpected host file response".into()),
+        }
+    }
+}
+
 // The generated program catches only pure-JS exceptions. Native filesystem and
 // engine failures are outside that catch and must not be text-classified.
 const JS_EXCEPTION_MARKER: &str = "__mcp_js_expected_exception__";
 
-enum JsResult {
+#[derive(Debug, Serialize, Deserialize)]
+pub enum JsResult {
     Head(String),
     JsException(String),
     Failed(String),
@@ -483,6 +744,21 @@ async fn read_file_at(store: &FsStore, head_hex: &str, path: &str) -> Option<Vec
     store.read_file(&entry).await.ok()
 }
 
+#[cfg(feature = "real-sled")]
+async fn read_file_at_checked(store: &FsStore, head_hex: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    let ca = parse_ca_hex(head_hex)
+        .ok_or_else(|| format!("invalid snapshot head: {head_hex}"))?;
+    let comps: Vec<String> = path
+        .trim_start_matches('/')
+        .split('/')
+        .map(str::to_string)
+        .collect();
+    let Some(entry) = store.resolve_file(Some(ca), &comps).await.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    store.read_file(&entry).await.map(Some).map_err(|e| e.to_string())
+}
+
 async fn current_leader(nodes: &HashMap<String, Arc<ClusterNode>>) -> Option<String> {
     for name in ["n0", "n1", "n2"] {
         if let Some(n) = nodes.get(name) {
@@ -499,7 +775,15 @@ const HOSTS: [&str; 4] = ["n0", "n1", "n2", "observer"];
 fn blank(status: Err2) -> ScenarioResult { ScenarioResult { status, events: Vec::new(), acked: Vec::new(), unknown: Vec::new(), failed: Vec::new(), final_heads: BTreeMap::new(), model: BTreeMap::new(), artifact_dir: None } }
 type Err2 = Result<String, String>;
 
-/// Execute the scenario against the real cluster under turmoil.
+#[cfg(feature = "real-sled")]
+#[path = "scenario_real.rs"]
+mod real;
+
+#[cfg(feature = "real-sled")]
+fn run_scenario(scenario: &Scenario) -> ScenarioResult { real::run_scenario(scenario) }
+
+/// Ordinary sled control: the original scenario runner remains unchanged.
+#[cfg(not(feature = "real-sled"))]
 fn run_scenario(scenario: &Scenario) -> ScenarioResult {
     RUN_ID.with(|c| {
         *c.borrow_mut() = format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
@@ -563,10 +847,18 @@ fn run_scenario(scenario: &Scenario) -> ScenarioResult {
                     ));
                     let db = {
                         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                        let mut reported = false;
                         loop {
-                            match sled::Config::new().path(&db_path).open() {
+                            let config = sled::Config::new().path(&db_path);
+                            #[cfg(feature = "real-sled")]
+                            let config = config.flush_every_ms(None);
+                            match config.open() {
                                 Ok(db) => break db,
                                 Err(e) if tokio::time::Instant::now() < deadline => {
+                                    if !reported {
+                                        eprintln!("[SCENARIO_IO] {name} path={db_path:?} first sled open error: {e}");
+                                        reported = true;
+                                    }
                                     tokio::time::sleep(Duration::from_millis(10)).await;
                                     let _ = e;
                                 }
@@ -710,8 +1002,9 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
                         let mut rg: Vec<String> = Vec::new();
                         for host in g {
                             let h = if host == "current_leader" { leader.clone() } else { host.clone() };
-                            let is_leader_group = leader_group == Some(gi);
-                            if h == leader && !is_leader_group { continue; }
+                            // Suppress duplicate leader names only when a dynamic
+                            // selector chose its group. Explicit names must work too.
+                            if leader_group.is_some_and(|chosen| h == leader && gi != chosen) { continue; }
                             if !rg.contains(&h) { rg.push(h); }
                         }
                         resolved.push(rg);
@@ -835,6 +1128,78 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             events.push(ScenarioEvent::Restart { at_ms: now_ms(start), node });
         }
     }
+    // A pre-fault acknowledgment is not post-recovery progress. A leader may
+    // still be re-electing when links heal, so retry only uncertain/conflicting
+    // publishes within the recovery budget. Every retry has a distinct JS
+    // write and operation ID; no timeout is interpreted as non-commit.
+    let mut fresh_write_acked = false;
+    let mut fresh_attempted_iteration = None;
+    if sc.asserts.contains(&Assertion::FreshWriteSucceeds) {
+        let target = sc.workload.op.resolve_node(&leader);
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(sc.recovery.deadline_ms.min(3000));
+        for retry in 0..5 {
+            if retry > 0 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if tokio::time::Instant::now() >= deadline { break; }
+            }
+            let iteration = sc.workload.count + retry;
+            op_id += 1;
+            events.push(ScenarioEvent::Invoke { at_ms: now_ms(start), op_id, node: target.clone() });
+            let mut fresh_head_advanced = false;
+            let outcome = if crashed.iter().any(|n| n == &target || n == &follower) {
+                // Old handles are not generation-fenced after a crash. Fail
+                // closed until host-owned fresh incarnations are implemented.
+                Outcome::Failed { error: "fresh JS probe after a crashed host requires host-local reopen".into() }
+            } else if let Op::RunJs { program, .. } = &sc.workload.op {
+                match run_js(&op_engine, &program.render_js(iteration)).await {
+                    JsResult::Head(head) => {
+                        fresh_attempted_iteration = Some(iteration);
+                        attempted.push(head.clone());
+                        match parse_ca_hex(&head) {
+                            None => Outcome::Failed { error: "fresh JS returned invalid head".into() },
+                            Some(ca) => match observer_store.resolve("main").await {
+                                Err(_) => Outcome::Unknown,
+                                Ok(expect) => {
+                                    fresh_head_advanced = expect.as_ref() != Some(&ca);
+                                    match observer_store.cas("main", expect, ca, None).await {
+                                        Ok(true) => Outcome::Acked { head },
+                                        Ok(false) => Outcome::Conflict,
+                                        Err(_) => Outcome::Unknown,
+                                    }
+                                },
+                            },
+                        }
+                    }
+                    JsResult::Failed(error) | JsResult::JsException(error) => Outcome::Failed { error },
+                    JsResult::TimedOut => Outcome::Failed { error: "fresh JS timed out".into() },
+                }
+            } else {
+                Outcome::Failed { error: "fresh write requires a modeled JS program".into() }
+            };
+            let terminal_failure = matches!(&outcome, Outcome::Failed { .. });
+            match &outcome {
+                Outcome::Acked { head } => {
+                    // An acknowledged CAS of the existing head is a no-op,
+                    // not a fresh snapshot publication.
+                    fresh_write_acked = fresh_head_advanced;
+                    acked.push(head.clone());
+                    if let Op::RunJs { program, .. } = &sc.workload.op {
+                        for step in &program.0 {
+                            let Step::Write { path, bytes } = step;
+                            model.insert(path.clone(), bytes.replace("{i}", &iteration.to_string()).into_bytes());
+                        }
+                    }
+                }
+                Outcome::Unknown => unknown.push(format!("op{op_id}")),
+                Outcome::Failed { error } => failed.push(format!("op{op_id}:{error}")),
+                _ => {}
+            }
+            events.push(ScenarioEvent::Respond { at_ms: now_ms(start), op_id, node: target.clone(), outcome });
+            if fresh_write_acked || terminal_failure { break; }
+        }
+    }
+
     // Convergence: every node's head must reach a value in the legal target
     // set: the last acked head, or the head of a final unresolved operation
     // (an unknown outcome may have committed; it is only reconciled by
@@ -890,7 +1255,7 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             if let Op::RunJs { program, .. } = &sc.workload.op {
                 for step in &program.0 {
                     if let Step::Write { path, bytes } = step {
-                        m.insert(path.clone(), bytes.replace("{i}", &(sc.workload.count.saturating_sub(1)).to_string()).into_bytes());
+                        m.insert(path.clone(), bytes.replace("{i}", &fresh_attempted_iteration.unwrap_or_else(|| sc.workload.count.saturating_sub(1)).to_string()).into_bytes());
                     }
                 }
             }
@@ -898,6 +1263,8 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
         };
         let passed = if *assertion == Assertion::NoUnexpectedJsFailure {
             failed.is_empty()
+        } else if *assertion == Assertion::FreshWriteSucceeds {
+            fresh_write_acked
         } else {
             check_assertion(assertion, &observer_store, &fs_store, &final_heads, &acked, &unknown, &model, &reconcile).await
         };
@@ -958,10 +1325,17 @@ async fn check_assertion(
             true
         }
         Assertion::NoUnexpectedJsFailure => true, // checked against runner failures above
-        Assertion::FreshWriteSucceeds => {
-            // A post-recovery fresh op is recorded through the normal
-            // workload; a scenario asserting this must have acked something.
-            !acked.is_empty()
-        }
+        Assertion::FreshWriteSucceeds => false, // handled by the runner post-recovery probe
+    }
+}
+
+#[cfg(feature = "real-sled")]
+impl Drop for ScenarioHost {
+    fn drop(&mut self) {
+        eprintln!("PROBE ScenarioHost::drop ENTER t={}ms", server::engine::console::probe_ms());
+        self.console_bridge.revoke();
+        self._pump.abort();
+        self._console_pump.abort();
+        eprintln!("PROBE ScenarioHost::drop DONE t={}ms", server::engine::console::probe_ms());
     }
 }

@@ -225,3 +225,93 @@ fn unmodeled_uncaught_error_is_not_misclassified_by_its_text() {
     assert!(result.status.is_err(), "untagged failures must not pass the oracle");
     assert_eq!(result.last_outcome().map(|(kind, _)| kind), Some("failed"));
 }
+
+#[test]
+fn fresh_write_requires_a_post_recovery_ack_not_an_old_commit() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.faults = vec![Fault::Partition {
+        at_ms: 900,
+        groups: vec![vec!["current_leader".into()], vec!["n0".into()], vec!["n1".into()], vec!["n2".into()]],
+    }];
+    scenario.recovery.heal_all = false;
+    scenario.recovery.deadline_ms = 600;
+    scenario.asserts = vec![Assertion::FreshWriteSucceeds];
+    let result = scenario.run_and_dump("fresh-write-no-quorum");
+    assert_eq!(result.acked.len(), 1, "the initial write must ack: {:?}", result.events);
+    assert!(result.events.iter().any(|event| matches!(event,
+        ScenarioEvent::Assert { name, passed: false, .. } if name == "FreshWriteSucceeds"
+    )), "an old ack cannot prove fresh progress: {:?}", result.events);
+}
+
+#[test]
+fn fixed_name_partition_isolates_all_three_voters() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.faults = vec![Fault::Partition {
+        at_ms: 900,
+        groups: vec![vec!["n0".into()], vec!["n1".into()], vec!["n2".into()]],
+    }];
+    scenario.asserts = vec![Assertion::ReplicasConvergeAfterRecovery];
+    let result = scenario.run_and_dump("fixed-name-partition");
+    let links: Vec<_> = result.events.iter().filter_map(|event| match event {
+        ScenarioEvent::Partition { a, b, .. } => Some(format!("{a}-{b}")),
+        _ => None,
+    }).collect();
+    assert_eq!(links, ["n0-n1", "n0-n2", "n1-n2"], "all named voters must be isolated");
+}
+
+#[test]
+fn fresh_write_after_heal_is_a_new_acknowledged_js_publish() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.faults = vec![
+        Fault::Partition {
+            at_ms: 900,
+            groups: vec![vec!["current_leader".into()], vec!["n0".into()], vec!["n1".into()], vec!["n2".into()]],
+        },
+        Fault::HealAll { at_ms: 1500 },
+    ];
+    scenario.asserts = vec![
+        Assertion::FreshWriteSucceeds,
+        Assertion::AckedCommitsInLegalHistory,
+        Assertion::ReplicasConvergeAfterRecovery,
+        Assertion::PublishedSnapshotMatchesModel,
+    ];
+    let result = scenario.run_and_dump("fresh-write-after-heal");
+    result.expect_status("all assertions passed");
+    assert_eq!(result.acked.len(), 2, "initial and fresh publish must ack: {:?}", result.events);
+    let invokes: Vec<_> = result.events.iter().filter(|event| matches!(event, ScenarioEvent::Invoke { .. })).collect();
+    assert!(invokes.len() >= 2, "fresh progress needs a separate JS invocation");
+    let last_heal = result.events.iter().filter_map(|event| match event {
+        ScenarioEvent::HealAll { at_ms } => Some(*at_ms),
+        _ => None,
+    }).max().expect("recovery heal event");
+    assert!(result.events.iter().any(|event| matches!(event,
+        ScenarioEvent::Respond { at_ms, outcome: engine_cluster_tests::scenario::Outcome::Acked { .. }, .. }
+            if *at_ms > last_heal
+    )), "the new acknowledged publish must follow recovery: {:?}", result.events);
+    assert!(result.events.iter().any(|event| matches!(event,
+        ScenarioEvent::Assert { name, passed: true, .. } if name == "FreshWriteSucceeds"
+    )));
+}
+
+#[test]
+fn same_head_ack_does_not_count_as_fresh_progress() {
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.faults.clear();
+    if let Op::RunJs { program, .. } = &mut scenario.workload.op {
+        *program = Program(vec![Step::Write {
+            path: "/data/iteration".into(),
+            bytes: "constant-payload".into(),
+        }]);
+    }
+    scenario.asserts = vec![Assertion::FreshWriteSucceeds];
+    let result = scenario.run_and_dump("same-head-not-fresh");
+    assert_eq!(result.acked.first(), result.acked.last(), "constant program should yield the same head");
+    assert!(result.status.is_err(), "a same-head CAS is not fresh progress: {:?}", result.events);
+}
