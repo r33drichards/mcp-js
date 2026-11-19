@@ -1245,6 +1245,14 @@ impl Engine {
     }
 }
 
+struct CloseHostToolRun<'a>(&'a host_tools::HostToolRun);
+
+impl Drop for CloseHostToolRun<'_> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 impl Engine {
     /// Preserve artifact content blocks for Rust transports without serializing them through JSON.
     pub async fn invoke_tool_response(
@@ -1273,14 +1281,17 @@ impl Engine {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         if request.name == "run_js" && (host_tools.is_some() || self.session_capable() && wait) {
-            if let Some(channel) = &host_tools {
+            let _host_tool_guard = if let Some(channel) = host_tools.as_deref() {
                 if self.heap_enabled() || self.mcp_client_manager().is_some() {
                     return Err(RuntimeError::InvalidConfig {
                         message: "Host tools require an engine without heap snapshots or upstream MCP".into(),
                     });
                 }
                 channel.start()?;
-            }
+                Some(CloseHostToolRun(channel))
+            } else {
+                None
+            };
             // Register while protected from shutdown, but let cancellation,
             // unrelated tools and shutdown proceed while this request waits.
             let submitted = crate::mcp_dispatch::submit_run_js(
@@ -1309,9 +1320,6 @@ impl Engine {
                 (Ok(id), None) => crate::mcp_dispatch::wait_for_execution(self, id).await,
                 (Err(error), _) => json!({"error": error}),
             };
-            if let Some(channel) = host_tools {
-                channel.close();
-            }
             return Ok(response.into());
         }
         let result = self

@@ -11,7 +11,7 @@ for (const method of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'exe
 }
 syncBuiltinESMExports();
 const { Engine, EngineConfigBuilder, ExecutionLimitsBuilder, ToolCallRequestBuilder, createToolRuntime } = await import('@wholelottahoopla/mcp-js-node');
-const engine = Engine.createStateless(64n, 1n);
+const engine = Engine.createStateless(64n, 5n);
 try {
   const result = JSON.parse(engine.callTool('run_js', JSON.stringify({ code: 'console.log(await Promise.resolve(6 * 7))' }), undefined, undefined));
   assert.equal(result.error, undefined);
@@ -70,6 +70,40 @@ try {
   });
   const timedOut = await hanging.runJs(code);
   assert.equal(timedOut.status, 'timed_out');
+  const rejecting = createToolRuntime(engine, {
+    server: 'host',
+    tools: { echo: { ...definition, run: () => Promise.reject(Object.create(null)) } },
+  });
+  const failure = await rejecting.runJs(`
+    try {
+      await mcp.callTool("host", "echo", {});
+    } catch (error) {
+      console.log(JSON.stringify(error.result));
+    }
+  `);
+  assert.equal(failure.status, 'completed', JSON.stringify(failure));
+  assert.deepEqual(JSON.parse(failure.output), {
+    content: [{ type: 'text', text: 'Host tool failed' }],
+    isError: true,
+  });
+  assert.equal((await first.runJs(code)).output.trim(), 'first: hello');
+
+  const startupAbort = new AbortController();
+  const deferredEngine = {
+    async invokeTool(request) {
+      await Promise.resolve();
+      return engine.invokeTool(request);
+    },
+  };
+  const starting = createToolRuntime(deferredEngine, {
+    server: 'host',
+    tools: { echo: { ...definition, run: () => assert.fail('aborted tool must not run') } },
+  });
+  const reason = new Error('cancelled before native startup');
+  const pending = starting.runJs(code, startupAbort.signal);
+  startupAbort.abort(reason);
+  await assert.rejects(pending, error => error === reason);
+
   const controller = new AbortController();
   const cancelled = createToolRuntime(engine, {
     server: 'host',

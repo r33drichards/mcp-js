@@ -22,6 +22,15 @@ export interface ToolRuntimeResult {
   execution_id?: string;
 }
 
+function formatToolError(error: unknown): string {
+  try {
+    const message = error instanceof Error ? error.message : error;
+    return String(message);
+  } catch {
+    return "Host tool failed";
+  }
+}
+
 /** Bind a host's tool authority once and allocate a separate channel for each execution. */
 export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig) {
   const { server } = config;
@@ -71,7 +80,7 @@ export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig)
               const result = await handler(JSON.parse(argumentsJson), controller.signal);
               payload = JSON.stringify(result) ?? "null";
             } catch (error) {
-              payload = error instanceof Error ? error.message : String(error);
+              payload = formatToolError(error);
               failed = true;
             }
             if (!controller.signal.aborted) channel.respond(id, payload, failed);
@@ -90,6 +99,9 @@ export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig)
         const result = await Promise.race([run, serving.then(() => run)]);
         signal?.throwIfAborted();
         return JSON.parse(result) as ToolRuntimeResult;
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw error;
       } finally {
         signal?.removeEventListener("abort", abort);
         abort();

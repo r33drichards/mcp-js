@@ -223,3 +223,47 @@ async fn waiting_request_does_not_block_other_tools_or_cancellation() {
     assert_eq!(result["status"], "cancelled", "{result}");
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn dropping_invocation_closes_pending_host_consumer() {
+    use server::engine::{ToolDefinition, host_tools::HostToolRun};
+    use std::time::Duration;
+
+    initialize_v8();
+    let engine = Engine::create_stateless(64, 10).unwrap();
+    let channel = HostToolRun::create(
+        "host".into(),
+        vec![ToolDefinition {
+            name: "echo".into(),
+            description: None,
+            input_schema_json: r#"{"type":"object"}"#.into(),
+        }],
+    )
+    .unwrap();
+
+    let mut invocation = Box::pin(engine.invoke_tool_response(ToolCallRequest {
+        name: "run_js".into(),
+        arguments_json: json!({"code": "await mcp.callTool('host', 'echo', {})"}).to_string(),
+        session_id: None,
+        mcp_headers: None,
+        host_tools: Some(channel.clone()),
+    }));
+
+    tokio::select! {
+        call = tokio::time::timeout(Duration::from_secs(5), channel.next_call()) => {
+            assert_eq!(call.expect("guest reached the host").unwrap().name, "echo");
+        }
+        _ = &mut invocation => panic!("invocation finished before the host responded"),
+    }
+
+    let mut pending = Box::pin(channel.next_call());
+    assert!(futures::poll!(&mut pending).is_pending());
+    drop(invocation);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("dropping the invocation wakes the host consumer")
+            .is_none()
+    );
+    engine.shutdown().await;
+}
