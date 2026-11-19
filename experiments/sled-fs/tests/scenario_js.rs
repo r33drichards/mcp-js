@@ -116,3 +116,41 @@ fn filesystem_snapshot_and_chunk_survive_host_reopen() {
     });
     sim.run().unwrap();
 }
+
+#[test]
+fn blocking_worker_blobs_are_flushed_by_host_and_reopen() {
+    use server::engine::heap_storage::{HeapStorage, HostBlobStorage, SledHeapStorage};
+    use std::sync::Arc;
+    let mut sim = turmoil::Builder::new().build();
+    sim.host("n0", || async {
+        let config = || {
+            sled::Config::new()
+                .path("/worker-blobs")
+                .flush_every_ms(None)
+        };
+        let db = config().open().unwrap();
+        let storage = Arc::new(SledHeapStorage::new(db.clone()).unwrap());
+        let (bridge, pump) = HostBlobStorage::bridge(storage);
+        let pump = tokio::spawn(pump);
+        let from_worker = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                bridge.put("payload", b"worker bytes").await.unwrap();
+                bridge.get("payload").await.unwrap()
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(from_worker, b"worker bytes");
+        pump.abort();
+        let _ = pump.await;
+        drop(db);
+        let reopened = SledHeapStorage::new(config().open().unwrap()).unwrap();
+        assert_eq!(reopened.get("payload").await.unwrap(), b"worker bytes");
+        Ok(())
+    });
+    sim.run().unwrap();
+}

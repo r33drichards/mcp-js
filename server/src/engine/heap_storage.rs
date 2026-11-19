@@ -87,6 +87,90 @@ impl HeapStorage for MemoryHeapStorage {
     }
 }
 
+use tokio::sync::{mpsc, oneshot};
+
+enum HostBlobRequest {
+    Put(String, Vec<u8>, oneshot::Sender<Result<(), String>>),
+    Get(String, oneshot::Sender<Result<Vec<u8>, String>>),
+    List(oneshot::Sender<Result<Vec<String>, String>>),
+    Delete(String, oneshot::Sender<Result<(), String>>),
+    Contains(String, oneshot::Sender<Result<bool, String>>),
+}
+
+/// V8-worker-safe blob handle. Only the pump owns the actual backend; dropping
+/// it on host crash closes this generation's channel and fences old workers.
+#[derive(Clone)]
+pub struct HostBlobStorage {
+    tx: mpsc::Sender<HostBlobRequest>,
+}
+
+impl HostBlobStorage {
+    /// Spawn the returned pump on the owning host's Tokio executor. Never run
+    /// the pump on a blocking worker or retain it across a host incarnation.
+    pub fn bridge(
+        storage: Arc<dyn HeapStorage>,
+    ) -> (Self, impl std::future::Future<Output = ()> + Send + 'static) {
+        let (tx, mut rx) = mpsc::channel(16);
+        let pump = async move {
+            while let Some(request) = rx.recv().await {
+                match request {
+                    HostBlobRequest::Put(name, data, reply) => {
+                        let _ = reply.send(storage.put(&name, &data).await);
+                    }
+                    HostBlobRequest::Get(name, reply) => {
+                        let _ = reply.send(storage.get(&name).await);
+                    }
+                    HostBlobRequest::List(reply) => {
+                        let _ = reply.send(storage.list().await);
+                    }
+                    HostBlobRequest::Delete(name, reply) => {
+                        let _ = reply.send(storage.delete(&name).await);
+                    }
+                    HostBlobRequest::Contains(name, reply) => {
+                        let _ = reply.send(storage.contains(&name).await);
+                    }
+                }
+            }
+        };
+        (Self { tx }, pump)
+    }
+
+    async fn call<T>(
+        &self,
+        request: impl FnOnce(oneshot::Sender<Result<T, String>>) -> HostBlobRequest,
+    ) -> Result<T, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(request(tx))
+            .await
+            .map_err(|_| "host blob service is no longer running".to_string())?;
+        rx.await
+            .map_err(|_| "host blob service stopped during request".to_string())?
+    }
+}
+
+#[async_trait]
+impl HeapStorage for HostBlobStorage {
+    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.call(|reply| HostBlobRequest::Put(name.to_owned(), data.to_vec(), reply))
+            .await
+    }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.call(|reply| HostBlobRequest::Get(name.to_owned(), reply))
+            .await
+    }
+    async fn list(&self) -> Result<Vec<String>, String> {
+        self.call(HostBlobRequest::List).await
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        self.call(|reply| HostBlobRequest::Delete(name.to_owned(), reply))
+            .await
+    }
+    async fn contains(&self, name: &str) -> Result<bool, String> {
+        self.call(|reply| HostBlobRequest::Contains(name.to_owned(), reply))
+            .await
+    }
+}
 /// Persistent blob storage backed by a host-owned sled database.
 /// Under Turmoil, invoke this only on the owning simulated host; V8 workers
 /// must use a host-command bridge rather than this sled handle.
