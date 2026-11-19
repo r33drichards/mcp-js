@@ -15,7 +15,7 @@
 //! materialises a whole `Manifest`; it walks the tree lazily so a multi-TB
 //! snapshot costs O(touched paths), not O(total).
 
-use crate::engine::fs_chunker::{chunk_refs, decompress, maybe_compress, SMALL_FILE_MAX, MAX};
+use crate::engine::fs_chunker::{chunk_refs, decompress_into, maybe_compress, SMALL_FILE_MAX, MAX};
 use crate::engine::fs_tree::{components_of, path_of, tree_key, TreeChild, TreeNode};
 use crate::engine::heap_storage::{HeapStorage, MemoryHeapStorage};
 use blake3::Hash;
@@ -160,7 +160,7 @@ impl FsStore {
                         .get(&key)
                         .await
                         .map_err(|e| anyhow::anyhow!("get chunk: {e}"))?;
-                    out.extend_from_slice(&decompress(&stored)?);
+                    decompress_into(&stored, &mut out)?;
                 }
                 Ok(out)
             }
@@ -176,19 +176,43 @@ impl FsStore {
     /// the in-op reads pure local-cache hits. Already-local blobs are skipped
     /// cheaply via `HeapStorage::contains`.
     pub async fn prefetch(&self, root: [u8; 32]) -> anyhow::Result<()> {
+        const PARALLEL_CHUNKS: usize = 96;
+        const PARALLEL_NODES: usize = 128;
         let mut stack = vec![root];
+        let mut lookahead = HashMap::with_capacity(PARALLEL_NODES);
         while let Some(id) = stack.pop() {
-            // Fetching the node populates the cache (write-through) and lets us
-            // walk its children.
-            let node = self.get_node(&id).await?;
+            // Fetch the next few pending nodes together. Hold their results
+            // until the normal depth-first walk reaches those directories.
+            let node = if let Some(result) = lookahead.remove(&id) {
+                let result: anyhow::Result<Arc<TreeNode>> = result;
+                result?
+            } else {
+                let mut ids = vec![id];
+                for next in stack.iter().rev().take(PARALLEL_NODES - 1) {
+                    if ids.len() + lookahead.len() >= PARALLEL_NODES {
+                        break;
+                    }
+                    if !ids.contains(next) && !lookahead.contains_key(next) {
+                        ids.push(*next);
+                    }
+                }
+                let mut results = futures::future::join_all(ids.iter().map(|key| self.get_node(key)))
+                    .await
+                    .into_iter();
+                let node = results.next().expect("current directory was requested")?;
+                lookahead.extend(ids.into_iter().skip(1).zip(results));
+                node
+            };
+            let mut active = Vec::new();
             for child in node.children.values() {
                 if let Some(entry) = &child.file {
                     if let Content::Chunks(hashes) = &entry.content {
                         for h in hashes {
-                            self.blobs
-                                .warm(&chunk_key(h))
-                                .await
-                                .map_err(|e| anyhow::anyhow!("warm chunk: {e}"))?;
+                            if active.len() == PARALLEL_CHUNKS || active.contains(&h) {
+                                self.warm_batch(&active).await?;
+                                active.clear();
+                            }
+                            active.push(h);
                         }
                     }
                 }
@@ -196,6 +220,22 @@ impl FsStore {
                     stack.push(d);
                 }
             }
+            if !active.is_empty() {
+                self.warm_batch(&active).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn warm_batch(&self, hashes: &[&[u8; 32]]) -> anyhow::Result<()> {
+        for result in futures::future::join_all(
+            hashes
+                .iter()
+                .map(|hash| async move { self.blobs.warm(&chunk_key(hash)).await }),
+        )
+        .await
+        {
+            result.map_err(|e| anyhow::anyhow!("warm chunk: {e}"))?;
         }
         Ok(())
     }
