@@ -622,12 +622,29 @@ fn dropping_scenario_host_stops_its_blob_pump() {
 fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
     use engine_cluster_tests::scenario::{ScenarioHost, ScenarioHostClient};
     use server::cluster::{ClusterConfig, ClusterNode, Role};
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
     use std::time::Duration;
     use turmoil::net::TcpListener;
 
     let stage = Arc::new(AtomicUsize::new(0));
     let generation = Arc::new(AtomicUsize::new(0));
+    let request_done = Arc::new(AtomicUsize::new(0));
+    let test_done = Arc::new(AtomicBool::new(false));
+    {
+        let stage = stage.clone();
+        let generation = generation.clone();
+        let request_done = request_done.clone();
+        let test_done = test_done.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(20));
+            if !test_done.load(Ordering::SeqCst) {
+                eprintln!("[DEBUG-stale-worker] stalled: stage={} generation={} request_done={}",
+                    stage.load(Ordering::SeqCst), generation.load(Ordering::SeqCst),
+                    request_done.load(Ordering::SeqCst));
+                std::process::abort();
+            }
+        });
+    }
     let mut sim = turmoil::Builder::new().simulation_duration(Duration::from_secs(30)).build();
     let host_stage = stage.clone();
     let opened = generation.clone();
@@ -681,7 +698,8 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
             }
         }
     });
-    sim.client("observer", async {
+    let finished = request_done.clone();
+    sim.client("observer", async move {
         let client = ScenarioHostClient::new("n0");
         for _ in 0..100 {
             if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
@@ -689,6 +707,7 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
         }
         let code = "console.log('worker-entered' + 'x'.repeat(5000));             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);             console.log('stale-after-crash' + 'y'.repeat(5000));";
         let _ = client.run_js(code).await;
+        finished.store(1, Ordering::SeqCst);
         Ok(())
     });
     for _ in 0..50_000 {
@@ -696,6 +715,8 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
         if stage.load(Ordering::SeqCst) == 1 { break; }
     }
     assert_eq!(stage.load(Ordering::SeqCst), 1, "old worker never entered JS");
+    assert_eq!(request_done.load(Ordering::SeqCst), 0,
+        "JS completed before the controller crash; no in-flight worker was tested");
     sim.crash("n0");
     sim.bounce("n0");
     for _ in 0..50_000 {
@@ -710,4 +731,5 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
         if stage.load(Ordering::SeqCst) == 3 { break; }
     }
     assert_eq!(stage.load(Ordering::SeqCst), 3, "reopened host did not check console");
+    test_done.store(true, Ordering::SeqCst);
 }
