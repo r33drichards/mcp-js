@@ -10,7 +10,7 @@ for (const method of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'exe
   childProcess[method] = () => { throw new Error('Unexpected subprocess'); };
 }
 syncBuiltinESMExports();
-const { Engine, EngineConfigBuilder, ExecutionLimitsBuilder, ToolCallRequestBuilder, ToolRuntimeBuilder, createToolRuntime } = await import('@wholelottahoopla/mcp-js-node');
+const { Engine, EngineConfigBuilder, ExecutionLimitsBuilder, ToolCallRequestBuilder, createToolRuntime } = await import('@wholelottahoopla/mcp-js-node');
 const engine = Engine.createStateless(64n, 1n);
 try {
   const result = JSON.parse(engine.callTool('run_js', JSON.stringify({ code: 'console.log(await Promise.resolve(6 * 7))' }), undefined, undefined));
@@ -27,21 +27,23 @@ try {
     description: 'Echo a message',
     inputSchema: { type: 'object', properties: { message: { type: 'string' } } },
   };
-  const base = new ToolRuntimeBuilder().server('host');
-  assert.throws(() => new ToolRuntimeBuilder().build(), /Host tool server/);
-  const bind = prefix => createToolRuntime(engine, base.registerTool('echo', {
-    ...definition,
-    async run(args) {
-      await Promise.resolve();
-      return prefix + args.message;
+  const bind = prefix => createToolRuntime(engine, {
+    server: 'host',
+    tools: {
+      echo: {
+        ...definition,
+        async run(args) {
+          await Promise.resolve();
+          return prefix + args.message;
+        },
+      },
     },
-  }).build());
-  const noStubs = base.registerTool('echo', { ...definition, run: args => args })
-    .stubs(false).build();
-  assert.equal(base.build().tools.size, 0);
-  assert.deepEqual(createToolRuntime(engine, noStubs).listTools(), []);
-  const registered = base.registerTool('echo', { ...definition, run: args => args });
-  assert.throws(() => registered.registerTool('echo', { ...definition, run: args => args }), /unique/);
+  });
+  assert.deepEqual(createToolRuntime(engine, {
+    server: 'host',
+    stubs: false,
+    tools: { echo: { ...definition, run: args => args } },
+  }).listTools(), []);
   const first = bind('first: ');
   const second = bind('second: ');
   assert.deepEqual(first.listTools()[0].inputSchema, definition.inputSchema);
@@ -62,20 +64,25 @@ try {
   const unknown = await first.runJs('await mcp.callTool("host", "missing", {})');
   assert.equal(unknown.status, 'failed');
   assert.match(unknown.error, /Unknown host tool/);
-  const hanging = createToolRuntime(engine, base.registerTool('echo', {
-    ...definition,
-    run: () => new Promise(() => {}),
-  }).build());
+  const hanging = createToolRuntime(engine, {
+    server: 'host',
+    tools: { echo: { ...definition, run: () => new Promise(() => {}) } },
+  });
   const timedOut = await hanging.runJs(code);
   assert.equal(timedOut.status, 'timed_out');
   const controller = new AbortController();
-  const cancelled = createToolRuntime(engine, base.registerTool('echo', {
-    ...definition,
-    run() {
-      controller.abort();
-      return null;
+  const cancelled = createToolRuntime(engine, {
+    server: 'host',
+    tools: {
+      echo: {
+        ...definition,
+        run() {
+          controller.abort();
+          return null;
+        },
+      },
     },
-  }).build());
+  });
   await assert.rejects(cancelled.runJs(code, controller.signal), { name: 'AbortError' });
 
 } finally {
@@ -114,20 +121,21 @@ allow if {
   const hookedEngine = Engine.create(config);
   try {
     let calls = 0;
-    const toolConfig = new ToolRuntimeBuilder()
-      .server('host')
-      .stubPrefix('discover__')
-      .registerTool('echo', {
-        description: 'Echo a message',
-        inputSchema: { type: 'object' },
-        run(args) {
-          calls++;
-          assert.equal(args.rewritten, true);
-          return args.message;
+    const runtime = createToolRuntime(hookedEngine, {
+      server: 'host',
+      stubPrefix: 'discover__',
+      tools: {
+        echo: {
+          description: 'Echo a message',
+          inputSchema: { type: 'object' },
+          run(args) {
+            calls++;
+            assert.equal(args.rewritten, true);
+            return args.message;
+          },
         },
-      })
-      .build();
-    const runtime = createToolRuntime(hookedEngine, toolConfig);
+      },
+    });
     assert.equal(runtime.listTools()[0].name, 'discover__host__echo');
     const success = await runtime.runJs('console.log((await mcp.callTool("host", "echo", { message: "allowed" })).content[0].text)');
     assert.equal(success.status, 'completed', JSON.stringify(success));

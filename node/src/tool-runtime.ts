@@ -6,56 +6,11 @@ export interface HostTool {
   run(args: Record<string, unknown>, signal: AbortSignal): unknown;
 }
 
-type RegisteredTool = Readonly<Omit<HostTool, "inputSchema"> & { inputSchemaJson: string }>;
-
 export interface ToolRuntimeConfig {
   readonly server: string;
-  readonly tools: ReadonlyMap<string, RegisteredTool>;
-  readonly stubs: boolean;
+  readonly tools: Readonly<Record<string, HostTool>>;
+  readonly stubs?: boolean;
   readonly stubPrefix?: string;
-}
-
-/** Assemble a reusable configuration with immutable setters, like EngineConfigBuilder. */
-export class ToolRuntimeBuilder {
-  #config: ToolRuntimeConfig = { server: "", tools: new Map(), stubs: true };
-
-  #with(changes: Partial<ToolRuntimeConfig>): ToolRuntimeBuilder {
-    const builder = new ToolRuntimeBuilder();
-    builder.#config = { ...this.#config, ...changes };
-    return builder;
-  }
-
-  server(name: string): ToolRuntimeBuilder {
-    return this.#with({ server: name });
-  }
-
-  registerTool(name: string, tool: HostTool): ToolRuntimeBuilder {
-    if (!name || this.#config.tools.has(name)) {
-      throw new Error(`Host tool name must be nonempty and unique: ${name}`);
-    }
-    const tools = new Map(this.#config.tools);
-    tools.set(name, Object.freeze({
-      description: tool.description,
-      inputSchemaJson: JSON.stringify(tool.inputSchema),
-      run: tool.run,
-    }));
-    return this.#with({ tools });
-  }
-
-  stubs(enabled: boolean): ToolRuntimeBuilder {
-    return this.#with({ stubs: enabled });
-  }
-
-  stubPrefix(prefix: string): ToolRuntimeBuilder {
-    return this.#with({ stubPrefix: prefix });
-  }
-
-  build(): ToolRuntimeConfig {
-    if (!this.#config.server || this.#config.server.includes("__")) {
-      throw new Error("Host tool server must be nonempty and cannot contain '__'");
-    }
-    return { ...this.#config, tools: new Map(this.#config.tools) };
-  }
 }
 
 export interface ToolRuntimeResult {
@@ -71,12 +26,13 @@ export interface ToolRuntimeResult {
 export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig) {
   const { server } = config;
   const handlers = new Map<string, HostTool["run"]>();
-  const definitions = Array.from(config.tools, ([name, { description, inputSchemaJson, run }]) => {
+  const definitions = Object.entries(config.tools).map(([name, { description, inputSchema, run }]) => {
     handlers.set(name, run);
-    return { name, description, inputSchemaJson };
+    return { name, description, inputSchemaJson: JSON.stringify(inputSchema) };
   });
 
-  const exposedStubs = config.stubs ? hostToolStubs(server, definitions, config.stubPrefix) : [];
+  const stubs = hostToolStubs(server, definitions, config.stubPrefix);
+  const exposedStubs = config.stubs === false ? [] : stubs;
   const stubTargets = new Map(exposedStubs.map((stub, index) => [stub.name, definitions[index].name]));
 
   return {

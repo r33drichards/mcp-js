@@ -20,6 +20,6 @@ cp "$library" "$root/node/generated/libserver.so"
 cp "$root/node/src/tool-runtime.ts" "$root/node/generated/tool-runtime.ts"
 cat >> "$root/node/generated/index.ts" <<'TS'
 
-export { ToolRuntimeBuilder, createToolRuntime } from "./tool-runtime.js";
+export { createToolRuntime } from "./tool-runtime.js";
 export type { HostTool, ToolRuntimeConfig, ToolRuntimeResult } from "./tool-runtime.js";
 TS

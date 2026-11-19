@@ -105,8 +105,8 @@ JSON; native API failures reject the Promise (or throw from `callTool`).
 
 ## Bind host tools to guest JavaScript
 
-`ToolRuntimeBuilder` registers tool schemas and handlers.
-`createToolRuntime(engine, config)` binds the built tool configuration.
+`createToolRuntime(engine, config)` binds a named registry of host tool schemas
+and handlers.
 Reuse the wrapper for calls that share the same permissions. For an app with
 request-specific tools, create one wrapper per request. Each run has its own
 request channel and can make up to 32 host tool calls. Internally,
@@ -118,28 +118,29 @@ second argument to `runJs` to cancel the execution. Validate arguments and
 enforce permissions in the handler.
 
 ```js
-import { Engine, ToolRuntimeBuilder, createToolRuntime } from '@wholelottahoopla/mcp-js-node';
+import { Engine, createToolRuntime } from '@wholelottahoopla/mcp-js-node';
 
 const engine = Engine.createStateless(64n, 5n);
 try {
-  const config = new ToolRuntimeBuilder()
-    .server("host")
-    .registerTool("echo", {
-      description: "Echo a message",
-      inputSchema: {
-        type: "object",
-        properties: { message: { type: "string" } },
-        required: ["message"],
+  const runtime = createToolRuntime(engine, {
+    server: "host",
+    tools: {
+      echo: {
+        description: "Echo a message",
+        inputSchema: {
+          type: "object",
+          properties: { message: { type: "string" } },
+          required: ["message"],
+        },
+        run({ message }) {
+          if (typeof message !== "string") {
+            throw new Error("Expected a message string");
+          }
+          return { message };
+        },
       },
-      run({ message }) {
-        if (typeof message !== "string") {
-          throw new Error("Expected a message string");
-        }
-        return { message };
-      },
-    })
-    .build();
-  const runtime = createToolRuntime(engine, config);
+    },
+  });
 
   // Advertise these discovery stubs alongside your model's run_js tool.
   console.log(runtime.listTools());
@@ -156,8 +157,8 @@ try {
 ```
 
 Guest code can also discover tools with `mcp.listTools("host")`. The stub
-definitions use the server's stub format and default `runjs__` prefix. Use
-`.stubs(false)` to hide them, or `.stubPrefix(prefix)` to change the prefix.
+definitions use the server's stub format and default `runjs__` prefix. Set
+`stubs: false` to hide them, or set `stubPrefix` to change the prefix.
 `runtime.stubInstructions(name, args)` returns the server-style redirect for a
 direct call to a known stub. The wrapper runs on engines without heap snapshots or upstream MCP.
 Host requests and JSON responses are limited to 256 KiB each.
