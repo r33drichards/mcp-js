@@ -11,7 +11,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -19,6 +19,8 @@ use std::{
 pub struct Objects {
     pub values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     pub fail_put: Arc<AtomicBool>,
+    pub hold_put: Arc<AtomicBool>,
+    pub put_started: Arc<AtomicUsize>,
 }
 pub struct S3 {
     pub endpoint: String,
@@ -38,6 +40,10 @@ impl S3 {
             headers: axum::http::HeaderMap,
             body: Bytes,
         ) -> Response {
+            objects.put_started.fetch_add(1, Ordering::SeqCst);
+            while objects.hold_put.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
             if objects.fail_put.load(Ordering::SeqCst) {
                 return StatusCode::FORBIDDEN.into_response();
             }

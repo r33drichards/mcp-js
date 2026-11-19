@@ -1,32 +1,38 @@
 # Shared content-addressed storage and metadata
 
-Status: design with a shared-core implementation in dependent PRs. Stacked on
-[#328](https://github.com/r33drichards/mcp-js/pull/328), which separates server
-artifact/console payloads from their database references. The progress section
-separates the implemented core from planned migrations. SQLite-backed Raft and
+Status: the shared core is implemented in consolidated
+[#328](https://github.com/r33drichards/mcp-js/pull/328). SQLite-backed Raft and
 stronger cluster read guarantees are not enabled.
 
 ## Implementation progress
 
-- [#332](https://github.com/r33drichards/mcp-js/pull/332): shared
-  `metadata_store::blob::BlobStorage`, `HeapStorage`/`RuntimeBlobs` compatibility
-  names, common backend construction, immutable directory/S3 writes, and
-  authoritative-first cache writes.
-- [#333](https://github.com/r33drichards/mcp-js/pull/333): typed SHA-256 content
-  references for new runtime objects, verification and deduplication independent
-  of artifact metadata, filesystem objects for direct execution registries, and
-  legacy reference readers. Heap/filesystem snapshot identities are preserved.
-- [#334](https://github.com/r33drichards/mcp-js/pull/334): revision/receipt
-  publication and optional `RaftMetadataStore`, with deterministic consensus-harness
-  contracts.
-  Stronger Raft reads fail as unsupported; pending mismatches remain provisional.
+- Shared `metadata_store::blob::BlobStorage`, compatibility aliases, common backend
+  construction, immutable directory/S3 writes, and authoritative-first caches.
+- Typed SHA-256 runtime objects, verified reads, and payload deduplication independent
+  of artifact metadata. Heap/filesystem snapshot identities are preserved.
+- Revision/receipt publication and an optional `RaftMetadataStore`, with deterministic
+  consensus contracts. Stronger Raft reads fail as unsupported; pending mismatches
+  remain provisional. Bounded scans apply direction and limit during Sled iteration.
+- Explicit `runtime_refs:v1:<hex tree name>` indexes separate new descriptors from
+  legacy inline bytes. Existing inline rows are never decoded by matching payload
+  prefixes. Legacy DynamoDB outer-tagged `runtime/<uuid>` references remain readable;
+  only canonical UUID paths are accepted. Earlier unmerged marker-only PR formats
+  are ambiguous with inline data and require an explicit export/migration if used.
+- Console blobs are batched at 256 KiB (raw inline constructors retain 4 KiB pages).
+  Page descriptors carry sizes and newline counts, so windows fetch only required
+  objects. Blob I/O uses four workers and a bounded queue of sixteen jobs, independent
+  of metadata; the default ten-second deadline includes queue time. Flush errors
+  propagate. `from_store` retains inline behavior until a blob backend is attached.
+- Directory writes sync file contents and required directory entries before metadata
+  publication. Cache fills and repairs use atomic sibling-file installation.
+- Explicit local runtime reclamation uses registered owners and filesystem leases;
+  see [runtime blob maintenance](runtime-blob-maintenance.md). S3 and shared
+  heap/filesystem/runtime GC remain separate work.
 
 The publication facade and Raft adapter are explicit Rust APIs. Existing domain
-cluster routes and persisted metadata formats are retained; server bootstrap does
-not silently switch runtime metadata to Raft. Domain-by-domain adoption,
-barrier-protected Raft reads, backend relocation, and shared garbage collection
-remain separate migrations. This implements the shared core and tests its
-composition, not every migration described below.
+cluster routes remain in use; server bootstrap does not switch runtime metadata to
+Raft. Domain adoption, barrier-protected Raft reads, and backend relocation remain
+separate migrations.
 
 ## Problem and direction
 
@@ -244,8 +250,9 @@ migration. No on-read missing-object fallback is introduced.
 Reachability roots include labels/reflogs, retained session heap/fs references,
 artifact versions, and retained console page indexes. The existing filesystem
 GC recognizes only filesystem object prefixes; it is not a runtime/heap GC.
-Content deduplication means deleting one reference cannot immediately delete its
-blob. Defer shared sweeping until publication pins/leases, GC epochs, or an
+Local runtime collection now uses exclusive maintenance leases and all registered
+metadata owners. Content deduplication means deleting one reference cannot immediately
+delete its blob. Defer cross-domain shared sweeping until publication pins/leases, GC epochs, or an
 explicit quiescence protocol protect concurrent writers and lagging readers.
 A naive metadata scan plus an age threshold does not establish that safety.
 

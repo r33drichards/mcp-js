@@ -4,9 +4,9 @@
 //! backed by sled. Each node runs an HTTP server for Raft RPCs and a simple
 //! data API.
 
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use http_body_util::BodyExt;
-use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode, body::Incoming};
 use hyper_util::rt::TokioIo;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_RAFT_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -26,23 +26,29 @@ const MAX_RAFT_TERM: u64 = (1 << 63) - 1;
 /// Length is public; equal-length credential bytes are compared in constant time.
 pub fn bearer_matches(header: Option<&str>, token: &str) -> bool {
     use subtle::ConstantTimeEq;
-    header.and_then(|h| h.strip_prefix("Bearer "))
+    header
+        .and_then(|h| h.strip_prefix("Bearer "))
         .is_some_and(|value| bool::from(value.as_bytes().ct_eq(token.as_bytes())))
 }
 
 fn rpc_client(token: Option<&str>) -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(token) = token {
-        if token.is_empty() { return Err("empty cluster credential".into()); }
+        if token.is_empty() {
+            return Err("empty cluster credential".into());
+        }
         let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| "invalid cluster credential")?;
         value.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, value);
     }
-    reqwest::Client::builder().default_headers(headers)
+    reqwest::Client::builder()
+        .default_headers(headers)
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(5)).connect_timeout(Duration::from_millis(500))
-        .build().map_err(|e| e.to_string())
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_millis(500))
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 const APPLIED_KEY: &[u8] = b"\0raft_applied";
@@ -525,7 +531,11 @@ impl ClusterNode {
     }
 
     /// Credentials are process-local and never persisted with membership or logs.
-    pub fn new_fixed_authenticated(config: ClusterConfig, db: sled::Db, token: String) -> Result<Arc<Self>, String> {
+    pub fn new_fixed_authenticated(
+        config: ClusterConfig,
+        db: sled::Db,
+        token: String,
+    ) -> Result<Arc<Self>, String> {
         let client = rpc_client(Some(&token))?;
         let mut node = Self::new_fixed(config, db)?;
         let exclusive = Arc::get_mut(&mut node).expect("unshared new node");
@@ -692,10 +702,15 @@ impl ClusterNode {
 
     fn persist_log_entry(&self, entry: &LogEntry) -> Result<(), String> {
         let bytes = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
-        if bytes.len() > MAX_APPEND_BYTES { return Err("Raft entry exceeds replication budget".into()); }
-        self.durable(self.db.open_tree("raft_log").and_then(|tree| {
-            tree.insert(entry.index.to_be_bytes(), bytes)
-        })).map(|_| ())
+        if bytes.len() > MAX_APPEND_BYTES {
+            return Err("Raft entry exceeds replication budget".into());
+        }
+        self.durable(
+            self.db
+                .open_tree("raft_log")
+                .and_then(|tree| tree.insert(entry.index.to_be_bytes(), bytes)),
+        )
+        .map(|_| ())
     }
 
     fn truncate_log_from(&self, from_index: u64) -> Result<(), String> {
@@ -778,7 +793,11 @@ impl ClusterNode {
     async fn start_election(self: &Arc<Self>) {
         let (term, last_log_index, last_log_term, peers, voter_count) = {
             let mut state = self.state.write().await;
-            let Some(next) = state.current_term.checked_add(1).filter(|t| *t <= MAX_RAFT_TERM) else {
+            let Some(next) = state
+                .current_term
+                .checked_add(1)
+                .filter(|t| *t <= MAX_RAFT_TERM)
+            else {
                 self.shutdown.cancel();
                 return;
             };
@@ -823,8 +842,15 @@ impl ClusterNode {
             let client = self.http_client.clone();
             let url = format!("http://{}/raft/request-vote", peer);
             requests.push(async move {
-                client.post(&url).json(&req).send().await.ok()?
-                    .json::<RequestVoteResponse>().await.ok()
+                client
+                    .post(&url)
+                    .json(&req)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<RequestVoteResponse>()
+                    .await
+                    .ok()
             });
         }
 
@@ -844,7 +870,9 @@ impl ClusterNode {
                 }
             };
             if let Some(resp) = response {
-                if resp.term > MAX_RAFT_TERM { continue; }
+                if resp.term > MAX_RAFT_TERM {
+                    continue;
+                }
                 let mut state = self.state.write().await;
                 if resp.term > state.current_term {
                     state.current_term = resp.term;
@@ -868,7 +896,8 @@ impl ClusterNode {
 
         if votes >= majority {
             let mut state = self.state.write().await;
-            if self.healthy().is_ok() && state.current_term == term && state.role == Role::Candidate {
+            if self.healthy().is_ok() && state.current_term == term && state.role == Role::Candidate
+            {
                 state.role = Role::Leader;
                 state.leader_id = Some(self.config.node_id.clone());
                 let last_index = state.last_log_index();
@@ -984,13 +1013,21 @@ impl ClusterNode {
                 0
             };
             let mut bytes = 0;
-            let entries: Vec<LogEntry> = state.log.iter().filter(|e| e.index >= next_idx)
-                .take(MAX_APPEND_ENTRIES).take_while(|entry| {
+            let entries: Vec<LogEntry> = state
+                .log
+                .iter()
+                .filter(|e| e.index >= next_idx)
+                .take(MAX_APPEND_ENTRIES)
+                .take_while(|entry| {
                     let size = serde_json::to_vec(entry).map_or(MAX_RAFT_BODY_BYTES, |b| b.len());
-                    if bytes + size > MAX_APPEND_BYTES { return false; }
+                    if bytes + size > MAX_APPEND_BYTES {
+                        return false;
+                    }
                     bytes += size;
                     true
-                }).cloned().collect();
+                })
+                .cloned()
+                .collect();
             // peer_addrs already includes self (set during initialization)
             (
                 state.current_term,
@@ -1046,7 +1083,9 @@ impl ClusterNode {
         ae_resp: AppendEntriesResponse,
     ) {
         let mut state = self.state.write().await;
-        if ae_resp.term > MAX_RAFT_TERM { return; }
+        if ae_resp.term > MAX_RAFT_TERM {
+            return;
+        }
         if ae_resp.term > state.current_term {
             state.current_term = ae_resp.term;
             state.role = Role::Follower;
@@ -1153,8 +1192,13 @@ impl ClusterNode {
             term,
             success: false,
         };
-        if self.healthy().is_err() || req.term > MAX_RAFT_TERM || req.term < state.current_term
-            || req.entries.iter().any(|entry| serde_json::to_vec(entry).map_or(true, |bytes| bytes.len() > MAX_APPEND_BYTES)) {
+        if self.healthy().is_err()
+            || req.term > MAX_RAFT_TERM
+            || req.term < state.current_term
+            || req.entries.iter().any(|entry| {
+                serde_json::to_vec(entry).map_or(true, |bytes| bytes.len() > MAX_APPEND_BYTES)
+            })
+        {
             return reject(state.current_term);
         }
         if let Some(voters) = &self.fixed_voters {
@@ -1264,7 +1308,8 @@ impl ClusterNode {
         let mut state = self.state.write().await;
 
         if self.healthy().is_err()
-            || req.term > MAX_RAFT_TERM || req.last_log_term > req.term
+            || req.term > MAX_RAFT_TERM
+            || req.last_log_term > req.term
             || self
                 .fixed_voters
                 .as_ref()
@@ -1809,15 +1854,35 @@ impl ClusterNode {
     /// Scan all keys with the given prefix from the replicated data tree.
     /// Returns (key, value) pairs sorted lexicographically.
     pub fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, String> {
-        let data_tree = self.db.open_tree("data").map_err(|e| e.to_string())?;
-        let mut results = Vec::new();
-        for item in data_tree.scan_prefix(prefix.as_bytes()) {
-            let (key, value) = item.map_err(|e| e.to_string())?;
-            let key_str = String::from_utf8_lossy(&key).to_string();
-            let val_str = String::from_utf8_lossy(&value).to_string();
-            results.push((key_str, val_str));
+        self.scan_prefix_window(prefix, false, None)
+    }
+
+    /// Apply ordering and bounds before reading/decoding values.
+    pub fn scan_prefix_window(
+        &self,
+        prefix: &str,
+        reverse: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<(String, String)>, String> {
+        if limit == Some(0) {
+            return Ok(vec![]);
         }
-        Ok(results)
+        let data = self.db.open_tree("data").map_err(|e| e.to_string())?;
+        let rows = data.scan_prefix(prefix.as_bytes());
+        let rows: Box<dyn Iterator<Item = sled::Result<(sled::IVec, sled::IVec)>>> = if reverse {
+            Box::new(rows.rev())
+        } else {
+            Box::new(rows)
+        };
+        rows.take(limit.unwrap_or(usize::MAX))
+            .map(|row| {
+                let (key, value) = row.map_err(|e| e.to_string())?;
+                Ok((
+                    String::from_utf8(key.to_vec()).map_err(|e| e.to_string())?,
+                    String::from_utf8(value.to_vec()).map_err(|e| e.to_string())?,
+                ))
+            })
+            .collect()
     }
 
     /// Return the current status of this node.
@@ -1873,14 +1938,24 @@ async fn route(
     req: Request<Incoming>,
 ) -> Result<Response<String>, Infallible> {
     if let Some(token) = &node.rpc_bearer {
-        if !bearer_matches(req.headers().get("authorization").and_then(|h| h.to_str().ok()), token) {
+        if !bearer_matches(
+            req.headers()
+                .get("authorization")
+                .and_then(|h| h.to_str().ok()),
+            token,
+        ) {
             return Ok(error_response(401, "unauthorized cluster request"));
         }
     } else if node.has_fixed_voters() {
         return Ok(error_response(503, "cluster authentication unavailable"));
     }
-    if req.headers().get("content-length").and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok()).is_some_and(|n| n > MAX_RAFT_BODY_BYTES as u64) {
+    if req
+        .headers()
+        .get("content-length")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .is_some_and(|n| n > MAX_RAFT_BODY_BYTES as u64)
+    {
         return Ok(error_response(413, "cluster request exceeds body limit"));
     }
     // Reject all requests on a shut-down node.  The TCP listener stops
@@ -2014,8 +2089,13 @@ pub async fn start_cluster_server(
         return Err("fixed-voter networking requires a cluster credential".into());
     }
     let addr = if node.has_fixed_voters() {
-        node.config.advertise_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{}", node.config.cluster_port))
-    } else { format!("0.0.0.0:{}", node.config.cluster_port) };
+        node.config
+            .advertise_addr
+            .clone()
+            .unwrap_or_else(|| format!("127.0.0.1:{}", node.config.cluster_port))
+    } else {
+        format!("0.0.0.0:{}", node.config.cluster_port)
+    };
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
         "[{}] Cluster HTTP server listening on {}",

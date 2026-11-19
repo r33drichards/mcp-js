@@ -103,9 +103,13 @@ impl MetadataStore for RaftMetadataStore {
         limit: Option<usize>,
     ) -> Result<Vec<Row>> {
         let tree_prefix = self.tree_prefix(tree);
-        let mut rows = self
+        let rows = self
             .node
-            .scan_prefix(&format!("{}{}", tree_prefix, hex::encode(prefix)))?
+            .scan_prefix_window(
+                &format!("{}{}", tree_prefix, hex::encode(prefix)),
+                reverse,
+                limit,
+            )?
             .into_iter()
             .map(|(key, value)| {
                 Ok((
@@ -114,12 +118,7 @@ impl MetadataStore for RaftMetadataStore {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        if reverse {
-            rows.reverse()
-        }
-        if let Some(limit) = limit {
-            rows.truncate(limit)
-        }
+
         Ok(rows)
     }
     async fn compare_and_swap(

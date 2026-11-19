@@ -327,3 +327,42 @@ async fn follower_references_need_shared_blobs_and_do_not_replicate_payload_byte
 fn node_for_follower() -> Arc<ClusterNode> {
     node("follower")
 }
+
+#[tokio::test]
+async fn raft_metadata_scan_applies_direction_and_limits_before_decoding_values() {
+    let node = leader().await;
+    let _committer = Committer::new(node.clone());
+    let store = RaftMetadataStore::new(node.clone(), "scan").unwrap();
+    store
+        .put(Write::new("ordered", b"a", b"first"))
+        .await
+        .unwrap();
+    store
+        .put(Write::new("ordered", b"z", b"last"))
+        .await
+        .unwrap();
+    let key = node.state.read().await.log[0].key.clone();
+    let prefix = key.rsplit_once(":k:").unwrap().0;
+    // A malformed middle value must not affect an intact bounded window.
+    node.db
+        .open_tree("data")
+        .unwrap()
+        .insert(format!("{prefix}:k:6d"), b"not-hex")
+        .unwrap();
+    assert_eq!(
+        store.scan("ordered", b"", false, Some(1)).await.unwrap(),
+        vec![(b"a".to_vec(), b"first".to_vec())]
+    );
+    assert_eq!(
+        store.scan("ordered", b"", true, Some(1)).await.unwrap(),
+        vec![(b"z".to_vec(), b"last".to_vec())]
+    );
+    assert!(
+        store
+            .scan("ordered", b"", false, Some(0))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.scan("ordered", b"", false, None).await.is_err());
+}
