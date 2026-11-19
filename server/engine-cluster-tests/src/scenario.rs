@@ -563,10 +563,15 @@ fn run_scenario(scenario: &Scenario) -> ScenarioResult {
                     ));
                     let db = {
                         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                        let mut reported = false;
                         loop {
                             match sled::Config::new().path(&db_path).open() {
                                 Ok(db) => break db,
                                 Err(e) if tokio::time::Instant::now() < deadline => {
+                                    if !reported {
+                                        eprintln!("[SCENARIO_IO] {name} path={db_path:?} first sled open error: {e}");
+                                        reported = true;
+                                    }
                                     tokio::time::sleep(Duration::from_millis(10)).await;
                                     let _ = e;
                                 }
