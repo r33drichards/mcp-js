@@ -662,21 +662,31 @@ fn stale_console_writer_is_fenced_after_fresh_reopen() {
             node.start_background_tasks().unwrap();
             let host = ScenarioHost::new_with_generation(node, db.clone(), incarnation as u64);
             if incarnation == 1 {
+                eprintln!("PROBE test: gen1 host up t={}ms", server::engine::console::probe_ms());
                 let _ = host_bridge.set(host.console_bridge());
                 stage.store(1, Ordering::SeqCst);
             } else {
+                eprintln!("PROBE test: gen2 host up t={}ms", server::engine::console::probe_ms());
+                let mut waits = 0usize;
                 while stage.load(Ordering::SeqCst) < 2 {
+                    waits += 1;
+                    if waits == 1 || waits == 100 || waits == 1000 {
+                        eprintln!("PROBE test: gen2 stage-wait #{} stage={} t={}ms", waits, stage.load(Ordering::SeqCst), server::engine::console::probe_ms());
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
+                eprintln!("PROBE test: gen2 passed stage gate (waits={}) t={}ms", waits, server::engine::console::probe_ms());
                 let output: Vec<u8> = db.tree_names().into_iter()
                     .filter(|name| name.starts_with(b"ex:"))
                     .flat_map(|name| db.open_tree(name).unwrap().iter()
                         .flat_map(|entry| entry.unwrap().1.to_vec()))
                     .collect();
+                eprintln!("PROBE test: gen2 read {} ex-bytes t={}ms", output.len(), server::engine::console::probe_ms());
                 assert!(String::from_utf8_lossy(&output).contains("worker-entered"),
                     "pre-crash console output must survive the fresh reopen");
                 assert!(!String::from_utf8_lossy(&output).contains("fenced-stale-probe"),
                     "a post-crash stale writer must not reach the reopened generation");
+                eprintln!("PROBE test: gen2 checks done t={}ms", server::engine::console::probe_ms());
                 stage.store(3, Ordering::SeqCst);
             }
             let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
