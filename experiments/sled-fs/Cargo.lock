@@ -5389,6 +5389,7 @@ dependencies = [
  "scheduler-raft-audit",
  "serde",
  "serde_json",
+ "server",
  "sled",
  "tokio",
  "turmoil",
