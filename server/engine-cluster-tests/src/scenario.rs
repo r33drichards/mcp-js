@@ -419,6 +419,31 @@ fn engine_with_cluster(node: Arc<ClusterNode>, tag: &str) -> (Arc<Engine>, Arc<F
     (engine, store)
 }
 
+/// Build an engine entirely within the simulated host that owns its sled DB.
+/// The returned pump must be dropped with that host incarnation.
+#[cfg(feature = "real-sled")]
+pub fn engine_with_cluster_host(
+    node: Arc<ClusterNode>,
+    db: sled::Db,
+) -> (Arc<Engine>, Arc<FsStore>, tokio::task::JoinHandle<()>) {
+    use server::engine::heap_storage::{HostBlobStorage, SledHeapStorage};
+
+    let registry = ExecutionRegistry::from_db(db.clone());
+    let labels = LabelStore::from_db(db.clone()).with_cluster(node);
+    let storage = Arc::new(SledHeapStorage::new(db).expect("host blob tree"));
+    let (worker_storage, pump) = HostBlobStorage::bridge(storage);
+    let pump = tokio::spawn(pump);
+    let store = Arc::new(FsStore::new(Arc::new(worker_storage)));
+    let fs_config = FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
+    let engine = Engine::from_engine(
+        Engine::new_stateless(64 * 1024 * 1024, 30, 4)
+            .with_fs_config(fs_config)
+            .with_execution_registry(Arc::new(registry))
+            .with_fs_snapshots(store.clone(), Arc::new(labels)),
+    );
+    (engine, store, pump)
+}
+
 // The generated program catches only pure-JS exceptions. Native filesystem and
 // engine failures are outside that catch and must not be text-classified.
 const JS_EXCEPTION_MARKER: &str = "__mcp_js_expected_exception__";
