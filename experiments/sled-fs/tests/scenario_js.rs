@@ -199,7 +199,7 @@ fn host_owned_engine_runs_js_on_patched_sled() {
                 .execute()
                 .await
                 .unwrap();
-            let mut head = None;
+            let mut head: Option<String> = None;
             for _ in 0..1200 {
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 let info = engine.get_execution(id.clone()).unwrap();
