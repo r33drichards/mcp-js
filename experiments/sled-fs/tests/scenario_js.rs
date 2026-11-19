@@ -715,7 +715,12 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
             if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let code = "console.log('worker-entered' + 'x'.repeat(5000));             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);             console.log('stale-after-crash' + 'y'.repeat(5000));";
+        // The marker page is written, then the worker parks in ~500ms chunks,
+        // emitting a heartbeat page after each wait. Each heartbeat send wakes
+        // the stalled host runtime, so the controller observes the marker and
+        // crashes the host WHILE the worker is still parked mid-JS — the
+        // post-crash console log is then a genuine stale-worker write.
+        let code = "console.log('worker-entered' + 'x'.repeat(5000)); const sab = new Int32Array(new SharedArrayBuffer(4)); for (let i = 0; i < 5; i++) { Atomics.wait(sab, 0, 0, 500); console.log('hb' + i + 'z'.repeat(5000)); } Atomics.wait(sab, 0, 0, 500); console.log('stale-after-crash' + 'y'.repeat(5000));";
         let _ = client.run_js(code).await;
         eprintln!("PROBE test: client run_js returned t={}ms", server::engine::console::probe_ms());
         finished.store(1, Ordering::SeqCst);
