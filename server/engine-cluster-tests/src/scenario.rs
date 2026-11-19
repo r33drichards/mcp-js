@@ -505,6 +505,11 @@ impl ScenarioHost {
         }
     }
 
+    /// Diagnostic handle for verifying the owning host stops its blob pump.
+    pub fn pump_abort_handle(&self) -> tokio::task::AbortHandle {
+        self._pump.abort_handle()
+    }
+
     /// Serve one request and close the connection. A host loop owns this value.
     pub async fn serve_request(&self, mut stream: TcpStream) -> Result<(), String> {
         let mut raw = Vec::new();
@@ -1307,5 +1312,12 @@ async fn check_assertion(
         }
         Assertion::NoUnexpectedJsFailure => true, // checked against runner failures above
         Assertion::FreshWriteSucceeds => false, // handled by the runner post-recovery probe
+    }
+}
+
+#[cfg(feature = "real-sled")]
+impl Drop for ScenarioHost {
+    fn drop(&mut self) {
+        self._pump.abort();
     }
 }
