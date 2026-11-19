@@ -665,10 +665,16 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
                             stage.store(1, Ordering::SeqCst);
                             break;
                         }
-                        if polls == 1 || polls == 10 || polls == 100 || polls == 1000 || polls == 10000 {
+                        if polls == 1 || polls == 10 || polls == 100 {
                             eprintln!("PROBE test: watcher poll#{} bytes={} t={}ms", polls, output.len(), server::engine::console::probe_ms());
                         }
-                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        // Yield-burst polling: simulated timers never fire while an
+                        // in-flight spawn_blocking worker stalls the host runtime,
+                        // so timer-based polls cannot observe the worker mid-flight.
+                        // Yield bursts stay ready and get polled at every runtime
+                        // wake (each worker heartbeat send), without starving the
+                        // tick's own sleep once the burst ends.
+                        for _ in 0..50 { tokio::task::yield_now().await; }
                     }
                 });
             } else {
