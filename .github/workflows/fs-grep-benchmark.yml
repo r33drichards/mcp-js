@@ -1,0 +1,179 @@
+name: Filesystem grep benchmark
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fs-grep-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event.label.name == 'fs-benchmark' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.corpus.outputs.revision }}
+      shards: ${{ steps.corpus.outputs.shards }}
+      slices: ${{ steps.corpus.outputs.slices }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - id: corpus
+        name: Pin Wikipedia revision and plan slices
+        run: |
+          api=https://huggingface.co/api/datasets/marin-community/wikipedia-markdown
+          revision=$(curl -fsSL --retry 3 "$api" | jq -er '.sha | select(test("^[0-9a-f]{40}$"))')
+          shards=$(curl -fsSL --retry 3 "$api/tree/$revision?limit=1000" | jq -er '
+            select(length < 1000) | [.[] | select(.type == "file" and (.path | test("^enwiki_namespace_0_[0-9]+[.]jsonl[.]gz$")))] | length | select(. > 0)
+          ')
+          printf 'revision=%s\nshards=%s\nslices=%s\n' "$revision" "$shards" "$(jq -nc '[range(24)]')" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang libclang-dev pkg-config libssl-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fs-grep-release
+      - name: Build PR server
+        run: cargo build --locked --release -p server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fs-grep-server
+          path: target/release/server
+          if-no-files-found: error
+          retention-days: 2
+
+  benchmark:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        slice: ${{ fromJSON(needs.build.outputs.slices) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: fs-grep-server
+          path: benchmark-bin
+      - name: Benchmark local disk and S3-compatible storage
+        env:
+          AWS_ACCESS_KEY_ID: testing
+          AWS_SECRET_ACCESS_KEY: testing
+          AWS_REGION: us-east-1
+          AWS_ENDPOINT_URL: http://127.0.0.1:5019
+          AWS_S3_FORCE_PATH_STYLE: '1'
+          WIKI_REVISION: ${{ needs.build.outputs.revision }}
+          SLICES: ${{ needs.build.outputs.slices }}
+          SLICE: ${{ matrix.slice }}
+        run: |
+          set -o pipefail
+          chmod +x benchmark-bin/server
+          python3 -m venv "$RUNNER_TEMP/moto"
+          "$RUNNER_TEMP/moto/bin/pip" install 'moto[server]==5.2.5'
+          "$RUNNER_TEMP/moto/bin/moto_server" -H 127.0.0.1 -p 5019 > "$RUNNER_TEMP/moto.log" 2>&1 &
+          moto_pid=$!
+          trap 'kill "$moto_pid" 2>/dev/null || true' EXIT
+          curl -fsS --retry 10 --retry-connrefused -X PUT "$AWS_ENDPOINT_URL/fs-grep-benchmark"
+          options=()
+          if [[ "$SLICE" != 0 ]]; then options+=(--skip-mdn); fi
+          node loadtest/fs-grep.mjs --binary benchmark-bin/server --s3-bucket fs-grep-benchmark \
+            --wiki-revision "$WIKI_REVISION" --wiki-slice "$SLICE/$(jq length <<< "$SLICES")" \
+            "${options[@]}" | tee "$RUNNER_TEMP/fs-grep-$SLICE.jsonl"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fs-grep-result-${{ matrix.slice }}
+          path: ${{ runner.temp }}/fs-grep-${{ matrix.slice }}.jsonl
+          if-no-files-found: error
+          retention-days: 7
+
+  comment:
+    if: always() && github.event.label.name == 'fs-benchmark' && github.event.pull_request.head.repo.full_name == github.repository && !cancelled()
+    needs: [build, benchmark]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        if: needs.benchmark.result == 'success'
+        with:
+          pattern: fs-grep-result-*
+          merge-multiple: true
+          path: results
+      - uses: actions/github-script@v7
+        env:
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+          WIKI_REVISION: ${{ needs.build.outputs.revision }}
+          WIKI_SHARDS: ${{ needs.build.outputs.shards }}
+          SLICES: ${{ needs.build.outputs.slices }}
+        with:
+          script: |
+            const { readFileSync } = require('node:fs');
+            const assert = require('node:assert/strict');
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const commit = context.payload.pull_request.head.sha.slice(0, 12);
+            const lines = [`### Filesystem grep benchmark for \`${commit}\``, '', `[Workflow run](${run})`, ''];
+            if (process.env.BENCHMARK_RESULT !== 'success') {
+              lines.push('The full benchmark did not complete. See the workflow run for details.');
+            } else {
+              const totals = new Map();
+              const datasets = ['mdn', 'wikipedia'];
+              const backends = ['dir', 's3'];
+              const passes = [1, 2];
+              for (const slice of JSON.parse(process.env.SLICES)) {
+                const rows = readFileSync(`results/fs-grep-${slice}.jsonl`, 'utf8').trim().split('\n').map(JSON.parse);
+                const expected = new Set((slice === 0 ? datasets : ['wikipedia']).flatMap(
+                  dataset => backends.flatMap(backend => passes.map(pass => `${dataset}/${backend}/${pass}`))
+                ));
+                for (const row of rows) {
+                  const key = `${row.dataset}/${row.backend}/${row.pass}`;
+                  assert(expected.delete(key), `Unexpected row in slice ${slice}: ${key}`);
+                  const total = totals.get(key) ?? {};
+                  const fields = ['wall_ms', 'grep_ms', 'computer science', 'javascript', 'files'];
+                  if (row.dataset === 'wikipedia') fields.push('shards', 'articles');
+                  for (const field of fields) {
+                    assert(Number.isSafeInteger(row[field]) && row[field] >= 0, `Invalid ${field} in slice ${slice}`);
+                    total[field] = (total[field] ?? 0) + row[field];
+                  }
+                  totals.set(key, total);
+                }
+                assert.equal(expected.size, 0, `Missing rows in slice ${slice}`);
+              }
+              const wiki = totals.get('wikipedia/dir/1');
+              lines.push(
+                `Wikipedia revision \`${process.env.WIKI_REVISION}\`, ${wiki.shards.toLocaleString('en-US')} shards and ${wiki.articles.toLocaleString('en-US')} articles.`,
+                '',
+                '| Dataset | Backend | Pass | End-to-end (s) | JavaScript scan (s) | computer science | javascript |',
+                '| --- | --- | ---: | ---: | ---: | ---: | ---: |'
+              );
+              for (const dataset of datasets) {
+                for (const backend of backends) {
+                  for (const pass of passes) {
+                    const row = totals.get(`${dataset}/${backend}/${pass}`);
+                    if (dataset === 'wikipedia') assert.equal(row.shards, Number(process.env.WIKI_SHARDS));
+                    lines.push(`| ${dataset === 'mdn' ? 'MDN' : 'Wikipedia'} | ${backend === 'dir' ? 'Local disk' : 'S3 emulator'} | ${pass} | ${(row.wall_ms / 1000).toFixed(3)} | ${(row.grep_ms / 1000).toFixed(3)} | ${row['computer science']} | ${row.javascript} |`);
+                  }
+                }
+              }
+              lines.push('', 'End-to-end includes snapshot loading and staging. JavaScript scan measures the recursive search itself. Wikipedia timings sum the slices that ran on separate runners. The S3 configuration uses Moto.');
+            }
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.payload.pull_request.number,
+              body: lines.join('\n'),
+            });

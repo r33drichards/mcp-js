@@ -16,3 +16,5 @@ __pycache__/
 .mcpregistry*
 pi-checkout/
 node/pi-harness/node_modules/
+
+/.fs-grep-data/
