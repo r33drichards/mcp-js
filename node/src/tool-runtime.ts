@@ -1,17 +1,61 @@
 import { HostToolRun, ToolCallRequestBuilder, hostToolStubInstructions, hostToolStubs, type EngineLike } from "./index.js";
 
 export interface HostTool {
-  name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  run(args: Record<string, unknown>, signal: AbortSignal): unknown;
 }
 
+type RegisteredTool = Readonly<Omit<HostTool, "inputSchema"> & { inputSchemaJson: string }>;
+
 export interface ToolRuntimeConfig {
-  server: string;
-  tools: readonly HostTool[];
-  stubs?: boolean;
-  stubPrefix?: string;
-  call(name: string, args: Record<string, unknown>, signal: AbortSignal): unknown | Promise<unknown>;
+  readonly server: string;
+  readonly tools: ReadonlyMap<string, RegisteredTool>;
+  readonly stubs: boolean;
+  readonly stubPrefix?: string;
+}
+
+/** Assemble a reusable configuration with immutable setters, like EngineConfigBuilder. */
+export class ToolRuntimeBuilder {
+  #config: ToolRuntimeConfig = { server: "", tools: new Map(), stubs: true };
+
+  #with(changes: Partial<ToolRuntimeConfig>): ToolRuntimeBuilder {
+    const builder = new ToolRuntimeBuilder();
+    builder.#config = { ...this.#config, ...changes };
+    return builder;
+  }
+
+  server(name: string): ToolRuntimeBuilder {
+    return this.#with({ server: name });
+  }
+
+  registerTool(name: string, tool: HostTool): ToolRuntimeBuilder {
+    if (!name || this.#config.tools.has(name)) {
+      throw new Error(`Host tool name must be nonempty and unique: ${name}`);
+    }
+    const tools = new Map(this.#config.tools);
+    tools.set(name, Object.freeze({
+      description: tool.description,
+      inputSchemaJson: JSON.stringify(tool.inputSchema),
+      run: tool.run,
+    }));
+    return this.#with({ tools });
+  }
+
+  stubs(enabled: boolean): ToolRuntimeBuilder {
+    return this.#with({ stubs: enabled });
+  }
+
+  stubPrefix(prefix: string): ToolRuntimeBuilder {
+    return this.#with({ stubPrefix: prefix });
+  }
+
+  build(): ToolRuntimeConfig {
+    if (!this.#config.server || this.#config.server.includes("__")) {
+      throw new Error("Host tool server must be nonempty and cannot contain '__'");
+    }
+    return { ...this.#config, tools: new Map(this.#config.tools) };
+  }
 }
 
 export interface ToolRuntimeResult {
@@ -25,15 +69,14 @@ export interface ToolRuntimeResult {
 
 /** Bind a host's tool authority once and allocate a separate channel for each execution. */
 export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig) {
-  const { server, call } = config;
-  const definitions = config.tools.map(tool => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchemaJson: JSON.stringify(tool.inputSchema),
-  }));
+  const { server } = config;
+  const handlers = new Map<string, HostTool["run"]>();
+  const definitions = Array.from(config.tools, ([name, { description, inputSchemaJson, run }]) => {
+    handlers.set(name, run);
+    return { name, description, inputSchemaJson };
+  });
 
-  const stubs = hostToolStubs(server, definitions, config.stubPrefix);
-  const exposedStubs = config.stubs === false ? [] : stubs;
+  const exposedStubs = config.stubs ? hostToolStubs(server, definitions, config.stubPrefix) : [];
   const stubTargets = new Map(exposedStubs.map((stub, index) => [stub.name, definitions[index].name]));
 
   return {
@@ -67,7 +110,10 @@ export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig)
             let payload: string;
             let failed = false;
             try {
-              payload = JSON.stringify(await call(name, JSON.parse(argumentsJson), controller.signal)) ?? "null";
+              const handler = handlers.get(name);
+              if (!handler) throw new Error(`Unknown host tool: ${name}`);
+              const result = await handler(JSON.parse(argumentsJson), controller.signal);
+              payload = JSON.stringify(result) ?? "null";
             } catch (error) {
               payload = error instanceof Error ? error.message : String(error);
               failed = true;
