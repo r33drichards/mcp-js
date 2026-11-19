@@ -518,6 +518,12 @@ impl ScenarioHost {
         self._pump.abort_handle()
     }
 
+    /// Handle to the host console bridge, for tests that must capture a
+    /// console writer before a crash and probe it afterwards.
+    pub fn console_bridge(&self) -> Arc<server::engine::console::HostConsoleBridge> {
+        self.console_bridge.clone()
+    }
+
     /// Serve one request and close the connection. A host loop owns this value.
     pub async fn serve_request(&self, mut stream: TcpStream) -> Result<(), String> {
         let mut raw = Vec::new();
