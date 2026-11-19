@@ -4,6 +4,14 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 pub trait BlobLease: Send + Sync {}
 impl<T: Send + Sync> BlobLease for T {}
 
+/// Optional cache staging scope. Implementations can reserve queued entries
+/// and protect resident data for the lifetime of the scope.
+#[async_trait]
+pub trait BlobStaging: Send + Sync {
+    fn reserve(&mut self, names: &[String]);
+    async fn warm(&self, name: &str) -> Result<(), String>;
+}
+
 #[async_trait]
 pub trait BlobStorage: Send + Sync + 'static {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String>;
@@ -51,6 +59,10 @@ pub trait BlobStorage: Send + Sync + 'static {
     /// fallback actually fetches. Used by `warm` to skip already-local blobs.
     async fn contains(&self, name: &str) -> Result<bool, String> {
         Ok(self.get(name).await.is_ok())
+    }
+
+    fn prefetch_staging(&self) -> Option<Box<dyn BlobStaging + '_>> {
+        None
     }
 
     /// Ensure a blob is materialized in this backend's local layer so a later

@@ -220,3 +220,21 @@ async fn test_capacity_bound_evicts_oldest_but_reads_still_succeed() {
     cleanup(&primary_dir);
     cleanup(&cache_dir);
 }
+
+#[tokio::test]
+async fn fresh_cache_creates_directories_for_put_and_warm() {
+    let root = tempfile::tempdir().unwrap();
+    let primary = FileHeapStorage::new(root.path().join("primary"));
+    let seed_dir = root.path().join("seed-cache");
+    let seed = WriteThroughCacheHeapStorage::new(primary.clone(), &seed_dir);
+    assert!(!seed_dir.exists());
+    seed.put("fstree:root", b"tree").await.unwrap();
+    assert_eq!(std::fs::read(seed_dir.join("fstree:root")).unwrap(), b"tree");
+
+    primary.put("nested/chunk", b"chunk").await.unwrap();
+    let scan_dir = root.path().join("scan-cache");
+    let scan = WriteThroughCacheHeapStorage::new(primary, &scan_dir);
+    assert!(!scan_dir.exists());
+    scan.warm("nested/chunk").await.unwrap();
+    assert_eq!(std::fs::read(scan_dir.join("nested/chunk")).unwrap(), b"chunk");
+}
