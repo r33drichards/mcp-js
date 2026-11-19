@@ -723,7 +723,9 @@ fn stale_console_writer_is_fenced_after_fresh_reopen() {
         if generation.load(Ordering::SeqCst) == 2 { break; }
     }
     assert_eq!(generation.load(Ordering::SeqCst), 2, "fresh DB did not reopen");
-    stage.store(2, Ordering::SeqCst);
+    // NOTE: no stage.store here — the client already set stage=2 (JS done),
+    // and the reopened host may have already advanced it to 3; overwriting
+    // would clobber that progress.
     for _ in 0..50_000 {
         sim.step().unwrap();
         if stage.load(Ordering::SeqCst) == 3 { break; }
