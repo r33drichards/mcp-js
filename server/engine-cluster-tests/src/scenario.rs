@@ -20,7 +20,7 @@ use server::engine::Engine;
 use server::engine::execution::ExecutionRegistry;
 use server::engine::fs::FsConfig;
 use server::engine::fs_store::FsStore;
-use server::engine::fs_labels::CaId;
+use server::engine::fs_labels::{CaId, RefLogEntry};
 use server::engine::fs_labels::LabelStore;
 use server::engine::opa::{EvalMode, PolicyChain};
 use server::engine::parse_ca_hex;
@@ -461,6 +461,7 @@ enum HostRequest {
     ReadFile { head: String, path: String },
     Resolve { label: String },
     Cas { label: String, expect: Option<CaId>, new: CaId },
+    Log { label: String },
 }
 
 #[cfg(feature = "real-sled")]
@@ -471,6 +472,7 @@ enum HostResponse {
     ReadFile(Option<Vec<u8>>),
     Resolve(Result<Option<CaId>, String>),
     Cas(Result<bool, String>),
+    Log(Result<Vec<RefLogEntry>, String>),
 }
 
 /// All handles, including the sled-backed label and blob stores, stay on the
@@ -547,6 +549,10 @@ impl ScenarioHost {
                 let labels = self.engine.label_store().ok_or("host label store missing")?;
                 HostResponse::Cas(labels.cas(&label, expect, new, None).await)
             }
+            HostRequest::Log { label } => {
+                let labels = self.engine.label_store().ok_or("host label store missing")?;
+                HostResponse::Log(labels.log(&label).await)
+            }
         };
         let body = serde_json::to_vec(&response).map_err(|e| e.to_string())?;
         let header = format!(
@@ -616,6 +622,13 @@ impl ScenarioHostClient {
         match self.call(request, Duration::from_secs(5)).await? {
             HostResponse::Cas(result) => result,
             _ => Err("unexpected host CAS response".into()),
+        }
+    }
+
+    pub async fn log(&self, label: &str) -> Result<Vec<RefLogEntry>, String> {
+        match self.call(HostRequest::Log { label: label.into() }, Duration::from_secs(2)).await? {
+            HostResponse::Log(result) => result,
+            _ => Err("unexpected host log response".into()),
         }
     }
 
