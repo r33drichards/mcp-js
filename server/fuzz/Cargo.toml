@@ -24,7 +24,7 @@ path = ".."
 
 [dependencies.deno_core]
 git = "https://github.com/r33drichards/deno_core"
-rev = "4a09194d0fb8dbe062fe066d82d7ad6bcaa4f39a"
+rev = "0eefbe29540db49e1a1d1cddc483b77296b7098f"
 
 # Prevent this from interfering with workspaces
 [workspace]

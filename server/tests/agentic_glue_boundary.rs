@@ -150,6 +150,17 @@ mod snapshot_gate {
         assert!(err.contains("checksum"), "expected a checksum error, got: {err}");
     }
 
+    #[test]
+    fn rejects_incompatible_snapshot_version_before_deserializing() {
+        let (result, _) = server::engine::execute_stateful(
+            "1",
+            Some(vec![0; MIN_PAYLOAD]),
+            ExecutionConfig::new(16 * 1024 * 1024),
+        );
+        let error = result.expect_err("an incompatible snapshot must not reach V8's deserializer");
+        assert!(error.contains("incompatible with this V8 runtime"), "{error}");
+    }
+
     /// The one legitimate path: a snapshot this server produced must survive a
     /// round-trip through the gate, and tampering with a single payload byte
     /// must be caught before the bytes could reach V8.

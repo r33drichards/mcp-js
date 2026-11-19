@@ -1517,8 +1517,6 @@ pub fn execute_stateful(
     let _ = compile_module;
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let params = create_params_with_heap_limit(heap_memory_max_bytes);
-
         // Box::leak to get &'static [u8] required by RuntimeOptions::startup_snapshot.
         // We reclaim the memory after the runtime is consumed by snapshot().
         let leaked_snapshot: Option<(*mut [u8], &'static [u8])> =
@@ -1533,7 +1531,24 @@ pub fn execute_stateful(
             eprintln!("snapshot not found, creating new isolate...");
         }
 
+        if let Some((ptr, snapshot)) = leaked_snapshot {
+            // V8 aborts on a version mismatch. IsValid checks the embedded
+            // version without deserializing, but requires enough header bytes.
+            let compatible = snapshot.len() >= MIN_SNAPSHOT_PAYLOAD
+                && snapshot.len() <= i32::MAX as usize
+                && v8::StartupData::from(snapshot).is_valid();
+            if !compatible {
+                // The compatibility check has finished and no isolate owns it.
+                unsafe { drop(Box::from_raw(ptr)) };
+                return Err(
+                    "Heap snapshot is incompatible with this V8 runtime; start with a new heap"
+                        .to_string(),
+                );
+            }
+        }
+
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
+        let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
         let mut extensions = Vec::new();
         if console_tree.is_some() || process_exit_state.is_some() {
