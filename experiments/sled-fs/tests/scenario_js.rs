@@ -584,3 +584,36 @@ fn scheduled_crash_interrupts_in_flight_js_publication() {
     assert!(invoke < crash && crash < respond,
         "fault missed in-flight publication: status={:?} events={:?}", result.status, result.events);
 }
+
+#[test]
+fn dropping_scenario_host_stops_its_blob_pump() {
+    use engine_cluster_tests::scenario::ScenarioHost;
+    use server::cluster::{ClusterConfig, ClusterNode};
+    use std::time::Duration;
+
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(2))
+        .build();
+    sim.host("n0", || async {
+        let db = sled::Config::new()
+            .path("/pump-drop")
+            .flush_every_ms(None)
+            .open()
+            .unwrap();
+        let node = ClusterNode::new(
+            ClusterConfig { node_id: "n0".into(), ..ClusterConfig::default() },
+            db.clone(),
+        );
+        let host = ScenarioHost::new(node, db);
+        let pump = host.pump_abort_handle();
+        assert!(!pump.is_finished(), "pump should run while host is alive");
+        drop(host);
+        for _ in 0..10 {
+            if pump.is_finished() { break; }
+            tokio::task::yield_now().await;
+        }
+        assert!(pump.is_finished(), "dropping the host detached its sled-backed blob pump");
+        Ok(())
+    });
+    sim.run().unwrap();
+}
