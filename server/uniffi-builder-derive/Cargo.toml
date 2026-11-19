@@ -5,8 +5,21 @@ edition = "2021"
 license = "MIT"
 description = "Derive a UniFFI-exported builder object for a uniffi::Record"
 
-[lints]
-workspace = true
+# These proc macros also build from standalone server sources in Nix.
+[lints.rust]
+unused_must_use = "deny"
+
+[lints.clippy]
+# Keep existing call sites buildable while surfacing errors they discard.
+let_underscore_must_use = "warn"
+map_err_ignore = "warn"
+match_wild_err_arm = "warn"
+panic_in_result_fn = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+unnecessary_wraps = "warn"
+# Preserve Clippy's default error for ignored partial reads and writes.
+unused_io_amount = "deny"
 
 [lib]
 proc-macro = true
