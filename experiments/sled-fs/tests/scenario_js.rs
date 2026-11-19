@@ -658,7 +658,7 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
                             stage.store(1, Ordering::SeqCst);
                             break;
                         }
-                        tokio::task::yield_now().await;
+                        tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                 });
             } else {
@@ -687,7 +687,7 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
             if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let code = "console.log('worker-entered' + 'x'.repeat(5000));             const until = Date.now() + 3000; while (Date.now() < until) {}             console.log('stale-after-crash' + 'y'.repeat(5000));";
+        let code = "console.log('worker-entered' + 'x'.repeat(5000));             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);             console.log('stale-after-crash' + 'y'.repeat(5000));";
         let _ = client.run_js(code).await;
         Ok(())
     });
