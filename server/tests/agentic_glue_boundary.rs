@@ -50,14 +50,11 @@ fn ensure_v8() {
 
 /// A temp sled tree for capturing console output, mirroring `sandbox_ops.rs`.
 fn console_tree() -> (sled::Tree, std::path::PathBuf) {
-    let tmp = std::env::temp_dir().join(format!(
-        "mcp-glue-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = tempfile::Builder::new()
+        .prefix("mcp-glue-test-")
+        .tempdir()
+        .expect("create unique console directory")
+        .keep();
     let db = sled::open(&tmp).expect("open sled db");
     let tree = db.open_tree("console").expect("open tree");
     (tree, tmp)
