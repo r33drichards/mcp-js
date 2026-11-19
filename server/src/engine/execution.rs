@@ -98,10 +98,15 @@ impl ExecutionRegistry {
     pub fn new(db_path: &str) -> Result<Self, String> {
         let db = sled::open(db_path)
             .map_err(|e| format!("Failed to open execution db at {}: {}", db_path, e))?;
-        Ok(Self {
+        Ok(Self::from_db(db))
+    }
+
+    /// Reuse a host-owned sled database instead of opening a second path.
+    pub fn from_db(db: sled::Db) -> Self {
+        Self {
             executions: Arc::new(DashMap::new()),
             db,
-        })
+        }
     }
 
     /// Register a new execution. Returns the sled tree for console output.
