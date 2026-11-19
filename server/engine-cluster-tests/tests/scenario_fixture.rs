@@ -298,3 +298,20 @@ fn fresh_write_after_heal_is_a_new_acknowledged_js_publish() {
         ScenarioEvent::Assert { name, passed: true, .. } if name == "FreshWriteSucceeds"
     )));
 }
+
+#[test]
+fn same_head_ack_does_not_count_as_fresh_progress() {
+    let mut scenario = parse_known_answer();
+    scenario.workload.count = 1;
+    scenario.faults.clear();
+    if let Op::RunJs { program, .. } = &mut scenario.workload.op {
+        *program = Program(vec![Step::Write {
+            path: "/data/iteration".into(),
+            bytes: "constant-payload".into(),
+        }]);
+    }
+    scenario.asserts = vec![Assertion::FreshWriteSucceeds];
+    let result = scenario.run_and_dump("same-head-not-fresh");
+    assert_eq!(result.acked.first(), result.acked.last(), "constant program should yield the same head");
+    assert!(result.status.is_err(), "a same-head CAS is not fresh progress: {:?}", result.events);
+}
