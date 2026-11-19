@@ -112,6 +112,9 @@ impl LabelStore {
     pub fn in_memory() -> Self {
         let db = sled::Config::new()
             .temporary(true)
+            // Ephemeral stores have no durability requirement; the Turmoil FS
+            // backend forbids periodic background flush threads.
+            .flush_every_ms(None)
             .open()
             .expect("open temporary sled db");
         Self::from_db(db)
