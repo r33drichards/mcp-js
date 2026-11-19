@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { checkDependencies, checkElf, checkTarball, packResult } from '../scripts/packaging.mjs';
 
 test('both npm packages identify the trusted publishing repository', () => {
@@ -102,6 +103,41 @@ test('release artifact staging follows the Nix result symlink', () => {
     symlinkSync('nix-output', join(directory, 'result'));
     execFileSync('bash', ['-e', '-c', script], { cwd: directory });
     assert.equal(readFileSync(join(directory, 'release-artifacts', 'package.tgz'), 'utf8'), 'validated tarball');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('GitHub release stages both tested SDKs without changing their bytes', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/npm-publish.yml', import.meta.url), 'utf8');
+  const match = workflow.match(/- name: Stage tar.gz release assets\n[\s\S]*?        run: \|\n((?:          .*\n)+)/);
+  assert.ok(match, 'Missing GitHub release asset staging script');
+  const script = match[1].replace(/^          /gm, '');
+  const directory = mkdtempSync(join(tmpdir(), 'github-sdk-staging-'));
+  try {
+    mkdirSync(join(directory, 'node', 'scripts'), { recursive: true });
+    mkdirSync(join(directory, 'scripts'));
+    for (const path of ['node/scripts/release-tag.mjs', 'scripts/release-policy.mjs']) {
+      cpSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), join(directory, path));
+    }
+    const artifacts = join(directory, 'release-artifacts');
+    mkdirSync(artifacts);
+    const version = '1.2.3-rc.1';
+    for (const sdk of ['client', 'node']) {
+      writeFileSync(join(artifacts, `wholelottahoopla-mcp-js-${sdk}-${version}.tgz`), `tested ${sdk} payload`);
+    }
+    const output = join(directory, 'output');
+    execFileSync('bash', ['-e', '-c', script], {
+      cwd: directory,
+      env: { ...process.env, TAG: `v${version}`, GITHUB_OUTPUT: output },
+    });
+    for (const sdk of ['client', 'node']) {
+      assert.equal(
+        readFileSync(join(artifacts, `wholelottahoopla-mcp-js-${sdk}-${version}.tar.gz`), 'utf8'),
+        `tested ${sdk} payload`,
+      );
+    }
+    assert.equal(readFileSync(output, 'utf8'), 'prerelease=true\nmake_latest=false\n');
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
