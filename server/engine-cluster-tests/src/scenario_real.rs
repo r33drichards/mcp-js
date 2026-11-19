@@ -30,6 +30,85 @@ async fn control_host(control: &Rc<RefCell<Control>>, action: HostAction) {
     }
 }
 
+async fn apply_fault(
+    fault: Fault,
+    leader: &str,
+    control: &Rc<RefCell<Control>>,
+    crashed: &mut Vec<String>,
+    events: &mut Vec<ScenarioEvent>,
+    start: tokio::time::Instant,
+) {
+    let at = now_ms(start);
+    match fault {
+        Fault::Crash { node, .. } => {
+            let target = match &node {
+                CrashTarget::Node(name) => name.clone(),
+                CrashTarget::CurrentLeader => current_leader()
+                    .await
+                    .map(|(name, _)| name)
+                    .unwrap_or_else(|| leader.to_owned()),
+            };
+            control_host(control, HostAction::Crash(target.clone())).await;
+            crashed.push(target.clone());
+            events.push(ScenarioEvent::Crash {
+                at_ms: at,
+                node: target.clone(),
+                target: format!("{node:?}={target}"),
+            });
+        }
+        Fault::HealAll { .. } => {
+            for a in 0..HOSTS.len() {
+                for b in a + 1..HOSTS.len() {
+                    turmoil::repair(HOSTS[a], HOSTS[b]);
+                }
+            }
+            events.push(ScenarioEvent::HealAll { at_ms: at });
+        }
+        Fault::Partition { groups, .. } => {
+            let chosen = groups
+                .iter()
+                .position(|g| g.iter().any(|h| h == "current_leader"));
+            let mut resolved = Vec::<Vec<String>>::new();
+            for (gi, group) in groups.iter().enumerate() {
+                let mut names = Vec::new();
+                for name in group {
+                    let name = if name == "current_leader" {
+                        leader.to_owned()
+                    } else {
+                        name.clone()
+                    };
+                    if chosen.is_some_and(|i| i != gi && name == leader) {
+                        continue;
+                    }
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                resolved.push(names);
+            }
+            let named: Vec<&str> = resolved.iter().flatten().map(String::as_str).collect();
+            let group_of =
+                |name: &str| resolved.iter().position(|g| g.iter().any(|n| n == name));
+            for a in 0..HOSTS.len() {
+                for b in a + 1..HOSTS.len() {
+                    let (x, y) = (HOSTS[a], HOSTS[b]);
+                    if named.contains(&x)
+                        && named.contains(&y)
+                        && group_of(x) != group_of(y)
+                    {
+                        turmoil::partition(x, y);
+                        events.push(ScenarioEvent::Partition {
+                            at_ms: at,
+                            a: x.into(),
+                            b: y.into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn run_scenario(sc: &Scenario) -> ScenarioResult {
     let control = Rc::new(RefCell::new(Control::default()));
     let finished = Rc::new(Cell::new(false));
@@ -269,75 +348,7 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
         if fault_first {
             let fault = faults.remove(0);
             tokio::time::sleep_until(start + Duration::from_millis(fault.at_ms())).await;
-            let at = now_ms(start);
-            match fault {
-                Fault::Crash { node, .. } => {
-                    let target = match &node {
-                        CrashTarget::Node(name) => name.clone(),
-                        CrashTarget::CurrentLeader => current_leader()
-                            .await
-                            .map(|(name, _)| name)
-                            .unwrap_or_else(|| leader.clone()),
-                    };
-                    control_host(&control, HostAction::Crash(target.clone())).await;
-                    crashed.push(target.clone());
-                    events.push(ScenarioEvent::Crash {
-                        at_ms: at,
-                        node: target.clone(),
-                        target: format!("{node:?}={target}"),
-                    });
-                }
-                Fault::HealAll { .. } => {
-                    for a in 0..HOSTS.len() {
-                        for b in a + 1..HOSTS.len() {
-                            turmoil::repair(HOSTS[a], HOSTS[b]);
-                        }
-                    }
-                    events.push(ScenarioEvent::HealAll { at_ms: at });
-                }
-                Fault::Partition { groups, .. } => {
-                    let chosen = groups
-                        .iter()
-                        .position(|g| g.iter().any(|h| h == "current_leader"));
-                    let mut resolved = Vec::<Vec<String>>::new();
-                    for (gi, group) in groups.iter().enumerate() {
-                        let mut names = Vec::new();
-                        for name in group {
-                            let name = if name == "current_leader" {
-                                leader.clone()
-                            } else {
-                                name.clone()
-                            };
-                            if chosen.is_some_and(|i| i != gi && name == leader) {
-                                continue;
-                            }
-                            if !names.contains(&name) {
-                                names.push(name);
-                            }
-                        }
-                        resolved.push(names);
-                    }
-                    let named: Vec<&str> = resolved.iter().flatten().map(String::as_str).collect();
-                    let group_of =
-                        |name: &str| resolved.iter().position(|g| g.iter().any(|n| n == name));
-                    for a in 0..HOSTS.len() {
-                        for b in a + 1..HOSTS.len() {
-                            let (x, y) = (HOSTS[a], HOSTS[b]);
-                            if named.contains(&x)
-                                && named.contains(&y)
-                                && group_of(x) != group_of(y)
-                            {
-                                turmoil::partition(x, y);
-                                events.push(ScenarioEvent::Partition {
-                                    at_ms: at,
-                                    a: x.into(),
-                                    b: y.into(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+            apply_fault(fault, &leader, &control, &mut crashed, &mut events, start).await;
         } else {
             tokio::time::sleep_until(op_start).await;
             let iteration = ops_done;
@@ -347,7 +358,7 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
                 op_id,
                 node: op_node.clone(),
             });
-            let outcome = publish(
+            let publication = publish(
                 sc,
                 &client,
                 iteration,
@@ -357,8 +368,23 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
                 &mut unknown,
                 &mut failed,
                 &mut model,
-            )
-            .await;
+            );
+            tokio::pin!(publication);
+            let outcome = loop {
+                if let Some(next_fault) = faults.first() {
+                    let due = start + Duration::from_millis(next_fault.at_ms());
+                    tokio::select! {
+                        biased;
+                        _ = tokio::time::sleep_until(due) => {
+                            let fault = faults.remove(0);
+                            apply_fault(fault, &leader, &control, &mut crashed, &mut events, start).await;
+                        }
+                        outcome = &mut publication => break outcome,
+                    }
+                } else {
+                    break (&mut publication).await;
+                }
+            };
             events.push(ScenarioEvent::Respond {
                 at_ms: now_ms(start),
                 op_id,
