@@ -152,9 +152,27 @@ try {
 ```
 
 Guest code can also discover tools with `mcp.listTools("host")`. The stub
-definitions include the original argument schemas and direct the model to
-`run_js`. The wrapper runs on engines without heap snapshots or upstream MCP.
+definitions use the server's stub format and default `runjs__` prefix. Set
+`stubs: false` to hide them, or set `stubPrefix` to change the prefix.
+`runtime.stubInstructions(name, args)` returns the server-style redirect for a
+direct call to a known stub. The wrapper runs on engines without heap snapshots or upstream MCP.
 Host requests and JSON responses are limited to 256 KiB each.
+
+To use the same MCP authorization and hooks as the standalone server, set
+`EngineConfigBuilder.mcpToolsPoliciesJson(JSON.stringify(config))`. Pass the
+contents of the server's `mcp_tools` config entry. The shared chain runs the
+pre-hooks and policy before dispatch, and post-hooks can redact or change the
+MCP result. The same setting also accepts the server's layered `stack` form.
+
+```js
+const config = new EngineConfigBuilder()
+  .limits(new ExecutionLimitsBuilder().heapMemoryMaxMb(64n).executionTimeoutSecs(5n).build())
+  .mcpToolsPoliciesJson(JSON.stringify({
+    policies: [{ url: "file:///etc/mcp/mcp_tools.rego" }],
+  }))
+  .build();
+const engine = Engine.create(config);
+```
 
 ## Configuring an engine
 

@@ -3,10 +3,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use rmcp::model::Tool;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use super::mcp_client::{self, ToolInfo};
 use super::{RuntimeError, ToolDefinition};
 
 const MAX_CALLS: u32 = 32;
@@ -71,30 +73,18 @@ impl HostToolRun {
 
 impl HostToolRun {
     pub(super) fn new(server: String, tools: Vec<ToolDefinition>) -> Result<Arc<Self>, String> {
-        if server.is_empty() || server.contains("__") {
-            return Err("Host tool server must be nonempty and cannot contain '__'".into());
-        }
-        let mut names = HashSet::new();
-        let mut catalog = Vec::new();
-        for tool in tools {
-            if tool.name.is_empty() || !names.insert(tool.name.clone()) {
-                return Err("Host tool names must be nonempty and unique".into());
-            }
-            let schema = serde_json::from_str::<Value>(&tool.input_schema_json)
-                .map_err(|error| format!("Invalid schema for {}: {error}", tool.name))?;
-            if !schema.is_object() {
-                return Err(format!("Expected an object schema for {}", tool.name));
-            }
-            catalog.push(json!({
-                "server": server, "name": tool.name, "description": tool.description,
-                "inputSchema": schema,
-            }));
-        }
+        let tools = parse_catalog(&server, tools)?;
+        let names = tools.iter().map(|tool| tool.name.to_string()).collect();
+        let catalog: Vec<_> = tools
+            .iter()
+            .map(|tool| ToolInfo::from_tool(&server, tool))
+            .collect();
+        let catalog = serde_json::to_string(&catalog).map_err(|error| error.to_string())?;
         let (requests, receiver) = mpsc::channel(MAX_CALLS as usize);
         Ok(Arc::new(Self {
             server,
             names,
-            catalog: Value::Array(catalog).to_string(),
+            catalog,
             calls: AtomicU32::new(0),
             started: AtomicBool::new(false),
             requests,
@@ -137,13 +127,14 @@ impl HostToolRun {
 
     pub(super) async fn call(
         &self,
-        server: String,
-        name: String,
-        arguments_json: String,
-    ) -> Result<String, String> {
-        if server != self.server || !self.names.contains(&name) {
+        server: &str,
+        name: &str,
+        arguments: serde_json::Map<String, Value>,
+    ) -> Result<Value, String> {
+        if server != self.server || !self.names.contains(name) {
             return Err("Unknown host tool".into());
         }
+        let arguments_json = Value::Object(arguments).to_string();
         if arguments_json.len() > MAX_PAYLOAD_BYTES {
             return Err("Host tool arguments exceed the size limit".into());
         }
@@ -153,21 +144,13 @@ impl HostToolRun {
                 (count < MAX_CALLS).then_some(count + 1)
             })
             .map_err(|_| "Host tool call limit exceeded")?;
-        let arguments_json = if arguments_json.is_empty() {
-            "{}".into()
-        } else {
-            arguments_json
-        };
-        if !serde_json::from_str::<Value>(&arguments_json).is_ok_and(|value| value.is_object()) {
-            return Err("Host tool arguments must be a JSON object".into());
-        }
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, sender);
         let _pending = PendingCall(self, id);
         self.requests
             .try_send(HostToolCall {
                 id,
-                name,
+                name: name.to_owned(),
                 arguments_json,
             })
             .map_err(|_| "Host tool request queue unavailable")?;
@@ -175,11 +158,70 @@ impl HostToolRun {
             _ = self.stopped.cancelled() => return Err("Host tool run closed".into()),
             result = receiver => result.map_err(|_| "Host tool response dropped")?,
         };
-        Ok(
-            json!({"content": [{"type": "text", "text": payload}], "isError": is_error})
-                .to_string(),
-        )
+        Ok(json!({"content": [{"type": "text", "text": payload}], "isError": is_error}))
     }
+}
+
+fn parse_catalog(server: &str, tools: Vec<ToolDefinition>) -> Result<Vec<Tool>, String> {
+    if server.is_empty() || server.contains("__") {
+        return Err("Host tool server must be nonempty and cannot contain '__'".into());
+    }
+    let mut names = HashSet::new();
+    tools
+        .into_iter()
+        .map(|tool| {
+            if tool.name.is_empty() || !names.insert(tool.name.clone()) {
+                return Err("Host tool names must be nonempty and unique".into());
+            }
+            let schema =
+                serde_json::from_str::<serde_json::Map<String, Value>>(&tool.input_schema_json)
+                    .map_err(|error| format!("Invalid object schema for {}: {error}", tool.name))?;
+            Ok(Tool::new(
+                tool.name,
+                tool.description.unwrap_or_default(),
+                schema,
+            ))
+        })
+        .collect()
+}
+
+#[uniffi::export]
+pub fn host_tool_stubs(
+    server: String,
+    tools: Vec<ToolDefinition>,
+    prefix: Option<String>,
+) -> Result<Vec<ToolDefinition>, RuntimeError> {
+    let prefix = prefix.as_deref().unwrap_or(mcp_client::DEFAULT_STUB_PREFIX);
+    let tools =
+        parse_catalog(&server, tools).map_err(|message| RuntimeError::InvalidConfig { message })?;
+    Ok(tools
+        .iter()
+        .map(|tool| {
+            let stub = mcp_client::make_stub_tool(prefix, &server, tool);
+            ToolDefinition {
+                name: stub.name.into_owned(),
+                description: stub.description.map(|description| description.into_owned()),
+                input_schema_json: Value::Object(stub.input_schema.as_ref().clone()).to_string(),
+            }
+        })
+        .collect())
+}
+
+#[uniffi::export]
+pub fn host_tool_stub_instructions(
+    server: String,
+    tool: String,
+    arguments_json: String,
+) -> Result<String, RuntimeError> {
+    let arguments =
+        serde_json::from_str(&arguments_json).map_err(|error| RuntimeError::ToolCall {
+            message: error.to_string(),
+        })?;
+    Ok(mcp_client::stub_call_instructions(
+        &server,
+        &tool,
+        Some(&arguments),
+    ))
 }
 
 struct PendingCall<'a>(&'a HostToolRun, u32);

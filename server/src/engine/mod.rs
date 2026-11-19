@@ -1030,7 +1030,6 @@ pub struct ExecutionConfig<'a> {
     /// An additional module to compile after `code` evaluates, without evaluating it.
     pub compile_module: Option<(&'a str, &'a str, CompileMode)>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
-    pub host_tools: Option<Arc<host_tools::HostToolRun>>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
     pub hardening: console::HardeningConfig,
     /// When present, the `artifact(key, mime, bytes)` global is available and
@@ -1061,7 +1060,6 @@ impl<'a> ExecutionConfig<'a> {
             main_module_specifier: None,
             compile_module: None,
             mcp_config: None,
-            host_tools: None,
             hardening: console::HardeningConfig::default(),
             artifact_state: None,
         }
@@ -1186,11 +1184,6 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
-    fn with_host_tools(mut self, tools: Option<Arc<host_tools::HostToolRun>>) -> Self {
-        self.host_tools = tools;
-        self
-    }
-
     pub fn maybe_artifact_state(mut self, state: Option<ArtifactState>) -> Self {
         self.artifact_state = state;
         self
@@ -1225,7 +1218,6 @@ pub fn execute_stateless(
         main_module_specifier,
         compile_module,
         mcp_config,
-        host_tools,
         hardening,
         artifact_state,
     } = config;
@@ -1255,7 +1247,7 @@ pub fn execute_stateless(
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
         }
-        if mcp_config.is_some() || host_tools.is_some() {
+        if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
         }
         if artifact_state.is_some() {
@@ -1337,10 +1329,6 @@ pub fn execute_stateless(
             runtime.op_state().borrow_mut().put(sc.clone());
         }
 
-        if let Some(tools) = &host_tools {
-            runtime.op_state().borrow_mut().put(tools.clone());
-        }
-
         // Put MCP config in OpState if MCP servers are configured.
         if let Some(mc) = mcp_config {
             runtime.op_state().borrow_mut().put(mc.clone());
@@ -1397,7 +1385,7 @@ pub fn execute_stateless(
                         }
                     }
                     // Inject mcp JS wrapper if MCP servers are configured.
-                    if mcp_config.is_some() || host_tools.is_some() {
+                    if mcp_config.is_some() {
                         if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
                             return Err(e);
                         }
@@ -1522,7 +1510,6 @@ pub fn execute_stateful(
         main_module_specifier,
         compile_module,
         mcp_config,
-        host_tools: _,
         hardening,
         artifact_state,
     } = config;
@@ -2782,11 +2769,17 @@ impl Engine {
                 let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
-                let mc = self
-                    .mcp_client_manager
-                    .as_ref()
-                    .map(|m| mcp_client::McpConfig {
-                        client_manager: (**m).clone(),
+                let mc = host_tools
+                    .clone()
+                    .map(mcp_client::McpToolProvider::Host)
+                    .or_else(|| {
+                        self.mcp_client_manager
+                            .as_deref()
+                            .cloned()
+                            .map(mcp_client::McpToolProvider::Upstream)
+                    })
+                    .map(|provider| mcp_client::McpConfig {
+                        provider,
                         hooks: self.mcp_tools_hooks.clone(),
                     });
                 let fm = fs_mount.clone();
@@ -2816,7 +2809,6 @@ impl Engine {
                             .console_tree(ct)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
-                            .with_host_tools(host_tools)
                             .maybe_artifact_state(ast),
                     )
                 });
@@ -2923,7 +2915,7 @@ impl Engine {
                     .mcp_client_manager
                     .as_ref()
                     .map(|m| mcp_client::McpConfig {
-                        client_manager: (**m).clone(),
+                        provider: mcp_client::McpToolProvider::Upstream((**m).clone()),
                         hooks: self.mcp_tools_hooks.clone(),
                     });
 

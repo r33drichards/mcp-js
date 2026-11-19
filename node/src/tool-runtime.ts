@@ -1,4 +1,4 @@
-import { HostToolRun, type EngineLike } from "./index.js";
+import { HostToolRun, hostToolStubInstructions, hostToolStubs, type EngineLike } from "./index.js";
 
 export interface HostTool {
   name: string;
@@ -9,6 +9,8 @@ export interface HostTool {
 export interface ToolRuntimeConfig {
   server: string;
   tools: readonly HostTool[];
+  stubs?: boolean;
+  stubPrefix?: string;
   call(name: string, args: Record<string, unknown>, signal: AbortSignal): unknown | Promise<unknown>;
 }
 
@@ -30,13 +32,22 @@ export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig)
     inputSchemaJson: JSON.stringify(tool.inputSchema),
   }));
 
+  const stubs = hostToolStubs(server, definitions, config.stubPrefix);
+  const exposedStubs = config.stubs === false ? [] : stubs;
+  const stubTargets = new Map(exposedStubs.map((stub, index) => [stub.name, definitions[index].name]));
+
   return {
     listTools() {
-      return definitions.map(tool => ({
-        name: `runjs__${server}__${tool.name}`,
-        description: `Discovery only. Use run_js with await mcp.callTool(${JSON.stringify(server)}, ${JSON.stringify(tool.name)}, args).\n\n${tool.description}`,
-        inputSchema: JSON.parse(tool.inputSchemaJson) as Record<string, unknown>,
+      return exposedStubs.map(stub => ({
+        name: stub.name,
+        description: stub.description ?? "",
+        inputSchema: JSON.parse(stub.inputSchemaJson) as Record<string, unknown>,
       }));
+    },
+    stubInstructions(name: string, args: Record<string, unknown>): string | undefined {
+      const tool = stubTargets.get(name);
+      if (tool === undefined) return undefined;
+      return hostToolStubInstructions(server, tool, JSON.stringify(args));
     },
     async runJs(code: string, signal?: AbortSignal): Promise<ToolRuntimeResult> {
       signal?.throwIfAborted();

@@ -19,4 +19,4 @@ pub use server::engine::{
     ToolCallRequest, ToolDefinition,
 };
 
-pub use server::engine::host_tools::{HostToolCall, HostToolRun};
+pub use server::engine::host_tools::{HostToolCall, HostToolRun, host_tool_stub_instructions, host_tool_stubs};

@@ -90,6 +90,9 @@ pub struct EngineConfig {
     /// directories. A temporary directory, removed with the engine, when unset.
     pub data_dir: Option<String>,
     pub filesystem: Option<FilesystemAccess>,
+    /// JSON operation policies and hooks for guest MCP calls. Accepts the
+    /// same object as the server's `mcp_tools` policy configuration.
+    pub mcp_tools_policies_json: Option<String>,
     /// Heap persistence: V8 heap snapshots between `run_js` calls, addressed
     /// by content hash and resumed with the `heap` argument.
     pub heap_store: Option<BlobStore>,

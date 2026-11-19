@@ -282,6 +282,7 @@ impl Engine {
                 policies_json: filesystem_policy_json,
                 passthrough: None,
             }),
+            mcp_tools_policies_json: None,
             heap_store: None,
             fs_snapshot_store: None,
             fs_labels_db: None,
@@ -436,6 +437,7 @@ impl Engine {
             },
             data_dir: None,
             filesystem: None,
+            mcp_tools_policies_json: None,
             heap_store: None,
             fs_snapshot_store: None,
             fs_labels_db: None,
@@ -519,6 +521,15 @@ impl Engine {
             })
             .transpose()?;
 
+        let mcp_tools = config
+            .mcp_tools_policies_json
+            .as_deref()
+            .map(serde_json::from_str::<opa::OperationPolicies>)
+            .transpose()
+            .map_err(|error| RuntimeError::InvalidConfig {
+                message: format!("mcp_tools_policies_json: {error}"),
+            })?;
+
         let (data_dir, ephemeral) = match config.data_dir {
             Some(path) => (path, None),
             None => {
@@ -599,6 +610,7 @@ impl Engine {
                 .with_policy_config(
                     PolicyBootstrapConfig {
                         filesystem,
+                        mcp_tools,
                         ..PolicyBootstrapConfig::default()
                     },
                     CapabilityBootstrapConfig {
