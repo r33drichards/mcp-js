@@ -683,12 +683,10 @@ fn stale_console_writer_is_fenced_after_fresh_reopen() {
             loop {
                 let (stream, _) = listener.accept().await?;
                 let _ = host.serve_request(stream).await;
-                if incarnation == 1 {
-                    stage.store(2, Ordering::SeqCst);
-                }
             }
         }
     });
+    let client_stage = stage.clone();
     sim.client("observer", async move {
         let client = ScenarioHostClient::new("n0");
         for _ in 0..100 {
@@ -696,7 +694,9 @@ fn stale_console_writer_is_fenced_after_fresh_reopen() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let code = "console.log('worker-entered' + 'x'.repeat(5000)); console.log('done-marker' + 'y'.repeat(5000));";
-        let _ = client.run_js(code).await;
+        let result = client.run_js(code).await;
+        eprintln!("PROBE test: client run_js result: {:?}", result);
+        client_stage.store(2, Ordering::SeqCst);
         Ok(())
     });
     for _ in 0..50_000 {
