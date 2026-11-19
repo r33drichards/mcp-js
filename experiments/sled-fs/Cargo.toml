@@ -6,7 +6,7 @@ publish = false
 [workspace]
 [features]
 cluster = ["sim", "dep:scheduler-raft-audit", "dep:serde", "dep:serde_json"]
-scenario = ["sim", "dep:engine-cluster-tests"]
+scenario = ["sim", "dep:engine-cluster-tests", "engine-cluster-tests/real-sled"]
 sim = ["sled/turmoil-fs", "dep:turmoil", "dep:tokio"]
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }

@@ -565,7 +565,10 @@ fn run_scenario(scenario: &Scenario) -> ScenarioResult {
                         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
                         let mut reported = false;
                         loop {
-                            match sled::Config::new().path(&db_path).open() {
+                            let config = sled::Config::new().path(&db_path);
+                            #[cfg(feature = "real-sled")]
+                            let config = config.flush_every_ms(None);
+                            match config.open() {
                                 Ok(db) => break db,
                                 Err(e) if tokio::time::Instant::now() < deadline => {
                                     if !reported {
