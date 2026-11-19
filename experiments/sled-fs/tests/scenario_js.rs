@@ -238,3 +238,63 @@ fn host_owned_engine_runs_js_on_patched_sled() {
     });
     sim.run().unwrap();
 }
+
+#[test]
+fn observer_runs_js_on_host_through_simulated_network() {
+    use engine_cluster_tests::scenario::{JsResult, ScenarioHost, ScenarioHostClient};
+    use server::cluster::{ClusterConfig, ClusterNode, Role};
+    use std::time::Duration;
+    use turmoil::net::TcpListener;
+
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(45))
+        .build();
+    sim.host("n0", || async {
+        let db = sled::Config::new()
+            .path("/rpc-engine")
+            .flush_every_ms(None)
+            .open()
+            .unwrap();
+        let node = ClusterNode::new(
+            ClusterConfig {
+                node_id: "n0".into(),
+                election_timeout_min: Duration::from_millis(50),
+                election_timeout_max: Duration::from_millis(50),
+                ..ClusterConfig::default()
+            },
+            db.clone(),
+        );
+        node.start_background_tasks().unwrap();
+        let host = ScenarioHost::new(node, db);
+        let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await?;
+            host.serve_request(stream).await.unwrap();
+        }
+        Ok(())
+    });
+    sim.client("observer", async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let client = ScenarioHostClient::new("n0");
+        assert_eq!(client.status().await.unwrap().0, Role::Leader);
+        let code = Program(vec![Step::Write {
+            path: "/data/iteration".into(),
+            bytes: "rpc-owned".into(),
+        }])
+        .render_js(0);
+        let head = match client.run_js(&code).await.unwrap() {
+            JsResult::Head(head) => head,
+            other => panic!("host JS returned {other:?}"),
+        };
+        assert_eq!(
+            client
+                .read_file(&head, "/data/iteration")
+                .await
+                .unwrap()
+                .unwrap(),
+            b"rpc-owned"
+        );
+        Ok(())
+    });
+    sim.run().unwrap();
+}
