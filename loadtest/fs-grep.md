@@ -79,7 +79,8 @@ The workflow builds the PR's server and searches all MDN Markdown files and all
 Wikipedia shards. It distributes Wikipedia across 24 GitHub-hosted runners and
 uses a local Moto S3 endpoint on each runner. The PR comment combines the slice
 timings and match counts. Wikipedia timings are sums of the individual slice
-timings. Remove and reapply the label to run it again against the latest commit.
+timings. The workflow removes the label after completion, including failed
+benchmarks. Apply it again to benchmark the latest commit.
 
 ### Simulate S3 latency
 
