@@ -2795,6 +2795,7 @@ impl Engine {
                 // moved into the spawn_blocking closure below.
                 let code_for_log = code.clone();
                 let blocking_activity = activity.clone();
+                let timeout_host_tools = host_tools.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _activity = blocking_activity;
                     execute_stateless(
@@ -2846,6 +2847,11 @@ impl Engine {
                         }
                     }
                     _ = tokio::time::sleep(timeout_dur) => {
+                        // An isolate can be idle while awaiting the host. Wake
+                        // its pending op before waiting for the blocking task.
+                        if let Some(tools) = timeout_host_tools {
+                            tools.stop_calls();
+                        }
                         if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
                             h.terminate_execution();
                         }

@@ -32,6 +32,7 @@ pub struct HostToolRun {
     receiver: tokio::sync::Mutex<mpsc::Receiver<HostToolCall>>,
     pending: Mutex<HashMap<u32, Response>>,
     closed: CancellationToken,
+    stopped: CancellationToken,
 }
 
 #[uniffi::export]
@@ -45,7 +46,7 @@ impl HostToolRun {
         let mut receiver = self.receiver.lock().await;
         tokio::select! {
             biased;
-            _ = self.closed.cancelled() => None,
+            _ = self.stopped.cancelled() => None,
             request = receiver.recv() => request,
         }
     }
@@ -64,7 +65,7 @@ impl HostToolRun {
 
     pub fn close(&self) {
         self.closed.cancel();
-        self.pending.lock().unwrap().clear();
+        self.stop_calls();
     }
 }
 
@@ -100,6 +101,7 @@ impl HostToolRun {
             receiver: receiver.into(),
             pending: Mutex::new(HashMap::new()),
             closed: CancellationToken::new(),
+            stopped: CancellationToken::new(),
         }))
     }
 
@@ -110,6 +112,11 @@ impl HostToolRun {
             });
         }
         Ok(())
+    }
+
+    pub(super) fn stop_calls(&self) {
+        self.stopped.cancel();
+        self.pending.lock().unwrap().clear();
     }
 
     pub(super) async fn cancelled(&self) {
@@ -165,7 +172,7 @@ impl HostToolRun {
             })
             .map_err(|_| "Host tool request queue unavailable")?;
         let (payload, is_error) = tokio::select! {
-            _ = self.closed.cancelled() => return Err("Host tool run closed".into()),
+            _ = self.stopped.cancelled() => return Err("Host tool run closed".into()),
             result = receiver => result.map_err(|_| "Host tool response dropped")?,
         };
         Ok(

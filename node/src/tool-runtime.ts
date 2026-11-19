@@ -1,4 +1,4 @@
-import { HostToolRun, type Engine } from "./index.js";
+import { HostToolRun, type EngineLike } from "./index.js";
 
 export interface HostTool {
   name: string;
@@ -22,7 +22,7 @@ export interface ToolRuntimeResult {
 }
 
 /** Bind a host's tool authority once and allocate a separate channel for each execution. */
-export function createToolRuntime(engine: Engine, config: ToolRuntimeConfig) {
+export function createToolRuntime(engine: EngineLike, config: ToolRuntimeConfig) {
   const { server, call } = config;
   const definitions = config.tools.map(tool => ({
     name: tool.name,
@@ -40,7 +40,7 @@ export function createToolRuntime(engine: Engine, config: ToolRuntimeConfig) {
     },
     async runJs(code: string, signal?: AbortSignal): Promise<ToolRuntimeResult> {
       signal?.throwIfAborted();
-      const channel = HostToolRun.create(server, definitions);
+      const channel = HostToolRun.create(server, definitions) as HostToolRun;
       const controller = new AbortController();
       const abort = () => {
         controller.abort();
