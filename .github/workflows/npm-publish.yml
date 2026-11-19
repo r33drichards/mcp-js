@@ -11,7 +11,7 @@ on:
         required: true
         default: both
         type: choice
-        options: [both, node, client]
+        options: [both, node, node-musl, client]
       version:
         description: "Version to validate on main (tagged runs use the tag version)"
         required: false
@@ -179,9 +179,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-musl-tarball:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && (inputs.package == 'both' || inputs.package == 'node-musl'))
+    uses: ./.github/workflows/node-musl-package.yml
+    with:
+      version: ${{ inputs.version }}
+
   attach-release-assets:
     name: Attach tested SDKs to GitHub Release
-    needs: build-tarballs
+    needs: [build-tarballs, build-musl-tarball]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
@@ -209,6 +215,9 @@ jobs:
             test -s "$package.tgz"
             mv "$package.tgz" "$package.tar.gz"
           done
+          musl="release-artifacts/wholelottahoopla-mcp-js-node-$version-linux-x64-musl"
+          test -s "$musl.tgz"
+          mv "$musl.tgz" "$musl.tar.gz"
       - uses: softprops/action-gh-release@v2
         with:
           files: release-artifacts/*.tar.gz
