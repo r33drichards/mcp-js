@@ -265,12 +265,19 @@ fn observer_runs_js_on_host_through_simulated_network() {
             db.clone(),
         );
         node.start_background_tasks().unwrap();
-        let host = ScenarioHost::new(node, db);
+        let host = ScenarioHost::new(node, db.clone());
         let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
         for _ in 0..3 {
             let (stream, _) = listener.accept().await?;
             host.serve_request(stream).await.unwrap();
         }
+        let output: Vec<u8> = db.tree_names().into_iter()
+            .filter(|name| name.starts_with(b"ex:"))
+            .flat_map(|name| db.open_tree(name).unwrap().iter()
+                .flat_map(|entry| entry.unwrap().1.to_vec()))
+            .collect();
+        assert!(String::from_utf8_lossy(&output).contains("scoped console"),
+            "host console output was lost: {output:?}");
         Ok(())
     });
     sim.client("observer", async {
