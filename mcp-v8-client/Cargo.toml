@@ -10,8 +10,20 @@ readme = "README.md"
 keywords = ["api-client", "openapi", "mcp", "v8", "javascript"]
 categories = ["api-bindings", "web-programming::http-client"]
 
-[lints]
-workspace = true
+[lints.rust]
+unused_must_use = "deny"
+
+[lints.clippy]
+# Keep existing call sites buildable while surfacing errors they discard.
+let_underscore_must_use = "warn"
+map_err_ignore = "warn"
+match_wild_err_arm = "warn"
+panic_in_result_fn = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+unnecessary_wraps = "warn"
+# Preserve Clippy's default error for ignored partial reads and writes.
+unused_io_amount = "deny"
 
 [[bin]]
 name = "mcp-v8-cli"
