@@ -150,7 +150,7 @@ pub struct ToolInfo {
 }
 
 impl ToolInfo {
-    fn from_tool(server_name: &str, tool: &Tool) -> Self {
+    pub(super) fn from_tool(server_name: &str, tool: &Tool) -> Self {
         Self {
             server: server_name.to_string(),
             name: tool.name.to_string(),
@@ -816,11 +816,35 @@ fn is_oauth_unauthorized(error: &rmcp::service::ClientInitializeError) -> bool {
 /// Configuration stored in deno_core's OpState for the MCP ops.
 #[derive(Clone)]
 pub struct McpConfig {
-    pub client_manager: McpClientManager,
+    pub provider: McpToolProvider,
     /// Optional hook chain for `mcp.callTool()` calls: pre hooks may deny or
     /// mutate the call (server/tool/arguments), the policy gates the
     /// effective call, post hooks may deny or mutate the tool result.
     pub hooks: Option<std::sync::Arc<super::hooks::HookChain>>,
+}
+
+#[derive(Clone)]
+pub enum McpToolProvider {
+    Upstream(McpClientManager),
+    Host(Arc<super::host_tools::HostToolRun>),
+}
+
+impl McpToolProvider {
+    async fn call_tool(
+        &self,
+        server: &str,
+        tool: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<serde_json::Value, String> {
+        match self {
+            Self::Upstream(manager) => {
+                let result = manager.call_tool(server, tool, arguments).await?;
+                serde_json::to_value(result)
+                    .map_err(|e| format!("mcp.callTool: serialization error: {e}"))
+            }
+            Self::Host(host) => host.call(server, tool, arguments.unwrap_or_default()).await,
+        }
+    }
 }
 
 // ── Deno ops ─────────────────────────────────────────────────────────────
@@ -854,12 +878,12 @@ async fn op_mcp_call_tool(
     #[string] tool_name: String,
     #[string] arguments_json: String,
 ) -> Result<String, JsErrorBox> {
-    let (manager, hooks) = {
+    let (provider, hooks) = {
         let state = state.borrow();
         let config = state
             .try_borrow::<McpConfig>()
             .ok_or_else(|| JsErrorBox::generic("mcp: internal error — no MCP config available"))?;
-        (config.client_manager.clone(), config.hooks.clone())
+        (config.provider.clone(), config.hooks.clone())
     };
 
     let arguments: Option<serde_json::Map<String, serde_json::Value>> = if arguments_json.is_empty()
@@ -899,10 +923,10 @@ async fn op_mcp_call_tool(
                         e
                     ))
                 })?;
-                let manager = manager.clone();
+                let provider = provider.clone();
                 let executor: super::hooks::StackExecutor =
                     std::sync::Arc::new(move |effective: serde_json::Value| {
-                        let manager = manager.clone();
+                        let provider = provider.clone();
                         Box::pin(async move {
                             let eff: EffectiveMcpCall = serde_json::from_value(effective)
                                 .map_err(|e| {
@@ -918,11 +942,7 @@ async fn op_mcp_call_tool(
                                     ));
                                 }
                             };
-                            let result = manager
-                                .call_tool(&eff.server, &eff.tool, arguments)
-                                .await?;
-                            serde_json::to_value(&result)
-                                .map_err(|e| format!("mcp.callTool: serialization error: {}", e))
+                            provider.call_tool(&eff.server, &eff.tool, arguments).await
                         })
                             as std::pin::Pin<
                                 Box<dyn std::future::Future<Output = _> + Send>,
@@ -991,7 +1011,7 @@ async fn op_mcp_call_tool(
             eff_input = Some(effective);
         }
 
-        let result = manager
+        let result = provider
             .call_tool(&server_name, &tool_name, arguments)
             .await
             .map_err(|e| JsErrorBox::generic(e))?;
@@ -1000,10 +1020,7 @@ async fn op_mcp_call_tool(
         // and may mutate or deny the result.
         if let (Some(hooks), Some(eff_input)) = (hooks.as_ref(), eff_input.as_ref()) {
             if hooks.has_post() {
-                let output = serde_json::to_value(&result).map_err(|e| {
-                    JsErrorBox::generic(format!("mcp.callTool: serialization error: {}", e))
-                })?;
-                return match hooks.run_post(eff_input, output).await.map_err(|e| {
+                return match hooks.run_post(eff_input, result).await.map_err(|e| {
                     JsErrorBox::generic(format!("mcp.callTool: post hook error: {}", e))
                 })? {
                     super::hooks::PostOutcome::Allow(v) => Ok(v.to_string()),
@@ -1015,8 +1032,7 @@ async fn op_mcp_call_tool(
             }
         }
 
-        serde_json::to_string(&result)
-            .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: serialization error: {}", e)))
+        Ok(result.to_string())
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("mcp task join error: {}", e)))?
@@ -1032,14 +1048,17 @@ fn op_mcp_list_tools(
     let config = state
         .try_borrow::<McpConfig>()
         .ok_or_else(|| JsErrorBox::generic("mcp: internal error — no MCP config available"))?;
+    let manager = match &config.provider {
+        McpToolProvider::Host(host) => return Ok(host.list(&server_name)),
+        McpToolProvider::Upstream(manager) => manager,
+    };
 
     let server_filter = if server_name.is_empty() {
         None
     } else {
         Some(server_name.as_str())
     };
-    let tools = config
-        .client_manager
+    let tools = manager
         .list_tools(server_filter)
         .map_err(|e| JsErrorBox::generic(e))?;
 
@@ -1054,8 +1073,10 @@ fn op_mcp_list_servers(state: &mut OpState) -> Result<String, JsErrorBox> {
     let config = state
         .try_borrow::<McpConfig>()
         .ok_or_else(|| JsErrorBox::generic("mcp: internal error — no MCP config available"))?;
-
-    let servers = config.client_manager.server_names();
+    let servers = match &config.provider {
+        McpToolProvider::Host(host) => return Ok(host.servers()),
+        McpToolProvider::Upstream(manager) => manager.server_names(),
+    };
     serde_json::to_string(&servers)
         .map_err(|e| JsErrorBox::generic(format!("mcp.servers: serialization error: {}", e)))
 }

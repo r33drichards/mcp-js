@@ -269,6 +269,7 @@ impl ServerHandler for SseService {
             arguments_json: args.to_string(),
             session_id: self.session_id.get().cloned(),
             mcp_headers: self.mcp_headers.get().cloned(),
+            host_tools: None,
         };
 
         // Keep legacy SSE behavior aligned with the primary MCP transports.

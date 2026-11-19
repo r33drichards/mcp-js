@@ -92,16 +92,93 @@ try {
   ));
   console.log(result.output); // 42
 } finally {
-  engine.close();
-  engine.uniffiDestroy();
+  engine.dispose();
 }
 ```
+
+`engine.dispose()` shuts down the runtime and releases the native handle.
+Call it when your application is finished with the engine. Repeated calls are safe.
 
 `callToolAsync` returns a Promise and does not block the Node event loop. The
 same positional arguments are accepted by synchronous `callTool`, which is
 useful in scripts but blocks the host thread. The native engine awaits Promises
 in the executed JavaScript. Execution errors and deadlines are returned in
 JSON; native API failures reject the Promise (or throw from `callTool`).
+
+## Bind host tools to guest JavaScript
+
+`createToolRuntime(engine, config)` binds a named registry of host tool schemas
+and handlers.
+Reuse the wrapper for calls that share the same permissions. For an app with
+request-specific tools, create one wrapper per request. Each run has its own
+request channel and can make up to 32 host tool calls. Internally,
+`runJs` uses `ToolCallRequestBuilder` to attach that channel to the regular
+`run_js` request and submits it through `engine.invokeTool(request)`.
+Each tool handler receives
+an AbortSignal that is aborted when the run ends. Pass an AbortSignal as the
+second argument to `runJs` to cancel the execution. Validate arguments and
+enforce permissions in the handler.
+
+```js
+import { Engine, createToolRuntime } from '@wholelottahoopla/mcp-js-node';
+
+const engine = Engine.createStateless(64n, 5n);
+try {
+  const runtime = createToolRuntime(engine, {
+    server: "host",
+    tools: {
+      echo: {
+        description: "Echo a message",
+        inputSchema: {
+          type: "object",
+          properties: { message: { type: "string" } },
+          required: ["message"],
+        },
+        run({ message }) {
+          if (typeof message !== "string") {
+            throw new Error("Expected a message string");
+          }
+          return { message };
+        },
+      },
+    },
+  });
+
+  // Advertise these discovery stubs alongside your model's run_js tool.
+  console.log(runtime.listTools());
+
+  const result = await runtime.runJs(`
+    const reply = await mcp.callTool("host", "echo", { message: "hello" });
+    console.log(JSON.parse(reply.content[0].text).message);
+  `);
+  console.log(result.output);
+} finally {
+  engine.dispose();
+}
+```
+
+Guest code can also discover tools with `mcp.listTools("host")`. The stub
+definitions use the server's stub format and default `runjs__` prefix. Set
+`stubs: false` to hide them, or set `stubPrefix` to change the prefix.
+`runtime.stubInstructions(name, args)` returns the server-style redirect for a
+direct call to a known stub. The wrapper runs on engines without heap snapshots or upstream MCP.
+Host requests and JSON responses are limited to 256 KiB each.
+
+To use the same MCP authorization and hooks as the standalone server, set
+`EngineConfigBuilder.mcpToolsPoliciesJson(JSON.stringify(config))`. Pass the
+contents of the server's `mcp_tools` config entry. The shared chain runs the
+pre-hooks and policy before dispatch, and post-hooks can redact or change the
+MCP result. The same setting also accepts the server's layered `stack` form.
+
+```js
+const config = new EngineConfigBuilder()
+  .limits(new ExecutionLimitsBuilder().heapMemoryMaxMb(64n).executionTimeoutSecs(5n).build())
+  .mcpToolsPoliciesJson(JSON.stringify({
+    policies: [{ url: "file:///etc/mcp/mcp_tools.rego" }],
+  }))
+  .build();
+const engine = Engine.create(config);
+```
 
 ## Configuring an engine
 

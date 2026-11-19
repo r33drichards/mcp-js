@@ -22,6 +22,7 @@ pub mod heap_tags;
 pub mod hooks;
 pub mod http2;
 pub mod mcp_client;
+pub mod host_tools;
 pub mod mcp_oauth;
 pub mod module_loader;
 pub mod node_compat;
@@ -1950,6 +1951,7 @@ pub struct RunJsRequest<'a> {
     execution_timeout_secs: Option<u64>,
     tags: Option<HashMap<String, String>>,
     mcp_headers: Option<serde_json::Value>,
+    host_tools: Option<Arc<host_tools::HostToolRun>>,
 }
 
 impl<'a> RunJsRequest<'a> {
@@ -2018,6 +2020,11 @@ impl<'a> RunJsRequest<'a> {
         self
     }
 
+    pub(crate) fn maybe_host_tools(mut self, tools: Option<Arc<host_tools::HostToolRun>>) -> Self {
+        self.host_tools = tools;
+        self
+    }
+
     pub async fn execute(self) -> Result<ExecutionId, String> {
         self.engine
             .run_js_inner(
@@ -2030,6 +2037,7 @@ impl<'a> RunJsRequest<'a> {
                 self.execution_timeout_secs,
                 self.tags,
                 self.mcp_headers,
+                self.host_tools,
             )
             .await
     }
@@ -2500,6 +2508,7 @@ impl Engine {
             execution_timeout_secs: None,
             tags: None,
             mcp_headers: None,
+            host_tools: None,
         }
     }
 
@@ -2516,6 +2525,7 @@ impl Engine {
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
         mcp_headers: Option<serde_json::Value>,
+        host_tools: Option<Arc<host_tools::HostToolRun>>,
     ) -> Result<ExecutionId, String> {
         let registry = self
             .execution_registry
@@ -2630,6 +2640,7 @@ impl Engine {
                     raw_snapshot,
                     console_tree,
                     mcp_headers,
+                    host_tools,
                 )
                 .await;
         });
@@ -2692,6 +2703,7 @@ impl Engine {
         raw_snapshot: Option<Vec<u8>>,
         console_tree: mcp_metadata_store::RuntimeTree,
         mcp_headers: Option<serde_json::Value>,
+        host_tools: Option<Arc<host_tools::HostToolRun>>,
     ) {
         let registry = match &self.execution_registry {
             Some(r) => r.clone(),
@@ -2757,11 +2769,17 @@ impl Engine {
                 let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
-                let mc = self
-                    .mcp_client_manager
-                    .as_ref()
-                    .map(|m| mcp_client::McpConfig {
-                        client_manager: (**m).clone(),
+                let mc = host_tools
+                    .clone()
+                    .map(mcp_client::McpToolProvider::Host)
+                    .or_else(|| {
+                        self.mcp_client_manager
+                            .as_deref()
+                            .cloned()
+                            .map(mcp_client::McpToolProvider::Upstream)
+                    })
+                    .map(|provider| mcp_client::McpConfig {
+                        provider,
                         hooks: self.mcp_tools_hooks.clone(),
                     });
                 let fm = fs_mount.clone();
@@ -2770,6 +2788,7 @@ impl Engine {
                 // moved into the spawn_blocking closure below.
                 let code_for_log = code.clone();
                 let blocking_activity = activity.clone();
+                let timeout_host_tools = host_tools.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _activity = blocking_activity;
                     execute_stateless(
@@ -2820,6 +2839,11 @@ impl Engine {
                         }
                     }
                     _ = tokio::time::sleep(timeout_dur) => {
+                        // An isolate can be idle while awaiting the host. Wake
+                        // its pending op before waiting for the blocking task.
+                        if let Some(tools) = timeout_host_tools {
+                            tools.stop_calls();
+                        }
                         if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
                             h.terminate_execution();
                         }
@@ -2891,7 +2915,7 @@ impl Engine {
                     .mcp_client_manager
                     .as_ref()
                     .map(|m| mcp_client::McpConfig {
-                        client_manager: (**m).clone(),
+                        provider: mcp_client::McpToolProvider::Upstream((**m).clone()),
                         hooks: self.mcp_tools_hooks.clone(),
                     });
 

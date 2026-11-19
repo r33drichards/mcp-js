@@ -481,6 +481,7 @@ async fn test_canonical_invocation_preserves_artifact_content() {
         arguments_json: args.to_string(),
         session_id: None,
         mcp_headers: None,
+        host_tools: None,
     };
     let response = engine
         .invoke_tool_response(request(
