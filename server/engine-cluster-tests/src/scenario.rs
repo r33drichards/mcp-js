@@ -457,6 +457,7 @@ const HOST_PORT: u16 = 4301;
 #[derive(Serialize, Deserialize)]
 enum HostRequest {
     Status,
+    Generation,
     RunJs { code: String },
     ReadFile { head: String, path: String },
     Resolve { label: String },
@@ -468,6 +469,7 @@ enum HostRequest {
 #[derive(Serialize, Deserialize)]
 enum HostResponse {
     Status(Role, u64),
+    Generation(u64),
     RunJs(JsResult),
     ReadFile(Result<Option<Vec<u8>>, String>),
     Resolve(Result<Option<CaId>, String>),
@@ -482,17 +484,23 @@ pub struct ScenarioHost {
     node: Arc<ClusterNode>,
     engine: Arc<Engine>,
     store: Arc<FsStore>,
+    generation: u64,
     _pump: tokio::task::JoinHandle<()>,
 }
 
 #[cfg(feature = "real-sled")]
 impl ScenarioHost {
     pub fn new(node: Arc<ClusterNode>, db: sled::Db) -> Self {
+        Self::new_with_generation(node, db, 1)
+    }
+
+    pub fn new_with_generation(node: Arc<ClusterNode>, db: sled::Db, generation: u64) -> Self {
         let (engine, store, pump) = engine_with_cluster_host(node.clone(), db);
         Self {
             node,
             engine,
             store,
+            generation,
             _pump: pump,
         }
     }
@@ -537,6 +545,7 @@ impl ScenarioHost {
                 let status = self.node.status().await;
                 HostResponse::Status(status.role, status.term)
             }
+            HostRequest::Generation => HostResponse::Generation(self.generation),
             HostRequest::RunJs { code } => HostResponse::RunJs(run_js(&self.engine, &code).await),
             HostRequest::ReadFile { head, path } => {
                 HostResponse::ReadFile(read_file_at_checked(&self.store, &head, &path).await)
@@ -594,6 +603,13 @@ impl ScenarioHostClient {
         {
             HostResponse::Status(role, term) => Ok((role, term)),
             _ => Err("unexpected host status response".into()),
+        }
+    }
+
+    pub async fn generation(&self) -> Result<u64, String> {
+        match self.call(HostRequest::Generation, Duration::from_secs(2)).await? {
+            HostResponse::Generation(generation) => Ok(generation),
+            _ => Err("unexpected host generation response".into()),
         }
     }
 
