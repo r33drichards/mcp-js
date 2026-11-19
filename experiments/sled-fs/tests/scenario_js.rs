@@ -617,3 +617,97 @@ fn dropping_scenario_host_stops_its_blob_pump() {
     });
     sim.run().unwrap();
 }
+
+#[test]
+fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
+    use engine_cluster_tests::scenario::{ScenarioHost, ScenarioHostClient};
+    use server::cluster::{ClusterConfig, ClusterNode, Role};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::time::Duration;
+    use turmoil::net::TcpListener;
+
+    let stage = Arc::new(AtomicUsize::new(0));
+    let generation = Arc::new(AtomicUsize::new(0));
+    let mut sim = turmoil::Builder::new().simulation_duration(Duration::from_secs(30)).build();
+    let host_stage = stage.clone();
+    let opened = generation.clone();
+    sim.host("n0", move || {
+        let stage = host_stage.clone();
+        let opened = opened.clone();
+        async move {
+            let db = sled::Config::new().path("/stale-console").flush_every_ms(None).open().unwrap();
+            let incarnation = opened.fetch_add(1, Ordering::SeqCst) + 1;
+            let node = ClusterNode::new(ClusterConfig {
+                node_id: "n0".into(),
+                election_timeout_min: Duration::from_millis(50),
+                election_timeout_max: Duration::from_millis(50),
+                ..ClusterConfig::default()
+            }, db.clone());
+            node.start_background_tasks().unwrap();
+            let host = ScenarioHost::new_with_generation(node, db.clone(), incarnation as u64);
+            if incarnation == 1 {
+                let watched = db.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let output: Vec<u8> = watched.tree_names().into_iter()
+                            .filter(|name| name.starts_with(b"ex:"))
+                            .flat_map(|name| watched.open_tree(name).unwrap().iter()
+                                .flat_map(|entry| entry.unwrap().1.to_vec()))
+                            .collect();
+                        if String::from_utf8_lossy(&output).contains("worker-entered") {
+                            stage.store(1, Ordering::SeqCst);
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                });
+            } else {
+                while stage.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let output: Vec<u8> = db.tree_names().into_iter()
+                    .filter(|name| name.starts_with(b"ex:"))
+                    .flat_map(|name| db.open_tree(name).unwrap().iter()
+                        .flat_map(|entry| entry.unwrap().1.to_vec()))
+                    .collect();
+                assert!(!String::from_utf8_lossy(&output).contains("stale-after-crash"),
+                    "old V8 worker wrote to reopened generation: {output:?}");
+                stage.store(3, Ordering::SeqCst);
+            }
+            let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
+            loop {
+                let (stream, _) = listener.accept().await?;
+                let _ = host.serve_request(stream).await;
+            }
+        }
+    });
+    sim.client("observer", async {
+        let client = ScenarioHostClient::new("n0");
+        for _ in 0..100 {
+            if matches!(client.status().await, Ok((Role::Leader, _))) { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let code = "console.log('worker-entered' + 'x'.repeat(5000));             const until = Date.now() + 3000; while (Date.now() < until) {}             console.log('stale-after-crash' + 'y'.repeat(5000));";
+        let _ = client.run_js(code).await;
+        Ok(())
+    });
+    for _ in 0..50_000 {
+        sim.step().unwrap();
+        if stage.load(Ordering::SeqCst) == 1 { break; }
+    }
+    assert_eq!(stage.load(Ordering::SeqCst), 1, "old worker never entered JS");
+    sim.crash("n0");
+    sim.bounce("n0");
+    for _ in 0..50_000 {
+        sim.step().unwrap();
+        if generation.load(Ordering::SeqCst) == 2 { break; }
+    }
+    assert_eq!(generation.load(Ordering::SeqCst), 2, "fresh DB did not reopen");
+    std::thread::sleep(Duration::from_secs(4));
+    stage.store(2, Ordering::SeqCst);
+    for _ in 0..50_000 {
+        sim.step().unwrap();
+        if stage.load(Ordering::SeqCst) == 3 { break; }
+    }
+    assert_eq!(stage.load(Ordering::SeqCst), 3, "reopened host did not check console");
+}
