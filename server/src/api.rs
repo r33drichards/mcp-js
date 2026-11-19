@@ -1927,8 +1927,13 @@ pub fn scheduled_router(runtime: Arc<Engine>) -> Result<Router, String> {
 #[cfg(test)]
 mod scheduled_runtime_tests {
     use super::*;
+    // Keep these engine-backed tests sequential while exercising cancellation
+    // and launch in separate engine instances.
+    static ENGINE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn scheduled_cancellation_confirms_background_stop_including_startup_race() {
+        let _engine_test_guard = ENGINE_TEST_LOCK.lock().await;
         use crate::scheduled_worker::Runtime;
         for wait_for_start in [false, true] {
             let dir = tempfile::tempdir().unwrap();
@@ -1958,6 +1963,7 @@ mod scheduled_runtime_tests {
     }
     #[tokio::test]
     async fn scheduled_launch_calls_real_engine() {
+        let _engine_test_guard = ENGINE_TEST_LOCK.lock().await;
         use crate::scheduled_worker::Runtime;
         let dir = tempfile::tempdir().unwrap();
         let engine = session_view_tests::engine(dir.path());
