@@ -81,6 +81,7 @@ impl HostConsoleBridge {
                 } else {
                     Err("console owner generation revoked".to_string())
                 };
+                eprintln!("PROBE pump: id={} seq={} bytes={} ok={}", page.execution_id, page.seq, page.bytes.len(), result.is_ok());
                 let _ = page.reply.send(result);
             }
         };
@@ -101,8 +102,10 @@ impl HostConsoleBridge {
 impl HostConsoleWriter {
     fn write_page(&self, seq: u64, bytes: Vec<u8>) -> Result<(), String> {
         if !self.alive.load(Ordering::SeqCst) {
+            eprintln!("PROBE write_page: REVOKED id={} seq={}", self.execution_id, seq);
             return Err("console owner generation revoked".to_string());
         }
+        eprintln!("PROBE write_page: SEND id={} seq={} bytes={}", self.execution_id, seq, bytes.len());
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         self.tx.send(ConsolePage { execution_id: self.execution_id.clone(), seq, bytes, reply })
             .map_err(|_| "console owner stopped".to_string())?;
