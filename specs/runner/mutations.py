@@ -25,7 +25,10 @@ for name, old, new, test in mutations:
     assert source.count(old)==1, f'{name}: mutation site drifted'
     with tempfile.TemporaryDirectory(prefix='scheduler-mutation-') as directory:
         target=pathlib.Path(directory)
-        for file in ['server/src/cluster.rs','server/src/cluster_regressions.rs','server/cluster-tests/Cargo.toml','server/cluster-tests/Cargo.lock','server/cluster-tests/src/lib.rs','server/tests/cluster_learner.rs','server/tests/cluster_simulation.rs']:
+        # Preserve the audit crate's complete source and its local dependency.
+        for crate in ['server/cluster-tests', 'server/metadata-store']:
+            shutil.copytree(ROOT/crate, target/crate, ignore=shutil.ignore_patterns('target', '.git'))
+        for file in ['server/src/cluster.rs','server/src/cluster_regressions.rs','server/src/raft_metadata.rs','server/tests/cluster_learner.rs','server/tests/cluster_simulation.rs']:
             dest=target/file; dest.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(ROOT/file,dest)
         (target/'server/src/cluster.rs').write_text(source.replace(old,new))
         result=subprocess.run(['cargo','test','--locked','--manifest-path',str(target/'server/cluster-tests/Cargo.toml'),test,'--','--nocapture'],capture_output=True,text=True,timeout=180)

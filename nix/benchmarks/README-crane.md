@@ -38,7 +38,7 @@ input; project-only changes must leave `benchmark-deps` unchanged.
 
 The test artifact checks its discovered Cargo targets against the baseline
 inventory in `scripts/ci/expected-nix-comparison-tests.json`: one library, five binary-unit targets,
-75 integration targets and one compile-only example. Its rustc wrapper embeds
+77 integration targets and one compile-only example. Its rustc wrapper embeds
 immutable fixture and installed binary paths instead of `/build/source` paths.
 The doctest capture records Cargo's exact rustdoc arguments and environment but
 runs no tests during artifact construction. The external runner replays real

@@ -89,8 +89,9 @@ reach an action/state; they are not safety failures.
 
 Requires Java 21, Python 3, and the repository Rust toolchain. Download TLC from
 its official release; `check.py` verifies its SHA-256 before execution. The pinned
-release asset currently identifies itself as TLC 2026.10.23.135453 (2ef2af8),
-SHA-256 `d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f`.
+release asset currently identifies itself as TLC 2026.11.15.002146 (bc1b506),
+SHA-256 `7e53aa636dac8a3cb0533f343115c0548e03fc0ce5edc7739becf58d3d0fb84f`.
+GitHub release asset `749260120` publishes the same digest as the downloaded jar.
 The prior rolling asset was replaced upstream. Both fast models were regenerated
 with this pin and retained their safety state counts; committed historical
 summaries retain the checksum of the tool that originally produced them.
