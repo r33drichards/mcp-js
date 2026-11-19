@@ -485,20 +485,22 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
     let mut converged = false;
     loop {
         final_heads.clear();
+        let mut all_resolved = true;
         for name in ["n0", "n1", "n2"] {
-            let head = ScenarioHostClient::new(name)
-                .resolve("main")
-                .await
-                .ok()
-                .flatten()
-                .map(|ca| to_hex(&ca));
+            let head = match ScenarioHostClient::new(name).resolve("main").await {
+                Ok(head) => head.map(|ca| to_hex(&ca)),
+                Err(_) => {
+                    all_resolved = false;
+                    None
+                }
+            };
             final_heads.insert(name.to_owned(), head);
         }
         let head = final_heads.values().next().and_then(Option::as_ref);
         let equal = final_heads.values().all(|other| other.as_ref() == head);
         let legal =
             head.is_none() && acked.is_empty() || head.is_some_and(|h| attempted.contains(h));
-        if equal && legal {
+        if all_resolved && equal && legal {
             converged = true;
             break;
         }
