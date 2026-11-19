@@ -80,3 +80,42 @@ This patch adds no authentication, production configuration or credentials.
 Local reads are stale and cannot authorize execution. Any integration must
 obtain a successful current-term committed operation before dispatch. Consensus
 and consume-before-send receipts do not make external effects exactly once.
+
+## Raft conformance cases
+
+`tests/turmoil_conformance.rs` drives the production vote/append HTTP handlers
+through simulated TCP, with seeds 7, 42 and 314:
+
+- A successful vote remains exclusive after closing/reopening the persistent
+  store; retrying the same candidate is allowed, and only a newer term releases
+  the vote.
+- A six-row log-freshness matrix checks last-term-first ordering, including a
+  longer stale-term log and a shorter newer-term log. Each row starts fresh.
+- Duplicate appends, delayed lower-term appends, mismatched/missing prefixes,
+  uncommitted suffix replacement and attempts to overwrite committed entries
+  preserve the exact log and atomic companion values. Commit/applied indices
+  cannot retreat on a delayed short heartbeat.
+
+The focused `majority_of_old_term_entry_waits_for_current_term_commit` regression
+checks Raft section 5.4.2/Figure 8: a majority storing an old-term entry is not
+sufficient to advance commit; a current-term entry replicated to a majority
+commits that entry and its earlier prefix. It controls the election result and
+replication responses so the commit rule is tested without timing dependencies.
+
+```sh
+cargo test --manifest-path server/cluster-tests/Cargo.toml --locked --test turmoil_conformance
+cargo test --manifest-path server/cluster-tests/Cargo.toml --locked --lib majority_of_old_term_entry
+```
+
+These are independently translated scenarios from the
+[Raft paper, Figure 2 and section 5.4](https://raft.github.io/raft.pdf), with
+[etcd's protocol-test catalog](https://github.com/etcd-io/raft/blob/main/raft_test.go)
+as a coverage reference. No upstream implementation or test code is copied.
+The existing cluster-consensus CI command discovers them automatically.
+
+The follower fixture intentionally does not run election/heartbeat loops: it
+isolates handler rules while the existing `turmoil_peers` tests cover full
+protocol-loop integration. It uses seeded network scheduling but real sled/OS
+files; reopen is not a power-loss simulation. The separate `experiments/sled-fs`
+stack exercises simulated filesystem faults. These tests are regressions and
+conformance evidence, not formal proof or whole-API linearizability certification.

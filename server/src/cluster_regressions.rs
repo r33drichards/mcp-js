@@ -926,3 +926,47 @@ async fn http_peer_rpc_accepts_200_and_rejects_malformed_json() {
     );
     assert_eq!(http_peer_rpc_results(200, "not JSON").await, [false; 6]);
 }
+
+/// Raft Figure 8 / section 5.4.2: replica counts alone cannot commit old terms.
+#[tokio::test]
+async fn majority_of_old_term_entry_waits_for_current_term_commit() {
+    let n = ClusterNode::new(
+        ClusterConfig {
+            peers: vec!["peer-a".into(), "peer-b".into()],
+            ..ClusterConfig::default()
+        },
+        sled::Config::new().temporary(true).open().unwrap(),
+    );
+    assert!(n.handle_append_entries(append(1, 0, 0, vec![entry(1, 1, "old")], 0)).await.success);
+    // Install the result of a new election; isolate commit-index calculation
+    // from election timing. All log writes still use production paths.
+    {
+        let mut state = n.state.write().await;
+        state.role = Role::Leader;
+        state.current_term = 2;
+        state.next_index.insert("peer-a".into(), 2);
+        state.next_index.insert("peer-b".into(), 1);
+        state.match_index.insert("peer-a".into(), 0);
+        state.match_index.insert("peer-b".into(), 0);
+    }
+    n.accept_append_response("peer-a", 2, 0, 1, AppendEntriesResponse { term: 2, success: true }).await;
+    n.update_commit_index().await;
+    assert_eq!(n.state.read().await.commit_index, 0,
+        "self plus peer-a is a majority, but the entry belongs to term 1");
+    assert_eq!(n.get("claim").await.unwrap(), None);
+    let proposer = n.clone();
+    let proposal = tokio::spawn(async move { proposer.put("barrier".into(), "term-2".into()).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while n.state.read().await.log.len() < 2 { tokio::task::yield_now().await; }
+    }).await.expect("current-term proposal appended");
+    assert_eq!(n.state.read().await.log[1].term, 2);
+    n.update_commit_index().await;
+    assert_eq!(n.state.read().await.commit_index, 0, "no quorum for current term yet");
+    n.accept_append_response("peer-a", 2, 1, 2, AppendEntriesResponse { term: 2, success: true }).await;
+    n.update_commit_index().await;
+    tokio::time::timeout(Duration::from_secs(1), proposal).await.unwrap().unwrap().unwrap();
+    assert_eq!(n.state.read().await.commit_index, 2);
+    assert_eq!(n.state.read().await.last_applied, 2);
+    assert_eq!(n.get("claim").await.unwrap().as_deref(), Some("old"));
+    assert_eq!(n.get("barrier").await.unwrap().as_deref(), Some("term-2"));
+}
