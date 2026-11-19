@@ -22,6 +22,7 @@ pub mod heap_tags;
 pub mod hooks;
 pub mod http2;
 pub mod mcp_client;
+pub mod host_tools;
 pub mod mcp_oauth;
 pub mod module_loader;
 pub mod node_compat;
@@ -1029,6 +1030,7 @@ pub struct ExecutionConfig<'a> {
     /// An additional module to compile after `code` evaluates, without evaluating it.
     pub compile_module: Option<(&'a str, &'a str, CompileMode)>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
+    pub host_tools: Option<Arc<host_tools::HostToolRun>>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
     pub hardening: console::HardeningConfig,
     /// When present, the `artifact(key, mime, bytes)` global is available and
@@ -1059,6 +1061,7 @@ impl<'a> ExecutionConfig<'a> {
             main_module_specifier: None,
             compile_module: None,
             mcp_config: None,
+            host_tools: None,
             hardening: console::HardeningConfig::default(),
             artifact_state: None,
         }
@@ -1183,6 +1186,11 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    fn with_host_tools(mut self, tools: Option<Arc<host_tools::HostToolRun>>) -> Self {
+        self.host_tools = tools;
+        self
+    }
+
     pub fn maybe_artifact_state(mut self, state: Option<ArtifactState>) -> Self {
         self.artifact_state = state;
         self
@@ -1217,6 +1225,7 @@ pub fn execute_stateless(
         main_module_specifier,
         compile_module,
         mcp_config,
+        host_tools,
         hardening,
         artifact_state,
     } = config;
@@ -1246,7 +1255,7 @@ pub fn execute_stateless(
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
         }
-        if mcp_config.is_some() {
+        if mcp_config.is_some() || host_tools.is_some() {
             extensions.push(mcp_client::create_extension());
         }
         if artifact_state.is_some() {
@@ -1328,6 +1337,10 @@ pub fn execute_stateless(
             runtime.op_state().borrow_mut().put(sc.clone());
         }
 
+        if let Some(tools) = &host_tools {
+            runtime.op_state().borrow_mut().put(tools.clone());
+        }
+
         // Put MCP config in OpState if MCP servers are configured.
         if let Some(mc) = mcp_config {
             runtime.op_state().borrow_mut().put(mc.clone());
@@ -1384,7 +1397,7 @@ pub fn execute_stateless(
                         }
                     }
                     // Inject mcp JS wrapper if MCP servers are configured.
-                    if mcp_config.is_some() {
+                    if mcp_config.is_some() || host_tools.is_some() {
                         if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
                             return Err(e);
                         }
@@ -1509,6 +1522,7 @@ pub fn execute_stateful(
         main_module_specifier,
         compile_module,
         mcp_config,
+        host_tools: _,
         hardening,
         artifact_state,
     } = config;
@@ -1950,6 +1964,7 @@ pub struct RunJsRequest<'a> {
     execution_timeout_secs: Option<u64>,
     tags: Option<HashMap<String, String>>,
     mcp_headers: Option<serde_json::Value>,
+    host_tools: Option<Arc<host_tools::HostToolRun>>,
 }
 
 impl<'a> RunJsRequest<'a> {
@@ -2018,6 +2033,11 @@ impl<'a> RunJsRequest<'a> {
         self
     }
 
+    pub(super) fn host_tools(mut self, tools: Arc<host_tools::HostToolRun>) -> Self {
+        self.host_tools = Some(tools);
+        self
+    }
+
     pub async fn execute(self) -> Result<ExecutionId, String> {
         self.engine
             .run_js_inner(
@@ -2030,6 +2050,7 @@ impl<'a> RunJsRequest<'a> {
                 self.execution_timeout_secs,
                 self.tags,
                 self.mcp_headers,
+                self.host_tools,
             )
             .await
     }
@@ -2500,6 +2521,7 @@ impl Engine {
             execution_timeout_secs: None,
             tags: None,
             mcp_headers: None,
+            host_tools: None,
         }
     }
 
@@ -2516,6 +2538,7 @@ impl Engine {
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
         mcp_headers: Option<serde_json::Value>,
+        host_tools: Option<Arc<host_tools::HostToolRun>>,
     ) -> Result<ExecutionId, String> {
         let registry = self
             .execution_registry
@@ -2630,6 +2653,7 @@ impl Engine {
                     raw_snapshot,
                     console_tree,
                     mcp_headers,
+                    host_tools,
                 )
                 .await;
         });
@@ -2692,6 +2716,7 @@ impl Engine {
         raw_snapshot: Option<Vec<u8>>,
         console_tree: mcp_metadata_store::RuntimeTree,
         mcp_headers: Option<serde_json::Value>,
+        host_tools: Option<Arc<host_tools::HostToolRun>>,
     ) {
         let registry = match &self.execution_registry {
             Some(r) => r.clone(),
@@ -2790,6 +2815,7 @@ impl Engine {
                             .console_tree(ct)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
+                            .with_host_tools(host_tools)
                             .maybe_artifact_state(ast),
                     )
                 });

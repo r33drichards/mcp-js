@@ -37,6 +37,7 @@ try {
       if (existsSync(source)) { renameSync(source, destination); hidden.push([source, destination]); }
     }
     console.log(run(process.execPath, ['consumer.mjs']));
+    if (process.env.TEST_WITH_BUN === '1') console.log(run('bun', ['consumer.mjs']));
   } finally {
     for (const [source, destination] of hidden.reverse()) renameSync(destination, source);
     // Keep backups if restoration fails rather than deleting checkout outputs.

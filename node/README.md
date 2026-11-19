@@ -103,6 +103,59 @@ useful in scripts but blocks the host thread. The native engine awaits Promises
 in the executed JavaScript. Execution errors and deadlines are returned in
 JSON; native API failures reject the Promise (or throw from `callTool`).
 
+## Bind host tools to guest JavaScript
+
+`createToolRuntime(engine, config)` binds one tool catalog and dispatcher.
+Reuse the wrapper for calls that share the same permissions. For an app with
+request-specific tools, create one wrapper per request. Each run has its own
+request channel and can make up to 32 host tool calls. The dispatcher receives
+an AbortSignal that is aborted when the run ends. Pass an AbortSignal as the
+second argument to `runJs` to cancel the execution. Validate arguments and
+enforce permissions in the dispatcher.
+
+```js
+import { Engine, createToolRuntime } from '@wholelottahoopla/mcp-js-node';
+
+const engine = Engine.createStateless(64n, 5n);
+try {
+  const runtime = createToolRuntime(engine, {
+    server: "host",
+    tools: [{
+      name: "echo",
+      description: "Echo a message",
+      inputSchema: {
+        type: "object",
+        properties: { message: { type: "string" } },
+        required: ["message"],
+      },
+    }],
+    call(name, args) {
+      if (name !== "echo" || typeof args.message !== "string") {
+        throw new Error("Invalid echo request");
+      }
+      return { message: args.message };
+    },
+  });
+
+  // Advertise these discovery stubs alongside your model's run_js tool.
+  console.log(runtime.listTools());
+
+  const result = await runtime.runJs(`
+    const reply = await mcp.callTool("host", "echo", { message: "hello" });
+    console.log(JSON.parse(reply.content[0].text).message);
+  `);
+  console.log(result.output);
+} finally {
+  engine.close();
+  engine.uniffiDestroy();
+}
+```
+
+Guest code can also discover tools with `mcp.listTools("host")`. The stub
+definitions include the original argument schemas and direct the model to
+`run_js`. The wrapper runs on engines without heap snapshots or upstream MCP.
+Host requests and JSON responses are limited to 256 KiB each.
+
 ## Configuring an engine
 
 `Engine.create(config)` takes an `EngineConfig` assembled with builders. Every

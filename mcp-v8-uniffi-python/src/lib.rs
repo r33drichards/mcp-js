@@ -18,3 +18,5 @@ pub use server::engine::{
     RuntimeCapabilities, RuntimeError, RuntimeLifecycleState, RuntimeMode, RuntimeShutdownResult,
     ToolCallRequest, ToolDefinition,
 };
+
+pub use server::engine::host_tools::{HostToolCall, HostToolRun};

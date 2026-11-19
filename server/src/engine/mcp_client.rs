@@ -854,6 +854,11 @@ async fn op_mcp_call_tool(
     #[string] tool_name: String,
     #[string] arguments_json: String,
 ) -> Result<String, JsErrorBox> {
+    let host = state.borrow().try_borrow::<Arc<super::host_tools::HostToolRun>>().cloned();
+    if let Some(host) = host {
+        return host.call(server_name, tool_name, arguments_json).await.map_err(JsErrorBox::generic);
+    }
+
     let (manager, hooks) = {
         let state = state.borrow();
         let config = state
@@ -1029,6 +1034,9 @@ fn op_mcp_list_tools(
     state: &mut OpState,
     #[string] server_name: String,
 ) -> Result<String, JsErrorBox> {
+    if let Some(host) = state.try_borrow::<Arc<super::host_tools::HostToolRun>>() {
+        return Ok(host.list(&server_name));
+    }
     let config = state
         .try_borrow::<McpConfig>()
         .ok_or_else(|| JsErrorBox::generic("mcp: internal error — no MCP config available"))?;
@@ -1051,6 +1059,9 @@ fn op_mcp_list_tools(
 #[op2]
 #[string]
 fn op_mcp_list_servers(state: &mut OpState) -> Result<String, JsErrorBox> {
+    if let Some(host) = state.try_borrow::<Arc<super::host_tools::HostToolRun>>() {
+        return Ok(host.servers());
+    }
     let config = state
         .try_borrow::<McpConfig>()
         .ok_or_else(|| JsErrorBox::generic("mcp: internal error — no MCP config available"))?;

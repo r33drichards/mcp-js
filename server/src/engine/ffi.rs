@@ -1169,6 +1169,48 @@ impl Engine {
             .collect()
     }
 
+    /// Execute guest JavaScript with an execution-scoped foreign host tool channel.
+    pub async fn run_host_js(
+        self: Arc<Self>,
+        code: String,
+        tools: Arc<host_tools::HostToolRun>,
+    ) -> Result<String, RuntimeError> {
+        tools.start()?;
+        let engine = self.clone();
+        let channel = tools.clone();
+        let result = self
+            .on_runtime(async move {
+                let guard = engine.shutdown_lock.lock().await;
+                engine.ensure_running()?;
+                if engine.heap_enabled() || engine.mcp_client_manager().is_some() {
+                    return Err(RuntimeError::InvalidConfig {
+                        message: "Host tools require an engine without heap snapshots or upstream MCP".into(),
+                    });
+                }
+                let id = engine
+                    .run_js(code)
+                    .host_tools(channel.clone())
+                    .execute()
+                    .await
+                    .map_err(|message| RuntimeError::ToolCall { message })?;
+                drop(guard);
+                let response = tokio::select! {
+                    response = crate::mcp_dispatch::wait_for_execution(&engine, id.clone()) => response,
+                    _ = channel.cancelled() => {
+                        let _ = engine.cancel_execution(id.clone());
+                        json!({"execution_id": id, "status": "cancelled"})
+                    },
+                };
+                if response.get("wait_timed_out").and_then(Value::as_bool) == Some(true) {
+                    let _ = engine.cancel_execution(id);
+                }
+                Ok(response.to_string())
+            })
+            .await;
+        tools.close();
+        result
+    }
+
     pub fn call_tool(
         &self,
         name: String,
