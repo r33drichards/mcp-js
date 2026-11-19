@@ -463,3 +463,40 @@ fn invalid_snapshot_head_is_not_reported_as_absent_file() {
     });
     sim.run().unwrap();
 }
+
+#[test]
+fn post_recovery_js_write_cannot_replace_missing_precrash_ack() {
+    let result = Scenario {
+        seed: 42,
+        topology: Topology {
+            voters: ["n0", "n1", "n2"].map(str::to_owned).to_vec(),
+            clients: vec!["observer".into()],
+        },
+        workload: Workload {
+            every_ms: 250,
+            count: 0,
+            op: Op::RunJs {
+                node: "leader".into(),
+                program: Program(vec![Step::Write {
+                    path: "/data/iteration".into(),
+                    bytes: "post-only-{i}".into(),
+                }]),
+            },
+        },
+        faults: vec![Fault::Crash {
+            at_ms: 900,
+            node: CrashTarget::CurrentLeader,
+        }],
+        recovery: Recovery {
+            stop_workload: true,
+            heal_all: true,
+            restart_crashed: true,
+            deadline_ms: 10_000,
+        },
+        asserts: vec![Assertion::FreshWriteSucceeds],
+    }
+    .run_and_dump("real-sled-no-precrash-ack");
+    assert_eq!(result.acked.len(), 1, "post-recovery publication: {:?}", result.events);
+    assert!(matches!(&result.status, Err(error) if error.contains("FreshWriteSucceeds")),
+        "a fresh write is not recovery evidence without a pre-crash ACK: status={:?} events={:?}", result.status, result.events);
+}
