@@ -541,3 +541,46 @@ fn unavailable_replicas_do_not_count_as_converged() {
     )), "unavailable replicas falsely converged: status={:?} events={:?}",
         result.status, result.events);
 }
+
+#[test]
+fn scheduled_crash_interrupts_in_flight_js_publication() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+    let result = Scenario {
+        seed: 42,
+        topology: Topology {
+            voters: ["n0", "n1", "n2"].map(str::to_owned).to_vec(),
+            clients: vec!["observer".into()],
+        },
+        workload: Workload {
+            every_ms: 250,
+            count: 1,
+            op: Op::RunJs {
+                node: "leader".into(),
+                program: Program(vec![Step::Write {
+                    path: "/data/iteration".into(),
+                    bytes: "in-flight-{i}".into(),
+                }]),
+            },
+        },
+        faults: vec![Fault::Crash {
+            at_ms: 640,
+            node: CrashTarget::CurrentLeader,
+        }],
+        recovery: Recovery {
+            stop_workload: true,
+            heal_all: true,
+            restart_crashed: true,
+            deadline_ms: 10_000,
+        },
+        asserts: vec![],
+    }
+    .run_and_dump("real-sled-inflight-crash");
+    let invoke = result.events.iter().position(|event| matches!(event, ScenarioEvent::Invoke { .. }))
+        .expect("JS operation never started");
+    let crash = result.events.iter().position(|event| matches!(event, ScenarioEvent::Crash { .. }))
+        .expect("scheduled owner crash never occurred");
+    let respond = result.events.iter().position(|event| matches!(event, ScenarioEvent::Respond { .. }))
+        .expect("in-flight JS operation never responded");
+    assert!(invoke < crash && crash < respond,
+        "fault missed in-flight publication: status={:?} events={:?}", result.status, result.events);
+}
