@@ -105,7 +105,7 @@ impl HostConsoleBridge {
 }
 
 impl HostConsoleWriter {
-    fn write_page(&self, seq: u64, bytes: Vec<u8>) -> Result<(), String> {
+    pub fn write_page(&self, seq: u64, bytes: Vec<u8>) -> Result<(), String> {
         if !self.alive.load(Ordering::SeqCst) {
             eprintln!("PROBE write_page: REVOKED id={} seq={} t={}ms", self.execution_id, seq, probe_ms());
             return Err("console owner generation revoked".to_string());
