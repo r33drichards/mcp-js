@@ -669,13 +669,30 @@ fn crashed_worker_cannot_append_console_output_after_fresh_reopen() {
                 while stage.load(Ordering::SeqCst) < 2 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                let output: Vec<u8> = db.tree_names().into_iter()
-                    .filter(|name| name.starts_with(b"ex:"))
-                    .flat_map(|name| db.open_tree(name).unwrap().iter()
-                        .flat_map(|entry| entry.unwrap().1.to_vec()))
-                    .collect();
-                assert!(!String::from_utf8_lossy(&output).contains("stale-after-crash"),
-                    "old V8 worker wrote to reopened generation");
+                let mut stale_hits: Vec<String> = Vec::new();
+                let mut tree_counts: Vec<String> = Vec::new();
+                for name in db.tree_names().into_iter() {
+                    if !name.starts_with(b"ex:") { continue; }
+                    let tree = db.open_tree(name.clone()).unwrap();
+                    let mut count = 0usize;
+                    for entry in tree.iter() {
+                        let (key, value) = entry.unwrap();
+                        count += 1;
+                        if String::from_utf8_lossy(&value).contains("stale-after-crash") {
+                            stale_hits.push(format!(
+                                "tree={} seq={} len={} head={:?}",
+                                String::from_utf8_lossy(&name),
+                                u64::from_be_bytes(key.as_ref().try_into().unwrap_or([0u8; 8])),
+                                value.len(),
+                                &value[..value.len().min(48)]
+                            ));
+                        }
+                    }
+                    tree_counts.push(format!("{}:{}", String::from_utf8_lossy(&name), count));
+                }
+                eprintln!("PROBE stale hits: {:?} tree_counts: {:?}", stale_hits, tree_counts);
+                assert!(stale_hits.is_empty(),
+                    "old V8 worker wrote to reopened generation: {stale_hits:?}");
                 stage.store(3, Ordering::SeqCst);
             }
             let listener = TcpListener::bind(("0.0.0.0", 4301)).await?;
