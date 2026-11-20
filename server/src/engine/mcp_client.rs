@@ -677,7 +677,7 @@ async fn connect_one(
 
     if let Some(options) = http_options {
         use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-        use rmcp::{ClientLifecycleMode, model::ProtocolVersion};
+        use rmcp::{ClientLifecycleMode, ClientServiceExt, model::ProtocolVersion};
 
         let McpServerTransport::Http { url } = &config.transport else {
             return Err("Host HTTP options require an HTTP transport".into());
