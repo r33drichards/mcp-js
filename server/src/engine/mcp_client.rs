@@ -992,15 +992,18 @@ async fn op_mcp_call_tool(
                         .unwrap_or(serde_json::Value::Null),
                 };
                 let input_value = serde_json::to_value(&policy_input).map_err(|e| {
-                    JsErrorBox::generic(format!("mcp.callTool: failed to serialize input: {}", e))
+                    JsErrorBox::generic(format!(
+                        "mcp.callTool: failed to serialize input: {}",
+                        e
+                    ))
                 })?;
                 let provider = provider.clone();
                 let executor: super::hooks::StackExecutor =
                     std::sync::Arc::new(move |effective: serde_json::Value| {
                         let provider = provider.clone();
                         Box::pin(async move {
-                            let eff: EffectiveMcpCall =
-                                serde_json::from_value(effective).map_err(|e| {
+                            let eff: EffectiveMcpCall = serde_json::from_value(effective)
+                                .map_err(|e| {
                                     format!("mcp.callTool: invalid effective input: {}", e)
                                 })?;
                             let arguments = match eff.arguments {
@@ -1015,7 +1018,9 @@ async fn op_mcp_call_tool(
                             };
                             provider.call_tool(&eff.server, &eff.tool, arguments).await
                         })
-                            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+                            as std::pin::Pin<
+                                Box<dyn std::future::Future<Output = _> + Send>,
+                            >
                     });
                 let output = hooks
                     .run_stack_full(input_value, |_| Ok(()), executor)
@@ -1058,12 +1063,13 @@ async fn op_mcp_call_tool(
                 }
             };
 
-            let eff: EffectiveMcpCall = serde_json::from_value(effective.clone()).map_err(|e| {
-                JsErrorBox::generic(format!(
-                    "mcp.callTool: invalid effective input after pre hooks: {}",
-                    e
-                ))
-            })?;
+            let eff: EffectiveMcpCall = serde_json::from_value(effective.clone())
+                .map_err(|e| {
+                    JsErrorBox::generic(format!(
+                        "mcp.callTool: invalid effective input after pre hooks: {}",
+                        e
+                    ))
+                })?;
             server_name = eff.server;
             tool_name = eff.tool;
             arguments = match eff.arguments {
