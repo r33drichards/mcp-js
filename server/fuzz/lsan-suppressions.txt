@@ -1,0 +1,9 @@
+# LeakSanitizer suppressions for the fuzz targets.
+#
+# The `v8` crate intentionally leaks a small per-isolate "annex" sentinel
+# (`Box<IsolateLiveness>`, allocated in `create_annex` during isolate
+# initialization) so that raw `v8::Isolate` pointers can detect whether the
+# owning `Isolate` handle is still alive. This is a deliberate, bounded leak
+# inside the v8 crate and cannot be freed from user code, so suppress it to
+# avoid false-positive LeakSanitizer failures at fuzzer shutdown.
+leak:IsolateLiveness
