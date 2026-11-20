@@ -50,27 +50,29 @@ A follower that falls behind — due to a restart or network partition — is ca
 
 ## What state is replicated
 
-The Raft cluster replicates two stores:
+The ordinary cluster integrates these metadata domains:
 
 | Store | Description |
 |-------|-------------|
 | **Session log** | Records of MCP session initializations and their associated metadata (session ID, heap reference, tags, execution history). |
 | **Heap tags** | The key-value tag store used by `set_heap_tags`, `get_heap_tags`, and `query_heaps_by_tags`. |
+| **Filesystem labels/reflogs** | Label head and reflog companion writes when filesystem persistence is enabled. |
+| **HTTP function registry** | Conditional definition revisions and tombstones when enabled. |
 
-Both stores call `.with_cluster(node)` at startup, which routes their writes through the Raft leader and waits for majority acknowledgment before returning.
+Session, tag, and label stores attach their cluster route at startup; the HTTP registry uses its committed barriers. Domain writes route through the leader and require their documented committed acknowledgment.
 
 ## What state is NOT replicated
 
-**V8 heap snapshots** are not replicated. Each heap is a content-addressed binary blob stored in whichever heap storage backend the node is configured to use (`--directory-path`, `--s3-bucket`, or the default local filesystem). Because heaps are content-addressed by their SHA-256 hash, the same heap content will have the same address on every node — but physically each node stores only the heaps it has created locally.
+**V8 heap snapshots** are not replicated. Each heap is a content-addressed binary blob stored in whichever heap storage backend the node is configured to use (`--heap-store dir --heap-dir PATH` or `--heap-store s3 --s3-bucket BUCKET`; heap persistence defaults to off). Because heaps are content-addressed by their SHA-256 hash, the same heap content will have the same address on every node — but physically each node stores only the heaps it has created locally.
 
 In practice, heaps are replicated at the storage layer by using a shared backend (S3 is the natural choice for multi-node deployments) rather than at the Raft layer. See [Heap storage backends](storage-backends.md) for details.
 
 ## Consistency model
 
-Reads served by a follower may see slightly stale data (up to one heartbeat interval behind the leader's `commit_index`). Writes, however, always go through the leader: if a non-leader node receives a write request it forwards the request to the leader before returning. This means:
+Reads served by a follower may see slightly stale data (arbitrarily behind while connectivity or quorum is unavailable). Writes, however, always go through the leader: if a non-leader node receives a write request it forwards the request to the leader before returning. This means:
 
-- **Writes are linearizable** — they complete only after a majority acknowledges the log entry.
-- **Reads have eventual consistency** — followers apply committed entries asynchronously and may lag by a few milliseconds.
+- **Successful committed mutations are ordered through Raft.** A failed CAS may reflect pending state and is not a committed ownership/read observation.
+- **Reads have eventual consistency** — followers apply committed entries asynchronously; there is no fixed staleness bound.
 
 For most MCP use cases (session metadata and tag lookups) this trade-off is acceptable.
 
@@ -112,3 +114,11 @@ Note that a metadata-only node replicates *metadata*, not snapshot content: heap
 - [Concepts: Transports](transports.md)
 - [Concepts: Stateful sessions & heap snapshots](sessions-and-heaps.md)
 - [Reference: CLI flags](../reference/cli-flags.md)
+
+## Runtime metadata adapter boundary
+
+The optional Rust `RaftMetadataStore` is not automatically used by the existing
+execution registry. Artifact/console payloads require shared blob availability
+independently of pointer replication. SQLite and DynamoDB selectors exclude
+ordinary cluster mode and do not replace the sled Raft log. See
+[runtime publication](runtime-storage.md).

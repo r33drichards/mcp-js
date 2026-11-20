@@ -85,7 +85,7 @@ All operations return Promises and are subject to Rego policy evaluation. Policy
 - **No `fetch` or network access by default**: When the server is started with fetch policies configured via `--policies-json`, a `fetch(url, opts?)` function becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Use `await` to get the response: `const resp = await fetch(url)`. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods (`.text()` and `.json()` also return Promises). Each request is checked against policy before execution. If the server is also configured with `--fetch-header` or `--fetch-header-config`, matching requests may receive static headers or dynamically acquired OAuth client-credentials bearer tokens before policy evaluation. Headers set directly in JavaScript still win. Without fetch policies, there is no network access.
 - **No file system access by default**: Filesystem access requires server configuration with policies. See "Filesystem Access" above.
 - **No environment variables**: The runtime does not provide access to environment variables.
-- **No timers**: Functions like `setTimeout` and `setInterval` are not available.
+- **Timers**: `setTimeout` and `clearTimeout` are available. `setInterval` is not; use an awaited loop for periodic work.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 
 Each execution starts with a fresh V8 isolate — no state is carried between calls.

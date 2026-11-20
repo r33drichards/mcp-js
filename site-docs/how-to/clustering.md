@@ -7,7 +7,7 @@ This guide covers the common tasks for running mcp-v8 in a multi-node Raft clust
 Cluster mode activates when `--cluster-port` is provided. You must also supply `--http-port` or `--sse-port` (stdio transport is not supported in cluster mode) — unless the node runs with [`--metadata-only`](#run-a-metadata-only-node), which has no MCP transport at all.
 
 ```bash
-mcp-v8 \
+mcp-v8 --heap-store s3 --s3-bucket my-mcp-blobs \
   --http-port=3000 \
   --cluster-port=4000 \
   --node-id=node1 \
@@ -24,19 +24,20 @@ Key flags:
 
 Each peer entry in `--peers` gives the node a name and a Raft address. A node does not need to list itself — only the other members.
 
-For a three-node cluster, run three processes with symmetric peer lists:
+For a three-node heap-enabled cluster, use an existing shared bucket and AWS
+credentials on every host, then run processes with symmetric peer lists:
 
 ```bash
 # node1
-mcp-v8 --http-port=3000 --cluster-port=4000 --node-id=node1 \
+mcp-v8 --heap-store s3 --s3-bucket my-mcp-blobs --http-port=3000 --cluster-port=4000 --node-id=node1 \
        --peers=node2@node2:4000,node3@node3:4000
 
 # node2
-mcp-v8 --http-port=3000 --cluster-port=4000 --node-id=node2 \
+mcp-v8 --heap-store s3 --s3-bucket my-mcp-blobs --http-port=3000 --cluster-port=4000 --node-id=node2 \
        --peers=node1@node1:4000,node3@node3:4000
 
 # node3
-mcp-v8 --http-port=3000 --cluster-port=4000 --node-id=node3 \
+mcp-v8 --heap-store s3 --s3-bucket my-mcp-blobs --http-port=3000 --cluster-port=4000 --node-id=node3 \
        --peers=node1@node1:4000,node2@node2:4000
 ```
 

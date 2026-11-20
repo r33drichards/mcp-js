@@ -58,7 +58,7 @@
   dynamodb_table = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags, filesystem labels and runtime bookkeeping. Large runtime values require S3. Incompatible with cluster mode. Config-file key for the `--dynamodb-table` flag. Environment variable: `MCP_V8_DYNAMODB_TABLE`.";
+    description = "Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags, filesystem labels and runtime bookkeeping. Artifact and console payloads use S3 or local files; other metadata obeys native item limits. Incompatible with cluster mode. Config-file key for the `--dynamodb-table` flag. Environment variable: `MCP_V8_DYNAMODB_TABLE`.";
   };
   election_timeout_max = lib.mkOption {
     type = lib.types.nullOr lib.types.ints.unsigned;

@@ -206,7 +206,7 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ### `--dynamodb-table`
 
-Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags, filesystem labels and runtime bookkeeping. Large runtime values require S3. Incompatible with cluster mode
+Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags, filesystem labels and runtime bookkeeping. Artifact and console payloads use S3 or local files; other metadata obeys native item limits. Incompatible with cluster mode
 
 - Environment: `MCP_V8_DYNAMODB_TABLE`
 - Value: `DYNAMODB_TABLE`

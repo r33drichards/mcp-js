@@ -24,6 +24,10 @@ end-to-end, build-something-real walkthroughs, see the
 - [Clustering & replication (Raft)](clustering.md) — configure nodes, join, load-balance.
 - [Generate native UniFFI bindings](generate-uniffi-bindings.md) — build the static library and generate Swift, Kotlin, Python, or Ruby wrappers.
 
+- [Metadata backends](metadata-backends.md) — configure SQLite or DynamoDB independently of blobs.
+- [Native JavaScript SDK](native-javascript-sdk.md) — embed the engine and bind host tools.
+- [Development validation](development-validation.md) — cached builds, fault replay, and filesystem benchmarks.
+
 ## See also
 
 - [Concepts](../concepts/overview.md) — the reasoning behind these tasks.

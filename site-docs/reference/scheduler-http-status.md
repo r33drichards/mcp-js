@@ -1,16 +1,12 @@
 # Scheduler and HTTP feature status
 
-These pages describe the HTTP/MCP management layer, experimental scheduler, and
-dynamic HTTP functions with
-[PR #284 hardening](https://github.com/r33drichards/mcp-js/pull/284) at `ffe1195`
-integrated through #287, #293, #295, and #299. They do not imply that the feature stack
-has merged into `main`, been deployed, or passed fresh combined-stack validation.
+The experimental scheduler, dynamic HTTP functions, and HTTP/MCP management
+layer are merged into `main`. The contracts below describe the implemented
+runtime, including fenced worker admission and explicit recovery. Historical
+PR validation records remain historical; release validation must run on the
+revision being shipped.
 
-## Integrated runtime boundary
-
-The stack is `main → #281 → #282 → #284 → #287 → #293 → #295 → #299 (management layer)`.
-Earlier documentation of #293 at `5c52682` described the pre-hardening runtime;
-those historical test results are not validation of this integrated revision.
+## Runtime boundary
 
 | Concern | Integrated behavior |
 |---|---|
@@ -26,7 +22,7 @@ all voters. Bearer authentication does not encrypt HTTP or make Raft Byzantine-
 tolerant: keep private network boundaries and encrypted transport for remote links.
 Legacy dynamic cluster mode is not changed by this fixed-voter protection.
 
-## Implemented and excluded scope
+## Implemented features and remaining work
 
 Implemented here: numeric five-field cron with IANA timezones, missed-run,
 overlap and retry policies, durable fixed-voter runner admission, dedicated
@@ -35,6 +31,8 @@ invocation, conditional revisions, and NixOS integration tests. The management
 layer adds dedicated HTTP-function MCP tools and opt-in scheduler HTTP/MCP
 operator access. Both transports reuse the existing operations and state model.
 
+[Scheduler production readiness](https://github.com/r33drichards/mcp-js/issues/348)
+tracks recovery workflows, compaction, upgrades, observability, and soak testing.
 The design documents also discuss future work. There is no MCP Events delivery,
 multi-tenant principal-to-grant binding,
 exactly-once external effects, automatic resolution of `Unknown`, schema
@@ -54,3 +52,10 @@ The site follows [Diátaxis](https://diataxis.fr/): tutorials teach through guid
 practice; how-to guides solve operational tasks; reference records contracts;
 explanation develops the model. The existing **Concepts** section contains
 explanation. The repository READMEs and design plans remain supporting material.
+
+## Source
+
+- [Runner](https://github.com/r33drichards/mcp-js/blob/main/scheduler-runner/src/replicated.rs)
+- [Worker](https://github.com/r33drichards/mcp-js/blob/main/server/src/scheduled_worker.rs)
+- [HTTP registry](https://github.com/r33drichards/mcp-js/blob/main/server/src/http_functions.rs)
+- [Management adapters](https://github.com/r33drichards/mcp-js/blob/main/scheduler-runner/src/management.rs)

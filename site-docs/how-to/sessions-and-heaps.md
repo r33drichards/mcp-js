@@ -1,6 +1,8 @@
 # Stateful sessions & heap snapshots
 
-Recipes for resuming a heap, tagging snapshots, querying by tag, naming a session, and inspecting session history. All operations in this guide require stateful mode (the default).
+Recipes for resuming a heap, tagging snapshots, querying by tag, naming a session, and inspecting session history. Heap operations require an explicit `--heap-store dir` or `--heap-store s3`.
+Heap persistence is disabled by default. Filesystem-only sessions can still keep
+history when `--fs-store` is enabled.
 
 ## Resume a heap from a previous execution
 

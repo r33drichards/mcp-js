@@ -195,7 +195,8 @@ pub struct Cli {
 
     /// Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled.
     /// Covers session history, heap tags, filesystem labels and runtime bookkeeping.
-    /// Large runtime values require S3. Incompatible with cluster mode.
+    /// Artifact and console payloads use S3 or local files; other metadata obeys native item limits.
+    /// Incompatible with cluster mode.
     #[arg(long, env = "MCP_V8_DYNAMODB_TABLE", conflicts_with = "cluster_port", help_heading = "Core")]
     pub dynamodb_table: Option<String>,
 

@@ -6,38 +6,48 @@ The HTTP and CLI examples assume a server reachable at `http://localhost:3000`; 
 
 ## Enable the feature
 
-Filesystem snapshots are off by default. Turn them on with `--enable-fs-snapshots`:
+Filesystem snapshots are off by default. Turn them on with `--fs-store dir`:
 
 ```bash
-mcp-v8 --http-port=3000 --enable-fs-snapshots
+mcp-v8 --http-port=3000 --fs-store dir
 ```
 
 Two stores are created. Both default under `--session-db-path` and can be overridden:
 
 | Store | Flag | Default |
 |---|---|---|
-| Blob store (chunks + manifests) | `--fs-store-dir DIR` | `<session-db-path>/fs-blobs` |
-| Label / reflog database (sled) | `--fs-labels-db PATH` | `<session-db-path>/fs-labels` |
+| Blob store (chunks + manifests) | `--fs-dir DIR` | `<session-db-path>/fs-blobs` |
+| Label / reflog database (sled by default) | `--fs-labels-db PATH` | `<session-db-path>/fs-labels` |
 
 ```bash
-mcp-v8 --http-port=3000 --enable-fs-snapshots \
-       --fs-store-dir=/var/lib/mcp-v8/fs-blobs \
+mcp-v8 --http-port=3000 --fs-store dir \
+       --fs-dir=/var/lib/mcp-v8/fs-blobs \
        --fs-labels-db=/var/lib/mcp-v8/fs-labels
 ```
 
 ### Cluster storage requirement
 
-The node-local blob store is **single-node only**. In a cluster, labels replicate cluster-wide but node-local blobs do not, so a label advanced on one node would resolve on another to a manifest that node is missing. The server therefore **refuses to start** with `--enable-fs-snapshots` in cluster mode unless shared blob storage is configured. Use `--s3-bucket` (optionally with `--cache-dir` for a write-through cache):
+The node-local blob store is **single-node only**. In a cluster, labels replicate cluster-wide but node-local blobs do not, so a label advanced on one node would resolve on another to a manifest that node is missing. The server therefore **rejects** `--fs-store dir` in cluster mode. Select `--fs-store s3` instead. Use `--fs-store s3 --s3-bucket BUCKET` (optionally with `--cache-dir` for a write-through cache):
 
 ```bash
 mcp-v8 --http-port=3000 --cluster-port=4000 --node-id=node1 \
        --peers=node2@node2:4000,node3@node3:4000 \
-       --enable-fs-snapshots \
+       --fs-store s3 \
        --s3-bucket=my-mcp-fs \
        --cache-dir=/var/lib/mcp-v8/fs-cache
 ```
 
-With `--s3-bucket` set, blobs and tree nodes live in S3 (so every node resolves them identically), and `--cache-dir` is a **size-bounded** local write-through cache in front of it — it never tries to mirror the whole bucket, so a multi-terabyte snapshot store stays usable on a node with a modest local disk.
+With `--fs-store s3 --s3-bucket BUCKET`, blobs and tree nodes live in S3 (so every node resolves them identically), and `--cache-dir` is a **size-bounded** local write-through cache in front of it — it never tries to mirror the whole bucket, so a multi-terabyte snapshot store stays usable on a node with a modest local disk.
+
+## Mount staging and cache budget
+
+Before guest execution, the Engine stages reachable snapshot trees and chunks on
+its owning runtime. Prefetch overlaps directory lookahead and chunk requests
+under a shared 32-operation I/O budget. Cache staging reservations protect warm
+batches during concurrent prefetch; they do not permanently pin an entire mount.
+Cold staging cost grows with the reachable snapshot. See the
+[prefetch model](../concepts/fs-snapshots.md#the-userspace-overlay-mount) and
+[benchmark procedure](development-validation.md#reproduce-the-filesystem-workload).
 
 ## Mount a snapshot in run_js
 
@@ -343,18 +353,19 @@ A denied operation returns an error before any pointer move happens. See [Polici
 - [How-to: Clustering & replication (Raft)](clustering.md)
 - [Concepts: Policies](../concepts/policies.md)
 
-### Runtime bookkeeping on DynamoDB
+## Metadata and runtime payloads
 
-Selecting `--dynamodb-table` also stores execution records, console pages,
-artifact records and upload grants in a separate `/runtime` namespace. The
-execution registry does not open a local sled database in this mode. Completed
-records and console output can be queried from a fresh process. In-flight V8
-isolates and cancellation handles remain process-local; durable metadata does
-not resume interrupted JavaScript or enable cross-process cancellation.
+`--sqlite-path` or `--dynamodb-table` selects metadata for session history,
+heap tags, filesystem labels/reflogs, execution records, and upload grants.
+[Metadata backend setup](metadata-backends.md) explains their independent
+selectors and startup restrictions. In cluster mode the existing label
+operations still use Raft; neither selector replaces Raft persistence.
 
-Use `run_js` with `wait: true` on Lambda. Final metadata is acknowledged before
-that request completes, and storage failures are returned as errors. Values
-larger than 128 KiB are stored as immutable S3 blobs with DynamoDB references;
-configure `--s3-bucket` for those values. Replaced/unreferenced runtime blobs are
-not swept by filesystem GC; retain them until a dedicated runtime retention
-policy is configured. Runtime metadata currently has no automatic expiry.
+Artifact and console bytes always use the configured S3 bucket or local runtime
+blob directory. Other metadata obeys native database limits: there is no 128 KiB
+spillover fallback. Filesystem GC does not collect runtime payloads. See
+[runtime storage](../concepts/runtime-storage.md) for local runtime maintenance.
+
+On Lambda, use `run_js` with `wait: true` so the request stays open through
+execution and persistence. Durable metadata does not resume an interrupted
+isolate or enable cancellation from another process.
