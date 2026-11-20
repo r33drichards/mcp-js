@@ -90,7 +90,7 @@ reach an action/state; they are not safety failures.
 Requires Java 21, Python 3, and the repository Rust toolchain. Download TLC from
 its official release; `check.py` verifies its SHA-256 before execution. The pinned
 release asset currently identifies itself as TLC 2026.11.15.002146 (bc1b506),
-SHA-256 `7e53aa636dac8a3cb0533f343115c0548e03fc0ce5edc7739becf58d3d0fb84f`.
+SHA-256 `fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713`.
 GitHub release asset `749260120` publishes the same digest as the downloaded jar.
 The prior rolling asset was replaced upstream. Both fast models were regenerated
 with this pin and retained their safety state counts; committed historical
@@ -98,7 +98,7 @@ summaries retain the checksum of the tool that originally produced them.
 A changed upstream asset fails closed; review a new pin rather than bypass it.
 
 ```bash
-curl --fail --location https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o /tmp/tla2tools.jar
+curl --fail --location -H 'Accept: application/octet-stream' https://api.github.com/repos/tlaplus/tlaplus/releases/assets/768714348 -o /tmp/tla2tools.jar
 python3 specs/runner/check.py --jar /tmp/tla2tools.jar --out /tmp/runner-model
 SCHEDULER_MODEL_TRACES=/tmp/runner-model cargo test --locked --manifest-path scheduler-runner/Cargo.toml --lib model_replay -- --nocapture
 python3 specs/runner/mutations.py
