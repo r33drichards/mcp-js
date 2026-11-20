@@ -1332,10 +1332,8 @@ async fn check_assertion(
 #[cfg(feature = "real-sled")]
 impl Drop for ScenarioHost {
     fn drop(&mut self) {
-        eprintln!("PROBE ScenarioHost::drop ENTER t={}ms", server::engine::console::probe_ms());
         self.console_bridge.revoke();
         self._pump.abort();
         self._console_pump.abort();
-        eprintln!("PROBE ScenarioHost::drop DONE t={}ms", server::engine::console::probe_ms());
     }
 }

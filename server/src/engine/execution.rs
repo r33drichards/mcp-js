@@ -135,7 +135,6 @@ impl ExecutionRegistry {
 
     /// Append one WAL page on the owning host, never from a V8 worker.
     pub fn write_console_page(&self, id: &str, seq: u64, bytes: &[u8]) -> Result<(), String> {
-        eprintln!("PROBE registry.write_console_page id={} seq={} bytes={} t={}ms", id, seq, bytes.len(), crate::engine::console::probe_ms());
         let tree = self.db.open_tree(format!("ex:{}", id))
             .map_err(|e| format!("Failed to open console tree: {}", e))?;
         tree.insert(seq.to_be_bytes(), bytes)
