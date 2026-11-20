@@ -55,22 +55,21 @@ and call a host tool successfully before the script copies out the tarball.
 
 ### glibc
 
-From the repository root:
+From the repository root on Linux x64, use the pinned glibc V8 archive supplied by
+the default Nix shell. The published V8 crate omits ICU data needed to rebuild
+V8 itself from source.
 
 ```sh
-nix develop --command bash -c '
-  unset RUSTY_V8_ARCHIVE
-  export V8_FROM_SOURCE=1
-  export GN_ARGS="v8_monolithic=true v8_monolithic_for_shared_library=true"
-  export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
-  cargo build -p mcp-v8-uniffi-python --release \
-    --config mcp-v8-uniffi-python/cargo-config.toml
+nix develop --command bash -euc '
+  test -s "$RUSTY_V8_ARCHIVE"
+  export CARGO_TARGET_DIR="$PWD/target/node-sdk-gnu"
+  cargo build --locked --release -p mcp-v8-uniffi-python
 '
 nix develop --command bash node/scripts/build-bindgen.sh
 npm ci --include=dev --prefix node
 npm run test:unit --prefix node
 nix develop --command bash node/scripts/generate.sh \
-  target/python-uniffi/release/libmcp_v8_uniffi.so
+  target/node-sdk-gnu/release/libmcp_v8_uniffi.so
 npm run typecheck --prefix node
 timeout 90s npm test --prefix node
 npm run build --prefix node
