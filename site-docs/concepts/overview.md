@@ -29,6 +29,8 @@ policy-gated bridges. Everything else below is a facet of that idea.
 - [Authentication (JWT/JWKS)](authentication.md) — the token verification trust model.
 - [Clustering & replication (Raft)](clustering.md) — consensus and replicated state.
 
+- [Runtime payloads and publication](runtime-storage.md) — content identity, durability, optional Raft, and local reclamation.
+
 ## See also
 
 - [Tutorials](../tutorials/overview.md) — learn by doing.

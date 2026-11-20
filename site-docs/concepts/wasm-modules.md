@@ -79,27 +79,16 @@ The default cap is 16 MiB (256 pages). The SQLite example builds with
 cap — 256 pages declared against a 256-page budget, passing the `initial > max`
 check with zero pages to spare.
 
-## Snapshot persistence in stateful mode
+## WASM and persistence
 
-In stateful mode mcp-v8 persists V8 heap state across calls as a content-addressed
-snapshot. WASM module injection follows the snapshot lifecycle:
+Heap snapshots use V8's SnapshotCreator, which disables WebAssembly. Startup
+rejects `--wasm-module` or `--wasm-config` when `--heap-store` is not `none`.
+Use `--heap-store none` for WASM; modules are loaded into each fresh execution.
 
-- **First execution on a new heap (no snapshot)**: modules are injected and the
-  resulting globals are baked into the V8 heap before the snapshot is taken. The
-  snapshot captures the compiled `WebAssembly.Module` objects and any
-  auto-instantiated `exports` objects.
-- **Subsequent executions (snapshot exists)**: the snapshot is restored and
-  `inject_wasm_modules` is **not** called again. The globals are already present
-  in the restored heap.
-
-This makes stateful mode efficient: WASM modules are compiled once per heap, not
-once per call. The trade-off is that existing heap snapshots are bound to the
-modules that were loaded when those heaps were first created. If you restart the
-server with different `--wasm-module` flags, only new heaps (created after the
-restart) pick up the changed modules.
-
-In stateless mode (`--stateless`) there is no snapshot. The module bytes are
-re-validated and re-compiled from disk on every execution.
+Filesystem snapshots are a separate axis: `--fs-store dir|s3` can be combined
+with WASM. This does not automatically persist a WASM module's linear memory
+or an in-memory guest database. The application must explicitly save and
+reload its data through supported file or serialization APIs.
 
 ## Discovery: WASM stub tools
 

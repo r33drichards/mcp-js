@@ -60,7 +60,7 @@ This is not one universal record schema or a plan to put payload bytes in Raft.
 | --- | --- | --- | --- |
 | Heap snapshots | SHA-256 of raw snapshot bytes; stored with a checksum envelope | Session history and heap tags | Standalone metadata or domain-specific cluster paths |
 | Filesystem snapshots | BLAKE3-addressed chunks and serialized tree nodes; some file bytes inline inside object-store nodes | Label heads and reflogs | Database CAS or Raft CAS with atomic reflog companions |
-| Runtime payloads in #328 | UUID-named `runtime/` objects; not yet content-addressed | Artifact keys and ordered console-page references; execution records and grants remain database values | Standalone database paths, including local sled in cluster deployments |
+| Runtime payloads | Typed SHA-256 objects under `runtime/v2/`; legacy outer-tagged UUID references remain readable | Artifact keys and ordered console-page references; execution records and grants remain database values | Standalone database paths, including local sled in cluster deployments |
 
 Relevant code:
 
@@ -238,9 +238,9 @@ remain compatibility defaults until an explicit configuration migration is
 implemented. A cache lookup that fetches from its configured primary is distinct
 from failing over to a different authoritative backend.
 
-Migrate both server bootstrap and direct/FFI constructors. #328's direct local
-constructors still retain inline behavior; a shared architecture must make that
-choice explicit rather than accidentally leaving a second storage policy.
+Server bootstrap and direct execution registries initialize blob storage. Explicit
+raw-tree APIs and `from_store` without an attached backend retain inline behavior
+for compatibility; attaching a backend selects the versioned reference index.
 
 Keep existing objects and references readable. Write new versioned references
 only after adding dual-format readers, and perform backend relocation through an
@@ -256,7 +256,7 @@ delete its blob. Defer cross-domain shared sweeping until publication pins/lease
 explicit quiescence protocol protect concurrent writers and lagging readers.
 A naive metadata scan plus an age threshold does not establish that safety.
 
-## Suggested implementation stack
+## Original implementation sequence (historical design)
 
 Each step should be reviewable independently and preserve existing wire formats
 until its migration is explicitly introduced:
@@ -301,6 +301,6 @@ until its migration is explicitly introduced:
   they are prerequisites for enabling shared deletion, not evidence supplied by
   this proposal.
 
-The first implementation PR should be the behavior-preserving extraction and
+The original first implementation step was intended to be the behavior-preserving extraction and
 contract tests, rather than a simultaneous rewrite of hashing, metadata schemas,
 configuration, and consensus.

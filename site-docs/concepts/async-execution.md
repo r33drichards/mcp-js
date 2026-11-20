@@ -6,7 +6,8 @@ This page explains why execution in mcp-v8 is asynchronous, how the submit-poll 
 
 V8 JavaScript execution can be long-running — a script might loop, await network I/O, or process large datasets over several seconds or minutes. Blocking an MCP tool call or an HTTP request for that duration is impractical: MCP clients have their own timeouts, and HTTP connections may close.
 
-mcp-v8 therefore separates submission from observation. Every execution is queued and run on a dedicated Tokio task. The caller gets an `execution_id` immediately and polls for completion at its own pace.
+mcp-v8 therefore separates submission from observation. Execution is submitted to the engine and run on a dedicated Tokio task. The session-capable surface normally returns an `execution_id` for polling;
+`run_js` with `wait: true` instead waits for execution and persistence to stop.
 
 ## The submit-poll model
 
@@ -32,9 +33,16 @@ The caller is free to poll as frequently or infrequently as it likes. Output can
 All execution state is managed by `ExecutionRegistry` (in `server/src/engine/execution.rs`). It combines two storage layers:
 
 - **In-memory `DashMap`** — holds the `ExecutionRecord` struct for each execution (status, isolate handle, result, timestamps). Lookups are O(1) and lock-free.
-- **`sled` embedded database** — each execution gets a dedicated sled tree named `ex:{id}` that receives console output as it is written. This persists output across the lifetime of the server process and makes it readable before the execution completes.
+- **Runtime store** — console descriptors and artifact metadata use the selected
+  sled, SQLite, or DynamoDB backend; their bytes are immutable S3/filesystem
+  objects. SQLite/DynamoDB also persist execution records. The default sled
+  registry retains live status records in memory, so console/artifact persistence
+  does not imply that old status IDs can be queried after restart.
 
-When `register()` is called an entry is created in both stores with status `running`. When the execution finishes (via `complete`, `fail`, `timed_out`, or `cancel`) the status and terminal timestamps are written to the in-memory record.
+Registration opens an ordered console tree and creates the live `running` record.
+Terminal handling updates status/timestamps and, for the configured remote
+metadata adapter (SQLite/DynamoDB), persists the record. Isolate handles remain
+process-local; reading durable metadata never resumes an interrupted execution.
 
 ## Max-concurrent executions
 
@@ -71,7 +79,11 @@ Once an execution reaches a terminal state it cannot transition again. Calling `
 
 ## Output pagination model
 
-Console output (everything written via `console.log`, `console.error`, etc.) is stored in a sled tree as raw bytes. When a caller requests output, `get_console_output` reads the entire tree, reconstructs the byte sequence, and slices it according to the requested window.
+Server console output is stored in 256 KiB blob pages with ordered size/newline
+descriptors in the metadata store. Pagination scans descriptors and fetches only
+objects needed for the requested byte/line window; a missing later object need
+not prevent reading an intact early window. Raw inline constructors retain 4 KiB
+pages. Output becomes visible as full pages are published or the tail is flushed.
 
 Two pagination modes are available:
 
@@ -98,7 +110,25 @@ The `has_more` flag is `true` when more output exists beyond the current page. T
 
 ## Stateless mode and the synchronous shortcut
 
-In stateless mode (`--stateless`) the `run_js` MCP tool internally submits the code, polls every 50 ms for up to 6000 iterations (300 seconds), collects all console output in a single pass, and returns `{ "output": "…" }` directly. This is a convenience wrapper — no separate polling or output-fetching calls are needed, but the caller blocks for the full execution duration. The async tools (`get_execution`, `get_execution_output`, `cancel_execution`, `list_executions`) are not available in stateless mode.
+When both `--heap-store none` and `--fs-store none` are selected (the default) the `run_js` MCP tool internally submits the code, polls every 50 ms for up to 6000 iterations (300 seconds), collects all console output in a single pass, and returns `{ "output": "…" }` directly. This is a convenience wrapper — no separate polling or output-fetching calls are needed, but the caller blocks for the full execution duration. The async/session tools are not advertised by this stateless MCP surface;
+artifact tools and capability discovery may still be present. Filesystem-only
+persistence uses the session-capable surface without requiring heap snapshots.
+REST execution endpoints have their own submit/query interface.
+
+## Wait through persistence
+
+On the session-capable MCP surface, `run_js` with `wait: true` waits for the
+background execution activity to stop, including snapshot/runtime persistence.
+The bounded wait returns the original ID with `wait_timed_out: true` when it
+cannot settle; it never resubmits. Completed output is capped at 1 MiB in this
+response, with `output_truncated` indicating that pagination is needed. This is
+the appropriate mode for Lambda invocations that must remain open through writes.
+
+Visible `cancelled` status can precede actual task shutdown. It is not proof that
+all effects have stopped; the scheduler worker's cancellation protocol separately
+waits for quiescence. Streamable HTTP/stdio also support the MCP tasks extension
+for clients that negotiate it; the legacy SSE transport does not. A protocol
+task ID and an engine execution ID are different identifiers.
 
 ## See also
 

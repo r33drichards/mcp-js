@@ -87,8 +87,15 @@ def main() -> int:
     chrome = find_chrome(args.chrome)
 
     checks = [
-        ("/", ["mcp-v8", "Install"]),
+        ("/", ["mcp-v8", "Install", "Releases", "https://github.com/r33drichards/mcp-js/releases"]),
         ("/install/overview/", ["Install"]),
+        ("/install/github-release-packages/", ["npm install", "linux-x64-musl.tar.gz", "mcp-js-client"]),
+        ("/how-to/metadata-backends/", ["SQLite", "DynamoDB", "400 KiB"]),
+        ("/how-to/native-javascript-sdk/", ["createToolRuntime", "engine.dispose", "glibc 2.39"]),
+        ("/how-to/development-validation/", ["Crane", "fs-grep.mjs"]),
+        ("/concepts/runtime-storage/", ["runtime_refs:v1:", "unknown", "S3"]),
+        ("/reference/release-upgrade/", ["152.2.0", "348"]),
+        ("/reference/scheduler-http-status/", ["merged into", "production-readiness"]),
         ("/reference/http-api/", ["HTTP API"]),
         ("/reference/mcp-tools/", ["MCP Tools"]),
         ("/tutorials/lambda-dynamodb/", ["Deploy mcp-js on Lambda", "Prove recovery", "wait: true"]),

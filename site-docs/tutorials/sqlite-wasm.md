@@ -41,7 +41,7 @@ Pre-load the `.wasm` file under the global name `sqlite` with `--wasm-module`.
 Run over HTTP so we can submit the example with `curl`:
 
 ```bash
-mcp-v8 --stateless --http-port 8080 \
+mcp-v8 --heap-store none --http-port 8080 \
   --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
 
@@ -84,7 +84,7 @@ module from JavaScript via `run_js` (it's the `__wasm_sqlite` global, exactly as
 below). Add a human description so agents know what it's for:
 
 ```bash
-mcp-v8 --stateless --http-port 8080 \
+mcp-v8 --heap-store none --http-port 8080 \
   --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm \
   --wasm-stub-description sqlite="In-memory SQLite database (exec/query SQL)."
 ```
@@ -119,20 +119,17 @@ db.close();
 JSON.stringify(result.rows);
 ```
 
-## Persisting the database (stateful mode)
+## Persistence boundaries
 
-In stateless mode the database lives only for that one execution. To carry it
-across calls, run statefully and pass the returned `heap` key to the next
-`run_js`:
+This example opens an in-memory guest SQLite database. Its data lives only for
+that execution. V8 heap snapshots cannot preserve it: `--heap-store dir|s3`
+is incompatible with `--wasm-module` and is rejected at startup.
 
-```bash
-mcp-v8 --directory-path /tmp/mcp-v8-heaps \
-  --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
-```
-
-The initialized SQLite runtime and its in-memory data are captured in the V8
-heap snapshot, so a later run that restores that heap continues with the same
-database. See [Stateful sessions & heap snapshots](../how-to/sessions-and-heaps.md).
+Filesystem snapshots (`--fs-store dir|s3`) can be enabled independently, but
+saving guest database contents requires explicit serialization/file support;
+this wrapper does not automatically save them. For the server's own durable
+session and execution metadata, see [SQLite metadata](../how-to/metadata-backends.md).
+That backend is independent of this guest WASM database.
 
 ## Things to keep in mind
 
@@ -140,7 +137,7 @@ database. See [Stateful sessions & heap snapshots](../how-to/sessions-and-heaps.
 - SQLite calls here are synchronous.
 - WASM linear memory is separate from the V8 heap limit; large datasets may need
   a higher per-module cap (`--wasm-module name=...:64m`) and/or a higher
-  `--heap-memory-max` for the snapshot.
+  `--heap-memory-max` for the execution.
 
 For the full source, see `examples/sqlite-wasm/example.js` and
 `examples/sqlite-wasm/build.sh`.

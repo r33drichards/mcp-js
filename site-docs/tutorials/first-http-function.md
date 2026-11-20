@@ -1,7 +1,7 @@
 # Create your first HTTP function
 
 In this lesson you will register a JavaScript handler, call it, and remove it.
-You need this management-layer checkout, Rust, Python 3, curl, and two terminals.
+You need a current `main` checkout, Rust, Python 3, curl, and two terminals.
 See [feature status](../reference/scheduler-http-status.md) for the exact baseline.
 All requests stay on loopback. This lesson uses an unauthenticated local server;
 use [authentication](../how-to/authentication.md) for a shared deployment.

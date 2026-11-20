@@ -93,25 +93,26 @@ See `python/README.md` in the repository for wheel packaging and result semantic
 
 ### Run the Python smoke test locally
 
-With `uv` installed, enter `nix develop`, install `uniffi-bindgen` as shown
-above, then run:
+On Linux x64, build with the current pinned archive and pass that library to
+the smoke script explicitly:
 
 ```bash
-uv run scripts/test-python-uniffi.py
-```
-
-This builds the Python-loadable shared library, generates fresh Python
-bindings in a temporary directory, and imports them using uv's Python.
-It does not start or connect to an HTTP server. The first run builds V8 from
-source with shared-library-compatible flags and can take a long time; subsequent
-runs reuse `target/python-uniffi`. Linux and macOS are supported.
-
-To test a shared library you already built:
-
-```bash
+nix develop --command bash -euc '
+  test -s "$RUSTY_V8_ARCHIVE"
+  CARGO_TARGET_DIR="$PWD/target/python-uniffi" \
+    cargo build --locked --release -p mcp-v8-uniffi-python
+'
+# Install the pinned uniffi-bindgen as described above, then:
 uv run scripts/test-python-uniffi.py \
   --library target/python-uniffi/release/libmcp_v8_uniffi.so
 ```
+
+The script generates fresh Python bindings and imports the supplied library;
+it does not start an HTTP server. Its no-argument path still requests a V8
+source build, which fails with missing ICU inputs in the current published V8
+crate. Use `--library` with a compatible prebuilt-library build instead. The
+[SDK recipe](native-javascript-sdk.md#build-and-validate-a-package) describes
+the current Linux glibc build and distribution checks.
 
 On macOS use `libmcp_v8_uniffi.dylib`. The test creates a native stateless
 engine and checks JavaScript output, Promise awaiting, thrown errors, timeout

@@ -49,9 +49,11 @@ sequenceDiagram
 
 ## Sandboxing and security considerations
 
-**No chroot or namespace isolation.** The policy is the only sandbox. There is no OS-level restriction on which paths the process can reach — `mcp-v8` runs with whatever filesystem permissions the host process has. The Rego policy is therefore the critical control point; a permissive `default allow = true` policy grants access to every file the process user can read or write.
+**Application policy and optional OS isolation.** Without `--sandbox-manifest`,
+there is no additional OS-level confinement beyond process permissions — `mcp-v8` runs with whatever filesystem permissions the host process has. The Rego policy is therefore the critical control point; a permissive `default allow = true` policy grants access to every file the process user can read or write.
 
-**Path strings are not normalized before policy evaluation.** The `path` value passed to the policy is the exact string the JS code provides. A policy checking `startswith(input.path, "/safe/dir/")` can be bypassed with `"/safe/dir/../../etc/passwd"` if the Rego does not also normalise or disallow `..` sequences. Production policies should validate that paths do not contain `..` components, or resolve paths to canonical form at the application layer before calling `fs.*`.
+**Path strings are not normalized before policy evaluation.** The `path` value passed to the policy is the exact string the JS code provides. A policy checking `startswith(input.path, "/safe/dir/")` can be bypassed with `"/safe/dir/../../etc/passwd"` if the Rego does not also normalise or disallow `..` sequences. An optional [OS sandbox](os-sandbox.md) adds Landlock/Seatbelt confinement for
+the entire server process. Path policies should validate that paths do not contain `..` components, or resolve paths to canonical form at the application layer before calling `fs.*`.
 
 **Two-path operations.** `rename` and `copyFile` supply both `path` (source) and `destination` (target) in the policy input. A policy that checks only `input.path` leaves the destination unconstrained. The example policy in `policies/filesystem.rego` demonstrates the correct pattern: a `check_destination` helper validates the destination with the same prefix check as the source.
 

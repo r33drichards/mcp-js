@@ -7,7 +7,8 @@ IAM-authenticated Function URL and Lambda Web Adapter in front of mcp-js.
 **Validation status:** the commands below are a deployment recipe, not a record
 of an executed AWS deployment. Validate the image and persistence checks in a
 disposable environment before connecting an agent or GitHub event consumer.
-Use a checkout containing the DynamoDB runtime changes from PR #306.
+Use a current release or pinned `main` checkout containing the DynamoDB runtime
+and content-addressed payload implementations.
 
 ## What persists
 

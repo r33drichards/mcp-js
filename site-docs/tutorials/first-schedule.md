@@ -1,10 +1,10 @@
 # Schedule your first JavaScript run
 
 This lesson starts one experimental runner and one dedicated worker on loopback,
-then observes a minute-based occurrence. You need this integrated management-layer checkout,
+then observes a minute-based occurrence. You need a current `main` checkout,
 Rust, Python 3, curl, and three terminals in the repository root. Allow up to two minutes.
 Read [feature status](../reference/scheduler-http-status.md): this is a local
-lesson for the integrated runtime, not a production deployment recipe.
+lesson for the current runtime, not a production deployment recipe.
 
 ## Prepare an isolated configuration
 
