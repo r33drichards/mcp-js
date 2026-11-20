@@ -16,5 +16,5 @@ pub use server::engine::{
     DEFAULT_EXECUTION_TIMEOUT_SECS, DEFAULT_MCP_STUB_PREFIX, DEFAULT_WASM_STUB_PREFIX, Engine,
     ExecutionRequest, FsEntryKind, FsErrorKind, FsMetadata, FsView, McpRequestHeaders,
     RuntimeCapabilities, RuntimeError, RuntimeLifecycleState, RuntimeMode, RuntimeShutdownResult,
-    ToolCallRequest, ToolDefinition,
+    ToolCallRequest, ToolDefinition, UpstreamMcpServer,
 };

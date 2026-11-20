@@ -65,6 +65,15 @@ pub struct ToolDefinition {
     pub input_schema_json: String,
 }
 
+/// An upstream Streamable HTTP endpoint for an embedded engine.
+#[derive(Clone, uniffi::Record)]
+pub struct UpstreamMcpServer {
+    pub name: String,
+    pub url: String,
+    pub bearer_token: Option<String>,
+    pub session_id: Option<String>,
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct McpRequestHeaders {
     pub values: HashMap<String, String>,
@@ -447,6 +456,136 @@ impl Engine {
             fs_labels_db: None,
             wasm_modules: None,
         })
+    }
+
+    /// Construct a stateless embedded engine whose scripts can call upstream MCP tools.
+    #[uniffi::constructor]
+    pub fn create_stateless_with_mcp(
+        heap_memory_max_mb: u64,
+        execution_timeout_secs: u64,
+        servers: Vec<UpstreamMcpServer>,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        use mcp_client::{
+            HttpClientOptions, McpClientManager, McpServerConfig, McpServerTransport,
+        };
+
+        let client = reqwest_mcp::Client::builder()
+            .redirect(reqwest_mcp::redirect::Policy::none())
+            .build()
+            .map_err(|error| operation_message(error.to_string()))?;
+        let mut configs = Vec::with_capacity(servers.len());
+        let mut options = HashMap::with_capacity(servers.len());
+        for server in servers {
+            let url =
+                reqwest_mcp::Url::parse(&server.url).map_err(|_| RuntimeError::InvalidConfig {
+                    message: "Invalid upstream MCP URL".into(),
+                })?;
+            let secure = url.scheme() == "https"
+                || url.scheme() == "http"
+                    && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+            if !secure
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(RuntimeError::InvalidConfig {
+                    message: "Upstream MCP requires an HTTPS or loopback HTTP endpoint without URL credentials, query, or fragment".into(),
+                });
+            }
+            if server.name.is_empty() || options.contains_key(&server.name) {
+                return Err(RuntimeError::InvalidConfig {
+                    message: "Upstream MCP names must be nonempty and unique".into(),
+                });
+            }
+            if server.bearer_token.as_ref().is_some_and(|token| {
+                token.trim().is_empty() || http::HeaderValue::from_str(token).is_err()
+            }) {
+                return Err(RuntimeError::InvalidConfig {
+                    message: "Invalid upstream MCP bearer token".into(),
+                });
+            }
+            let mut headers = HashMap::new();
+            if let Some(session) = server.session_id {
+                let mut value = http::HeaderValue::from_str(&session)
+                    .ok()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| RuntimeError::InvalidConfig {
+                        message: "Invalid upstream MCP session ID".into(),
+                    })?;
+                value.set_sensitive(true);
+                headers.insert(http::HeaderName::from_static("x-mcp-session-id"), value);
+            }
+            options.insert(
+                server.name.clone(),
+                HttpClientOptions {
+                    client: client.clone(),
+                    bearer_token: server.bearer_token,
+                    headers,
+                },
+            );
+            configs.push(McpServerConfig {
+                name: server.name,
+                transport: McpServerTransport::Http { url: server.url },
+                auth: None,
+            });
+        }
+
+        let mut engine = Self::create_stateless(heap_memory_max_mb, execution_timeout_secs)?;
+        let engine_mut = Arc::get_mut(&mut engine).ok_or_else(|| RuntimeError::Initialization {
+            message: "new embedded engine unexpectedly shared".into(),
+        })?;
+        let runtime =
+            engine_mut
+                .tokio_runtime
+                .as_ref()
+                .ok_or_else(|| RuntimeError::Initialization {
+                    message: "embedded engine has no executor".into(),
+                })?;
+        let timeout = std::time::Duration::from_secs(30 * configs.len().max(1) as u64);
+        let manager = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    runtime.block_on(async {
+                        tokio::time::timeout(
+                            timeout,
+                            McpClientManager::connect_with_http_options(configs, options),
+                        )
+                        .await
+                        .map_err(|_| operation_message("upstream MCP connection timed out".into()))?
+                        .map_err(operation_message)
+                    })
+                })
+                .join()
+                .map_err(|_| RuntimeError::Initialization {
+                    message: "upstream MCP bootstrap panicked".into(),
+                })
+        })??;
+        engine_mut.hardening = HardeningConfig::all();
+        engine_mut.mcp_client_manager = Some(Arc::new(manager));
+        Ok(engine)
+    }
+
+    /// Return the tool catalog for an upstream server configured at construction.
+    pub fn list_upstream_tools(&self, server: String) -> Result<Vec<ToolDefinition>, RuntimeError> {
+        self.ensure_running()?;
+        let manager = self
+            .mcp_client_manager
+            .as_ref()
+            .ok_or_else(|| operation_message("no upstream MCP servers configured".into()))?;
+        manager
+            .list_tools(Some(&server))
+            .map_err(operation_message)?
+            .into_iter()
+            .map(|tool| {
+                Ok(ToolDefinition {
+                    name: tool.name,
+                    description: tool.description,
+                    input_schema_json: serde_json::to_string(&tool.input_schema)
+                        .map_err(|error| operation_message(error.to_string()))?,
+                })
+            })
+            .collect()
     }
 
     /// Construct an engine from a builder-assembled [`EngineConfig`]. Each axis
