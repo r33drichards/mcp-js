@@ -1,0 +1,14 @@
+{
+  "mdn": {
+    "files": 14754,
+    "bytes": 61688455,
+    "computer science": 25,
+    "javascript": 19405
+  },
+  "wikipedia": {
+    "computer science": 39200,
+    "javascript": 7080,
+    "articles": 6259967,
+    "shards": 385
+  }
+}

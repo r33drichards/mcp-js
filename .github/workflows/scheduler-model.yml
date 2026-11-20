@@ -26,7 +26,9 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Download pinned TLC (checksum verified by checker)
-        run: curl --fail --location --retry 3 https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o /tmp/tla2tools.jar
+        run: >-
+          curl --fail --location --retry 3 -H 'Accept: application/octet-stream'
+          https://api.github.com/repos/tlaplus/tlaplus/releases/assets/768714348 -o /tmp/tla2tools.jar
       - name: Generate bounded state witnesses and counterexamples
         env:
           DEEP: ${{ inputs.deep }}
