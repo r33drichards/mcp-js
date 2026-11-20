@@ -3,8 +3,9 @@ use aws_sdk_s3::primitives::ByteStream;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use mcp_metadata_store::blob::BlobStaging;
 use aws_config;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// Compatibility name for the shared blob backend used by heaps, filesystems and runtime payloads.
@@ -206,6 +207,16 @@ impl FileHeapStorage {
         Ok(out)
     }
     fn atomic_write(&self, name: &str, data: &[u8], immutable: bool) -> Result<(), String> {
+        self.publish_blob(name, data, immutable, true)
+    }
+
+    fn publish_blob(
+        &self,
+        name: &str,
+        data: &[u8],
+        immutable: bool,
+        durable: bool,
+    ) -> Result<(), String> {
         use std::io::Write;
         if name.is_empty()
             || std::path::Path::new(name)
@@ -216,7 +227,7 @@ impl FileHeapStorage {
         }
         let path = self.dir.join(name);
         let parent = path.parent().ok_or("invalid blob parent")?;
-        {
+        if durable {
             // Root provisioning and newly created descendants must be durable
             // before a sibling writer can publish an object below them.
             let _creation = self
@@ -242,6 +253,10 @@ impl FileHeapStorage {
                 Self::sync_directory(&directory)?;
                 directory = child;
             }
+        } else {
+            // Cache data is reconstructible. Create the directory lazily and
+            // publish atomically without syncing the local cache to disk.
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let temp = parent.join(format!(".object-{}", uuid::Uuid::new_v4()));
         let result = (|| {
@@ -251,7 +266,9 @@ impl FileHeapStorage {
                 .open(&temp)
                 .map_err(|e| e.to_string())?;
             file.write_all(data).map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
+            if durable {
+                file.sync_all().map_err(|e| e.to_string())?;
+            }
             if immutable {
                 match std::fs::hard_link(&temp, &path) {
                     Ok(()) => (),
@@ -268,7 +285,10 @@ impl FileHeapStorage {
             } else {
                 std::fs::rename(&temp, &path).map_err(|e| e.to_string())?;
             }
-            Self::sync_directory(parent)
+            if durable {
+                Self::sync_directory(parent)?;
+            }
+            Ok(())
         })();
         let _ = std::fs::remove_file(temp);
         result
@@ -637,47 +657,114 @@ pub const DEFAULT_CACHE_CAPACITY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// and re-cached on the next `get`.
 #[derive(Default)]
 struct CacheBound {
-    sizes: HashMap<String, u64>,
-    order: VecDeque<String>,
+    entries: HashMap<String, (u64, u64)>,
+    evictable: BTreeMap<u64, String>,
+    reserved: BTreeMap<u64, String>,
     total: u64,
     cap: u64,
+    next_id: u64,
+    pins: HashMap<String, HashSet<u64>>,
+    staging: HashMap<u64, HashSet<String>>,
 }
 
 impl CacheBound {
-    /// Record `name` at `size` bytes and return the keys that must be evicted
-    /// from the local cache to stay within `cap`.
+    fn allocate_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
     fn record(&mut self, name: &str, size: u64) -> Vec<String> {
-        if let Some(old) = self.sizes.insert(name.to_string(), size) {
-            self.total -= old;
+        if let Some((old_size, _)) = self.entries.get_mut(name) {
+            self.total -= *old_size;
+            *old_size = size;
         } else {
-            self.order.push_back(name.to_string());
+            let id = self.allocate_id();
+            self.entries.insert(name.to_owned(), (size, id));
+            let order = if self.pins.contains_key(name) { &mut self.reserved } else { &mut self.evictable };
+            order.insert(id, name.to_owned());
         }
         self.total += size;
 
         let mut evicted = Vec::new();
-        while self.total > self.cap {
-            // Never evict the entry we just recorded (it is at the back).
-            if self.order.len() <= 1 {
-                break;
-            }
-            let Some(victim) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(sz) = self.sizes.remove(&victim) {
-                self.total -= sz;
-            }
+        while self.total > self.cap && self.entries.len() > 1 {
+            let victim = self.evictable.values().take(2).find(|key| key.as_str() != name)
+                .or_else(|| self.evictable.first_key_value().map(|(_, key)| key))
+                .or_else(|| self.reserved.values().take(2).find(|key| key.as_str() != name))
+                .expect("cache has multiple entries")
+                .clone();
+            self.forget(&victim);
             evicted.push(victim);
         }
         evicted
     }
 
     fn forget(&mut self, name: &str) {
-        if let Some(sz) = self.sizes.remove(name) {
-            self.total -= sz;
-            if let Some(pos) = self.order.iter().position(|k| k == name) {
-                self.order.remove(pos);
+        if let Some((size, id)) = self.entries.remove(name) {
+            self.total -= size;
+            self.evictable.remove(&id);
+            self.reserved.remove(&id);
+        }
+        // Evicted keys are no longer tracked by any staging operation.
+        if let Some(owners) = self.pins.remove(name) {
+            for owner in owners {
+                self.staging.get_mut(&owner).expect("active reservation").remove(name);
             }
         }
+    }
+
+    fn pin(&mut self, owner: u64, name: &str) {
+        let names = self.staging.get_mut(&owner).expect("active reservation");
+        if !names.contains(name) {
+            names.insert(name.to_owned());
+            self.pins.entry(name.to_owned()).or_default().insert(owner);
+            if let Some((_, id)) = self.entries.get(name) {
+                if let Some(key) = self.evictable.remove(id) {
+                    self.reserved.insert(*id, key);
+                }
+            }
+        }
+    }
+
+    fn unpin_all(&mut self, owner: u64) {
+        for name in self.staging.remove(&owner).expect("active reservation") {
+            let owners = self.pins.get_mut(&name).expect("reserved key");
+            owners.remove(&owner);
+            if owners.is_empty() {
+                self.pins.remove(&name);
+                if let Some((_, id)) = self.entries.get(&name) {
+                    if let Some(key) = self.reserved.remove(id) {
+                        self.evictable.insert(*id, key);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Reservations for resident and queued chunks, released when staging ends.
+struct CachePins<'a, P: HeapStorage + Clone> {
+    cache: &'a WriteThroughCacheHeapStorage<P>,
+    owner: u64,
+}
+
+#[async_trait]
+impl<P: HeapStorage + Clone> BlobStaging for CachePins<'_, P> {
+    fn reserve(&mut self, names: &[String]) {
+        let mut bound = self.cache.bound.lock().unwrap();
+        for name in names {
+            bound.pin(self.owner, name);
+        }
+    }
+
+    async fn warm(&self, name: &str) -> Result<(), String> {
+        self.cache.warm_reserved(name, Some(self.owner)).await
+    }
+}
+
+impl<P: HeapStorage + Clone> Drop for CachePins<'_, P> {
+    fn drop(&mut self) {
+        self.cache.bound.lock().unwrap().unpin_all(self.owner);
     }
 }
 
@@ -685,8 +772,9 @@ impl CacheBound {
 /// local filesystem cache.
 /// On put: writes to both the local FS cache and the primary storage.
 /// On get: checks the FS cache first; falls back to the primary and caches the
-/// result locally. When the cache exceeds its capacity, the oldest entries are
-/// evicted from local disk (the primary is untouched, so reads still succeed).
+/// result locally. At capacity, eviction prefers the oldest entry outside
+/// any staging reservation. If the staged data exceeds capacity, the cache
+/// can still evict reserved entries. The primary remains untouched.
 #[derive(Clone)]
 pub struct WriteThroughCacheHeapStorage<P: HeapStorage + Clone> {
     primary: P,
@@ -711,13 +799,44 @@ impl<P: HeapStorage + Clone> WriteThroughCacheHeapStorage<P> {
         }
     }
 
-    /// Record a freshly-cached blob and evict the oldest entries (from the local
-    /// cache only) to stay within capacity. Eviction is best-effort.
-    async fn note_cached(&self, name: &str, size: u64) {
-        let evicted = self.bound.lock().unwrap().record(name, size);
-        for key in evicted {
-            let _ = self.cache.delete(&key).await;
+    /// File cache operations are synchronous. Serialize writes and eviction
+    /// accounting so eviction cannot delete a key another task just reinserted.
+    fn cache_blob(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let mut bound = self.bound.lock().unwrap();
+        self.write_cache(&mut bound, name, data)
+    }
+
+    fn write_cache(&self, bound: &mut CacheBound, name: &str, data: &[u8]) -> Result<(), String> {
+        self.cache.publish_blob(name, data, false, false)?;
+        self.record_cached(bound, name, data.len() as u64);
+        Ok(())
+    }
+
+    fn record_cached(&self, bound: &mut CacheBound, name: &str, size: u64) {
+        for key in bound.record(name, size) {
+            let _ = std::fs::remove_file(self.cache.dir.join(key));
         }
+    }
+
+    async fn warm_reserved(&self, name: &str, owner: Option<u64>) -> Result<(), String> {
+        {
+            let mut bound = self.bound.lock().unwrap();
+            if let Some(owner) = owner {
+                bound.pin(owner, name);
+            }
+            if let Ok(meta) = std::fs::metadata(self.cache.dir.join(name)) {
+                if owner.is_some() && !bound.entries.contains_key(name) {
+                    self.record_cached(&mut bound, name, meta.len());
+                }
+                return Ok(());
+            }
+        }
+        let data = self.primary.get(name).await?;
+        let mut bound = self.bound.lock().unwrap();
+        if let Some(owner) = owner {
+            bound.pin(owner, name);
+        }
+        self.write_cache(&mut bound, name, &data)
     }
 }
 
@@ -726,31 +845,28 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
     async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
         self.primary.put_immutable(name, data).await?;
         // The primary is durable; an unavailable cache must not invalidate it.
-        if self.cache.put(name, data).await.is_ok() {
-            self.note_cached(name, data.len() as u64).await;
-        }
+        let _ = self.cache_blob(name, data);
         Ok(())
     }
 
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
-        // Never let a failed authoritative write become a cache hit.
+        // Write-through: write to both FS cache and primary
         self.primary.put(name, data).await?;
-        self.cache.put(name, data).await?;
-        self.note_cached(name, data.len() as u64).await;
-        Ok(())
+        self.cache_blob(name, data)
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         // Check FS cache first
-        if let Ok(data) = self.cache.get(name).await {
-            return Ok(data);
+        {
+            let _bound = self.bound.lock().unwrap();
+            if let Ok(data) = std::fs::read(self.cache.dir.join(name)) {
+                return Ok(data);
+            }
         }
         // Cache miss: fetch from primary and populate cache
         let data = self.primary.get(name).await?;
         // Best-effort cache population; don't fail if local write fails
-        if let Err(e) = self.cache.put(name, &data).await {
+        if let Err(e) = self.cache_blob(name, &data) {
             tracing::warn!("Failed to populate FS cache for {}: {}", name, e);
-        } else {
-            self.note_cached(name, data.len() as u64).await;
         }
         Ok(data)
     }
@@ -759,27 +875,25 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
     }
     async fn delete(&self, name: &str) -> Result<(), String> {
         // Remove from both layers; the cache delete is best-effort.
-        self.bound.lock().unwrap().forget(name);
-        let _ = self.cache.delete(name).await;
+        {
+            let mut bound = self.bound.lock().unwrap();
+            bound.forget(name);
+            let _ = std::fs::remove_file(self.cache.dir.join(name));
+        }
         self.primary.delete(name).await
     }
     async fn contains(&self, name: &str) -> Result<bool, String> {
         self.cache.contains(name).await
     }
     async fn warm(&self, name: &str) -> Result<(), String> {
-        // Already cached locally — nothing to fetch.
-        if self.cache.contains(name).await.unwrap_or(false) {
-            return Ok(());
-        }
-        // Pull from the primary (e.g. S3) and populate the local cache, so a
-        // later get() served from the cache never crosses to a remote backend.
-        let data = self.primary.get(name).await?;
-        if let Err(e) = self.cache.put(name, &data).await {
-            tracing::warn!("Failed to warm FS cache for {}: {}", name, e);
-        } else {
-            self.note_cached(name, data.len() as u64).await;
-        }
-        Ok(())
+        self.warm_reserved(name, None).await
+    }
+
+    fn prefetch_staging(&self) -> Option<Box<dyn BlobStaging + '_>> {
+        let mut bound = self.bound.lock().unwrap();
+        let owner = bound.allocate_id();
+        bound.staging.insert(owner, HashSet::new());
+        Some(Box::new(CachePins { cache: self, owner }))
     }
 }
 
@@ -795,6 +909,21 @@ pub enum AnyHeapStorage {
 
 #[async_trait::async_trait]
 impl HeapStorage for AnyHeapStorage {
+    fn prefetch_staging(&self) -> Option<Box<dyn BlobStaging + '_>> {
+        match self {
+            Self::S3WithFsCache(inner) => inner.prefetch_staging(),
+            _ => None,
+        }
+    }
+
+    async fn warm(&self, name: &str) -> Result<(), String> {
+        match self {
+            Self::File(inner) => inner.warm(name).await,
+            Self::S3(inner) => inner.warm(name).await,
+            Self::S3WithFsCache(inner) => inner.warm(name).await,
+        }
+    }
+
     fn runtime_gc_identity(&self) -> Option<Vec<u8>> {
         match self {
             Self::File(inner) => inner.runtime_gc_identity(),
@@ -888,5 +1017,34 @@ impl BlobBackendConfig {
                 cache_dir: None,
             } => AnyHeapStorage::S3(S3HeapStorage::new(bucket).await),
         }
+    }
+}
+
+#[cfg(test)]
+mod prefetch_cache_tests {
+    use super::*;
+
+    #[test]
+    fn reservations_only_track_resident_and_queued_keys() {
+        let mut cache = CacheBound { cap: 2, ..Default::default() };
+        let owner = cache.allocate_id();
+        cache.staging.insert(owner, HashSet::new());
+        for start in (0..4096).step_by(32) {
+            let keys: Vec<_> = (start..start + 32).map(|i| format!("chunk-{i}")).collect();
+            for key in &keys {
+                cache.pin(owner, key);
+            }
+            assert!(cache.pins.len() <= 34);
+            assert!(cache.staging[&owner].len() <= 34);
+            for key in &keys {
+                cache.record(key, 1);
+            }
+            assert_eq!(cache.pins.len(), 2);
+            assert_eq!(cache.staging[&owner].len(), 2);
+            assert_eq!(cache.reserved.len(), 2);
+        }
+        cache.unpin_all(owner);
+        assert!(cache.pins.is_empty());
+        assert_eq!(cache.evictable.len(), 2);
     }
 }

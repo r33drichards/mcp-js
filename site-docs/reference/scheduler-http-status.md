@@ -2,7 +2,7 @@
 
 These pages describe the HTTP/MCP management layer, experimental scheduler, and
 dynamic HTTP functions with
-[PR #284 hardening at `ffe1195`](https://github.com/r33drichards/mcp-js/commit/ffe1195c81290eb03c4576d643be34a584c1bfe1)
+[PR #284 hardening](https://github.com/r33drichards/mcp-js/pull/284) at `ffe1195`
 integrated through #287, #293, #295, and #299. They do not imply that the feature stack
 has merged into `main`, been deployed, or passed fresh combined-stack validation.
 
