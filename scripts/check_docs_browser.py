@@ -13,7 +13,29 @@ import sys
 import tempfile
 import threading
 import time
+from html.parser import HTMLParser
 from pathlib import Path
+
+
+class PageText(HTMLParser):
+    """Collect text across syntax-highlighting spans, excluding script/style data."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in {"script", "style"}:
+            self.hidden += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"}:
+            self.hidden -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden:
+            self.parts.append(data)
 
 
 class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -113,8 +135,13 @@ def main() -> int:
             profile_dir = Path(tmpdir) / f"chromium-profile-{index}"
             profile_dir.mkdir()
             dom = dump_dom(chrome, f"http://127.0.0.1:8000{path}", profile_dir)
+            page_text = PageText()
+            page_text.feed(dom)
+            text = "".join(page_text.parts)
             for expected in expected_strings:
-                if expected not in dom:
+                # Keep raw HTML checks for link targets, while also accepting
+                # text split across markup (e.g. highlighted engine.dispose).
+                if expected not in dom and expected not in text:
                     failures.append(f"{path}: missing {expected!r}")
 
         httpd.shutdown()
