@@ -21,7 +21,7 @@ uniffi-builder-derive = { path = "uniffi-builder-derive" }
 anyhow = "1.0.98"
 axum = { version = "0.8.4", features = ["ws"] }
 base64 = "0.22"
-rmcp = { version = "3.5.1", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
+rmcp = { version = "3.10", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
 # Legacy rmcp pinned ONLY for its standalone HTTP+SSE server transport, which
 # rmcp dropped after 0.1.x. Renamed so it coexists with the primary `rmcp` above;
 # used solely by mcp_sse.rs to keep `--sse-port` working.
@@ -66,7 +66,7 @@ sled = "0.34"
 chrono = { version = "0.4", features = ["serde"] }
 hyper = { version = "1.5.2", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 rand = "0.8"
 encoding_rs = "0.8"
 flate2 = "1"
@@ -80,6 +80,7 @@ regorus = "0.5"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2"], default-features = false }
 # WebSocket client for the policy-gated `WebSocket` global. rustls to match
 # reqwest's TLS stack (rustls 0.23 / tokio-rustls 0.26 already in-tree).
+reqwest-mcp = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 # Structured HTTP/2 session/stream ops for the node:http2 shim (gRPC support).
 # h2 is hyper's client/server HTTP/2 layer; TLS via the same rustls stack.

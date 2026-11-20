@@ -185,6 +185,7 @@ struct LiveConn {
 /// `call_tool`) can replace it in place.
 struct ServerConn {
     config: McpServerConfig,
+    http_options: Option<HttpClientOptions>,
     live: RwLock<LiveConn>,
 }
 
@@ -201,7 +202,7 @@ async fn is_healthy(peer: &Peer<RoleClient>) -> bool {
 /// Re-run the handshake for a server and swap in the fresh peer, aborting the
 /// stale RunningService. Tools are intentionally left as first-connect values.
 async fn reconnect(server: &ServerConn) -> Result<(), String> {
-    let fresh = connect_one(&server.config).await?;
+    let fresh = connect_one(&server.config, server.http_options.as_ref()).await?;
     let mut live = server.live.write().await;
     live.keep_alive.abort();
     live.peer = fresh.peer;
@@ -286,16 +287,34 @@ pub struct McpClientManager {
     shutdown: CancellationToken,
 }
 
+/// Host-provided configuration for an embedded HTTP MCP connection.
+#[derive(Clone)]
+pub struct HttpClientOptions {
+    pub client: reqwest_mcp::Client,
+    pub bearer_token: Option<String>,
+    pub headers: HashMap<http::HeaderName, http::HeaderValue>,
+}
+
 impl McpClientManager {
     /// Connect to all configured MCP servers. Fails fast if any connection fails.
     pub async fn connect(configs: Vec<McpServerConfig>) -> Result<Self, String> {
+        Self::connect_with_http_options(configs, HashMap::new()).await
+    }
+
+    /// Use caller-managed HTTP clients and credentials for named servers.
+    /// A failed tool call on these connections is never replayed automatically.
+    pub async fn connect_with_http_options(
+        configs: Vec<McpServerConfig>,
+        mut options: HashMap<String, HttpClientOptions>,
+    ) -> Result<Self, String> {
         let mut servers = HashMap::new();
         let mut tools_by_server: HashMap<String, Vec<Tool>> = HashMap::new();
         let shutdown = CancellationToken::new();
 
         for config in configs {
             tracing::info!("Connecting to MCP server '{}'...", config.name);
-            let connected = connect_one(&config).await?;
+            let http_options = options.remove(&config.name);
+            let connected = connect_one(&config, http_options.as_ref()).await?;
 
             tracing::info!(
                 "MCP server '{}': {} tool(s) available",
@@ -313,6 +332,7 @@ impl McpClientManager {
             tools_by_server.insert(name.clone(), connected.tools.clone());
             let server = Arc::new(ServerConn {
                 config,
+                http_options,
                 live: RwLock::new(LiveConn {
                     peer: connected.peer,
                     keep_alive: connected._keep_alive,
@@ -472,6 +492,7 @@ impl McpClientManager {
         // current-thread runtime, from which awaiting the peer would stall, so run
         // the whole call on the connection's runtime and await the JoinHandle
         // (safe to poll from any runtime) — mirrors S3HeapStorage::*_blocking.
+        let abort_on_drop = server.http_options.is_some();
         let call = async move {
             let make_req = || {
                 let mut req = CallToolRequestParams::new(tool_name.clone());
@@ -482,6 +503,9 @@ impl McpClientManager {
             let peer = { server.live.read().await.peer.clone() };
             let result = match peer.call_tool(make_req()).await {
                 Ok(r) => r,
+                Err(e) if server.http_options.is_some() => {
+                    return Err(format!("mcp.callTool({server_name}.{tool_name}): {e}"));
+                }
                 Err(e) => {
                     // A call can fail because the tool errored OR because the
                     // downstream connection died (e.g. the server restarted).
@@ -532,6 +556,9 @@ impl McpClientManager {
         };
 
         match &self.runtime {
+            Some(rt) if abort_on_drop => tokio_util::task::AbortOnDropHandle::new(rt.spawn(call))
+                .await
+                .map_err(|e| format!("mcp.callTool: task join error: {e}"))?,
             Some(rt) => rt
                 .spawn(call)
                 .await
@@ -640,10 +667,57 @@ fn emit_stdio_auth_warning(config: &McpServerConfig, emit: impl FnOnce(&'static 
     }
 }
 
-async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
+async fn connect_one(
+    config: &McpServerConfig,
+    http_options: Option<&HttpClientOptions>,
+) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
 
     config.validate_for_connection()?;
+
+    if let Some(options) = http_options {
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+        use rmcp::{ClientLifecycleMode, model::ProtocolVersion};
+
+        let McpServerTransport::Http { url } = &config.transport else {
+            return Err("Host HTTP options require an HTTP transport".into());
+        };
+        if config.auth.is_some() {
+            return Err("Host HTTP options cannot be combined with browser OAuth".into());
+        }
+        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.clone());
+        if let Some(token) = &options.bearer_token {
+            transport_config = transport_config.auth_header(token.clone());
+        }
+        transport_config.custom_headers = options.headers.clone();
+        let transport = rmcp::transport::StreamableHttpClientTransport::with_client(
+            options.client.clone(),
+            transport_config,
+        );
+        let service = ()
+            .serve_with_lifecycle(
+                transport,
+                ClientLifecycleMode::Auto {
+                    preferred_versions: vec![ProtocolVersion::LATEST],
+                    legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
+                },
+            )
+            .await
+            .map_err(|e| format!("MCP client handshake with '{}' failed: {e}", config.name))?;
+        let peer = service.peer().clone();
+        let tools = peer
+            .list_all_tools()
+            .await
+            .map_err(|e| format!("Failed to list tools from '{}': {e}", config.name))?;
+        let keep_alive = tokio::spawn(async move {
+            let _ = service.waiting().await;
+        });
+        return Ok(ConnectedMcpServer {
+            peer,
+            tools,
+            _keep_alive: keep_alive.abort_handle(),
+        });
+    }
 
     match &config.transport {
         McpServerTransport::Stdio { command, args, env } => {
@@ -918,18 +992,15 @@ async fn op_mcp_call_tool(
                         .unwrap_or(serde_json::Value::Null),
                 };
                 let input_value = serde_json::to_value(&policy_input).map_err(|e| {
-                    JsErrorBox::generic(format!(
-                        "mcp.callTool: failed to serialize input: {}",
-                        e
-                    ))
+                    JsErrorBox::generic(format!("mcp.callTool: failed to serialize input: {}", e))
                 })?;
                 let provider = provider.clone();
                 let executor: super::hooks::StackExecutor =
                     std::sync::Arc::new(move |effective: serde_json::Value| {
                         let provider = provider.clone();
                         Box::pin(async move {
-                            let eff: EffectiveMcpCall = serde_json::from_value(effective)
-                                .map_err(|e| {
+                            let eff: EffectiveMcpCall =
+                                serde_json::from_value(effective).map_err(|e| {
                                     format!("mcp.callTool: invalid effective input: {}", e)
                                 })?;
                             let arguments = match eff.arguments {
@@ -944,9 +1015,7 @@ async fn op_mcp_call_tool(
                             };
                             provider.call_tool(&eff.server, &eff.tool, arguments).await
                         })
-                            as std::pin::Pin<
-                                Box<dyn std::future::Future<Output = _> + Send>,
-                            >
+                            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
                     });
                 let output = hooks
                     .run_stack_full(input_value, |_| Ok(()), executor)
@@ -989,13 +1058,12 @@ async fn op_mcp_call_tool(
                 }
             };
 
-            let eff: EffectiveMcpCall = serde_json::from_value(effective.clone())
-                .map_err(|e| {
-                    JsErrorBox::generic(format!(
-                        "mcp.callTool: invalid effective input after pre hooks: {}",
-                        e
-                    ))
-                })?;
+            let eff: EffectiveMcpCall = serde_json::from_value(effective.clone()).map_err(|e| {
+                JsErrorBox::generic(format!(
+                    "mcp.callTool: invalid effective input after pre hooks: {}",
+                    e
+                ))
+            })?;
             server_name = eff.server;
             tool_name = eff.tool;
             arguments = match eff.arguments {
