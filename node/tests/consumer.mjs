@@ -23,6 +23,12 @@ try {
   const typed = JSON.parse(await engine.invokeTool(request));
   assert.deepEqual(typed, result);
 
+  // Exercise the embedded V8 ICU data, not the host Node.js Intl implementation.
+  const intlCode = 'console.log(new Intl.NumberFormat("de-DE").format(1234.5))';
+  const intl = JSON.parse(engine.callTool('run_js', JSON.stringify({ code: intlCode }), undefined, undefined));
+  assert.equal(intl.error, undefined);
+  assert.equal(intl.output.trim(), '1.234,5');
+
   const definition = {
     description: 'Echo a message',
     inputSchema: { type: 'object', properties: { message: { type: 'string' } } },
