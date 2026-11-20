@@ -258,10 +258,16 @@ fuzz_target!(|ops: Vec<Op>| {
                     if link_key.as_os_str().is_empty() {
                         continue;
                     }
-                    mount
+                    let res = mount
                         .symlink(Path::new(&target_raw), Path::new(&link_raw))
-                        .await
-                        .expect("symlink");
+                        .await;
+                    // Like Node's fs.symlink, the mount rejects an existing
+                    // file, symlink, or implicit directory with EEXIST.
+                    if model.contains_key(&link_key) || !descendants(&model, &link_key).is_empty() {
+                        assert!(res.is_err(), "symlink over existing {link_raw:?} must fail");
+                        continue;
+                    }
+                    res.expect("symlink at absent path");
                     model.insert(
                         link_key,
                         ModelFile {

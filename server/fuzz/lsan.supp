@@ -1,0 +1,6 @@
+# rusty_v8 152.2.0 deliberately Box::leak's one IsolateLiveness cell per
+# isolate so Global handles dropped after isolate disposal remain safe.
+# See v8-152.2.0/src/isolate.rs, IsolateAnnex::new (line 2224).
+# Match only that allocation's concrete type, not IsolateAnnex/create_annex
+# or all V8 allocations. Keep leak detection enabled for everything else.
+leak:new<v8::isolate::IsolateLiveness>
