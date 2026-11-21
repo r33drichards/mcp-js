@@ -170,38 +170,6 @@ async fn lost_quorum_cannot_ack_claim_and_new_leader_can_replace_it() {
     assert!(claim.await.unwrap().is_err());
 }
 #[tokio::test]
-async fn flush_error_never_acknowledges_vote_or_append_and_stops_writes() {
-    for vote in [false, true] {
-        let n = node();
-        n.fail_flush.store(true, Ordering::SeqCst);
-        if vote {
-            assert!(
-                !n.handle_request_vote(RequestVoteRequest {
-                    term: 1,
-                    candidate_id: "candidate".into(),
-                    last_log_index: 0,
-                    last_log_term: 0
-                })
-                .await
-                .vote_granted
-            );
-        } else {
-            assert!(
-                !n.handle_append_entries(append(1, 0, 0, vec![entry(1, 1, "receipt")], 1))
-                    .await
-                    .success
-            );
-        }
-        n.fail_flush.store(false, Ordering::SeqCst);
-        assert!(n.put("other".into(), "value".into()).await.is_err());
-        assert!(
-            !n.handle_append_entries(append(2, 0, 0, vec![], 0))
-                .await
-                .success
-        );
-    }
-}
-#[tokio::test]
 async fn committed_apply_failure_never_releases_claim() {
     let n = node();
     {

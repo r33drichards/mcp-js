@@ -766,11 +766,6 @@ impl ClusterNode {
     pub(crate) async fn sim_commit(self: &Arc<Self>) {
         self.update_commit_index().await;
     }
-    pub fn sim_storage_failure(&self, fail: bool) {
-        self.fail_flush
-            .store(fail, std::sync::atomic::Ordering::SeqCst);
-    }
-
     pub fn shutdown(&self) {
         self.shutdown.cancel();
     }
