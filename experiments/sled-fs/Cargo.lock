@@ -1942,6 +1942,7 @@ dependencies = [
 name = "engine-cluster-tests"
 version = "0.1.0"
 dependencies = [
+ "deno_core",
  "serde",
  "serde_json",
  "server",
