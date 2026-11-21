@@ -162,12 +162,12 @@ Guarantees exercised here:
 ```mermaid
 stateDiagram-v2
     [*] --> Gen1
-    Gen1 --> Crashed1 : Sim::crash (Db dropped, channels close)
-    Crashed1 --> Gen2 : Sim::bounce (exclusive fresh reopen)
-    Gen2 --> Crashed2 : Sim::crash
-    Crashed2 --> Gen3 : Sim::bounce
-    Gen1 --> Fenced : stale handle write attempt
-    Gen2 --> Fenced : stale handle write attempt
+    Gen1 --> Crashed1 : Sim crash - Db dropped, channels close
+    Crashed1 --> Gen2 : Sim bounce - exclusive fresh reopen
+    Gen2 --> Crashed2 : Sim crash
+    Crashed2 --> Gen3 : Sim bounce
+    Gen1 --> Fenced : stale handle write
+    Gen2 --> Fenced : stale handle write
     Fenced --> ErrClosed : write fails closed with error
     Gen3 --> [*]
 ```
