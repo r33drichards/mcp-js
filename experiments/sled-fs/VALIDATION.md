@@ -99,3 +99,38 @@ lockfile. The README uses `--locked` for subsequent reproducible runs.
   survive arbitrary power failure. The negative namespace test demonstrates
   an actual durability gap under this simulator's strict directory model.
 - No merge, deployment, upstream sled PR, or changes to production defaults.
+
+## Milestone 6: handwritten hook audit (#316)
+
+Retired (commit 81fe6056) — coverage demonstrated at the real storage boundary:
+
+- `turmoil_engine.rs::storage_failure_stops_node_and_cluster_keeps_committing`
+  (injected `sim_storage_failure` on a simulated sled): replaced by
+  `experiments/sled-fs/tests/multi_node.rs::real_three_node_quorum_survives_disk_full_and_crash_reopen`,
+  which exhausts a real 32-KiB simulated disk with actual filler writes on
+  three real-sled Raft nodes and asserts quorum keeps committing (`quorum:value-2`).
+- `cluster_regressions.rs::flush_error_never_acknowledges_vote_or_append_and_stops_writes`
+  (injected `fail_flush`): replaced by the real disk-full cluster test in
+  `experiments/sled-fs/tests/cluster.rs` (append rejected while full, real
+  ENOSPC from `db.flush()`, node stops with "cluster stopped or storage
+  failed") plus the `storage.rs` proofs that ENOSPC reaches the real sled log
+  flush and EIO reaches the real sled config write.
+- `scheduled_worker.rs::inject_flush_failure` and its `fail_flush` plumbing:
+  dead code, zero callers.
+
+Kept, with reasons:
+
+- `cluster_regressions.rs::committed_apply_failure_never_releases_claim` and
+  the `ClusterNode.fail_flush` hook it uses (both `#[cfg(test)]`, never set in
+  production): apply-failure claim semantics with no real-boundary equivalent
+  yet. Retiring it would drop coverage the sled-fs suites do not provide.
+- `engine-cluster-tests/src/scenario.rs` handwritten modeled runner (with the
+  `real-sled` feature, `run_scenario` delegates to `scenario_real.rs`): it is
+  the distinct oracle track the fuzz target (`fuzz_js_scenario`) builds
+  against, required by the #316 acceptance criteria.
+
+Measured results on the retirement commit: `cargo test --lib` in `server/`
+299 passed / 0 failed; `engine-cluster-tests` `turmoil_engine` with
+`real-sled` 1 passed / 0 failed. The full sled-fs matrix (scenario_js 13/13,
+cluster suite, storage/multi_node/recovery suites, patched sled 66/66) was
+verified green on the parent commit and the deleted tests do not appear in it.
