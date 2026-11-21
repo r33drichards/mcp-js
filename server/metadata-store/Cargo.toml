@@ -7,9 +7,11 @@ edition = "2024"
 async-trait = "0.1"
 sled = "0.34"
 rusqlite = { version = "0.37", features = ["bundled"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-aws-sdk-dynamodb = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+aws-sdk-dynamodb = { version = "1", optional = true }
 hex = "0.4"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
@@ -17,7 +19,9 @@ aws-config = { version = "1", features = ["behavior-version-latest"] }
 tempfile = "3"
 
 [features]
-testcontainers-tests = ["dep:testcontainers"]
+default = ["dynamodb"]
+dynamodb = ["dep:aws-sdk-dynamodb"]
+testcontainers-tests = ["dynamodb", "dep:testcontainers"]
 
 [dependencies.testcontainers]
 version = "0.25"

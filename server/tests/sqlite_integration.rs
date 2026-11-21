@@ -1,4 +1,6 @@
 //! Real server startup, HTTP/MCP operations and process restart with SQLite.
+#[path = "support/s3.rs"]
+mod s3;
 use mcp_metadata_store::{MetadataStore, SqliteStore};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
@@ -29,15 +31,35 @@ struct Server {
     child: Child,
     client: Client,
     url: String,
+    s3: Option<s3::S3>,
 }
 
 impl Server {
     async fn start(dir: &Path, selection: &str) -> Self {
+        let s3 = s3::S3::start().await;
+        let mut server = Self::start_with_s3(dir, selection, Some(&s3)).await;
+        server.s3 = Some(s3);
+        server
+    }
+
+    async fn start_with_s3(dir: &Path, selection: &str, s3: Option<&s3::S3>) -> Self {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
+        let port = if selection == "sled" {
+            let saved = dir.join("server-port");
+            match std::fs::read_to_string(&saved) {
+                Ok(value) => value.parse::<u16>().unwrap(),
+                Err(_) => {
+                    std::fs::write(saved, port.to_string()).unwrap();
+                    port
+                }
+            }
+        } else {
+            port
+        };
         let database = dir.join("metadata.sqlite");
         let mut command = command();
         command
@@ -72,6 +94,9 @@ impl Server {
             }
             _ => panic!("unknown backend selection"),
         }
+        if let Some(s3) = s3 {
+            s3.configure(&mut command);
+        }
         let mut server = Self {
             child: command.spawn().unwrap(),
             client: Client::builder()
@@ -79,6 +104,7 @@ impl Server {
                 .build()
                 .unwrap(),
             url: format!("http://127.0.0.1:{port}"),
+            s3: None,
         };
         timeout(Duration::from_secs(15), async {
             loop {
@@ -167,12 +193,16 @@ impl Server {
     }
 
     async fn tags(&self, heap: &Value) -> Value {
+        self.tool("get_heap_tags", json!({"heap":heap})).await
+    }
+
+    async fn tool(&self, name: &str, arguments: Value) -> Value {
         let response = self.client.post(format!("{}/mcp", self.url))
             .header("Accept", "application/json, text/event-stream")
             .header("MCP-Protocol-Version", "2026-07-28")
-            .header("Mcp-Method", "tools/call").header("Mcp-Name", "get_heap_tags")
+            .header("Mcp-Method", "tools/call").header("Mcp-Name", name)
             .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"get_heap_tags","arguments":{"heap":heap},"_meta":{
+                "name":name,"arguments":arguments,"_meta":{
                     "io.modelcontextprotocol/protocolVersion":"2026-07-28",
                     "io.modelcontextprotocol/clientInfo":{"name":"sqlite-integration","version":"1"},
                     "io.modelcontextprotocol/clientCapabilities":{}
@@ -212,6 +242,179 @@ impl Server {
         // Kill/reap rather than sharing an Engine/store handle across "restart".
         self.child.kill().await.unwrap();
         self.child.wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn sqlite_runtime_records_console_artifacts_and_upload_grants_survive_restart() {
+    let s3 = s3::S3::start().await;
+    for selection in ["flag", "env", "config"] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start_with_s3(dir.path(), selection, Some(&s3)).await;
+        let settled = server.tool("run_js", json!({"wait":true,"code":
+            "console.log('C'.repeat(150000)); console.log('tail'); \
+             artifact('saved.bin', 'application/octet-stream', new Uint8Array(500000).fill(7)); \
+             export const __mcp_http_result = 'R'.repeat(150000);"
+        })).await;
+        assert_eq!(settled["status"], "completed", "{settled}");
+        let id = settled["execution_id"].as_str().unwrap();
+        let execution = server.get(&format!("/api/executions/{id}")).await;
+        assert_eq!(execution["result"].as_str().unwrap().len(), 150_000);
+        assert_eq!(execution["artifacts"][0]["key"], "saved.bin");
+        let output_path = format!("/api/executions/{id}/output?byte_offset=10&byte_limit=32");
+        let output = server.get(&output_path).await;
+        assert_eq!(output["data"], "C".repeat(32));
+        assert_eq!(output["has_more"], true);
+        let grant = server.tool("get_artifact_upload_url", json!({
+            "key":"uploaded.bin", "mime_type":"application/octet-stream", "expires_in_secs":300
+        })).await;
+        let grant_path = grant["path"].as_str().unwrap();
+        server.stop().await;
+
+        if selection != "sled" {
+            let store = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
+            let row = store.get("execution_records", id.as_bytes()).await.unwrap();
+            assert!(
+                row.is_some(),
+                "{selection}: execution record missing from SQLite"
+            );
+            let row = row.unwrap();
+            assert_eq!(row[0], 1, "execution result must be inline, without S3");
+            assert!(row.len() > 128 * 1024);
+            let artifact = store
+                .get("runtime_refs:v1:617274696661637473", b"saved.bin")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                artifact.len() < 1024,
+                "only artifact metadata belongs in the database"
+            );
+            assert!(
+                !store
+                    .scan(
+                        &format!("runtime_refs:v1:{}", hex::encode(format!("ex:{id}"))),
+                        b"",
+                        false,
+                        None
+                    )
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                store
+                    .scan("artifact_uploads", b"", false, None)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            for (_, reference) in store
+                .scan(
+                    &format!("runtime_refs:v1:{}", hex::encode(format!("ex:{id}"))),
+                    b"",
+                    false,
+                    None,
+                )
+                .await
+                .unwrap()
+            {
+                assert!(
+                    reference.len() < 128,
+                    "even small console pages must be in S3"
+                );
+            }
+            drop(store);
+        }
+        if selection != "sled" {
+            if let Ok(entries) = std::fs::read_dir(dir.path().join("local")) {
+                for entry in entries {
+                    assert!(
+                        !entry
+                            .unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("executions"),
+                        "{selection}: SQLite mode must not open a sled execution database"
+                    );
+                }
+            }
+        }
+        let server = Server::start_with_s3(dir.path(), selection, Some(&s3)).await;
+        assert_eq!(
+            server.get(&format!("/api/executions/{id}")).await,
+            execution
+        );
+        assert_eq!(server.get(&output_path).await, output);
+        let listed = server.get("/api/executions").await;
+        assert!(
+            listed["executions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["execution_id"] == id)
+        );
+        let saved = server
+            .client
+            .get(format!("{}/api/artifacts/saved.bin", server.url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(saved.as_ref(), vec![7; 500_000]);
+
+        // Independent server processes/SQLite connections must share one winner.
+        let peer = Server::start_with_s3(dir.path(), selection, Some(&s3)).await;
+        let upload_url = format!("{}{grant_path}", server.url);
+        let peer_url = format!("{}{grant_path}", peer.url);
+        let upload = vec![8; 500_000];
+        let (first, second) = tokio::join!(
+            server.client.put(&upload_url).body(upload.clone()).send(),
+            peer.client.put(&peer_url).body(upload.clone()).send()
+        );
+        let mut statuses = [
+            first.unwrap().status().as_u16(),
+            second.unwrap().status().as_u16(),
+        ];
+        statuses.sort_unstable();
+        assert_eq!(statuses, [200, 404]);
+        peer.stop().await;
+        server.stop().await;
+
+        let server = Server::start_with_s3(dir.path(), selection, Some(&s3)).await;
+        assert_eq!(
+            server
+                .client
+                .put(format!("{}{grant_path}", server.url))
+                .body("must not overwrite")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let uploaded = server
+            .client
+            .get(format!("{}/api/artifacts/uploaded.bin", server.url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(uploaded.as_ref(), upload);
+        assert_eq!(
+            server.get(&format!("/api/executions/{id}")).await,
+            execution
+        );
+        server.stop().await;
     }
 }
 
@@ -463,4 +666,166 @@ async fn sqlite_heap_restore_survives_repeated_server_restarts() {
 #[tokio::test]
 async fn sled_heap_restore_survives_repeated_server_restarts() {
     heap_restore_roundtrip("sled").await;
+}
+
+#[tokio::test]
+async fn runtime_s3_failure_never_replaces_reference_or_falls_back_to_files() {
+    use std::sync::atomic::Ordering;
+    for selection in ["flag", "sled"] {
+        let dir = tempfile::tempdir().unwrap();
+        let s3 = s3::S3::start().await;
+        let server = Server::start_with_s3(dir.path(), selection, Some(&s3)).await;
+        let result = server.tool("run_js", json!({"wait":true, "code":
+            "console.log('tiny'); artifact('tiny.txt', 'text/plain', new TextEncoder().encode('tiny'));"
+        })).await;
+        assert_eq!(result["status"], "completed", "{result}");
+        let id = result["execution_id"].as_str().unwrap();
+        assert!(
+            server.get(&format!("/api/executions/{id}/output")).await["data"]
+                .as_str()
+                .unwrap()
+                .contains("tiny")
+        );
+        assert!(
+            s3.objects
+                .values
+                .lock()
+                .unwrap()
+                .values()
+                .any(|value| value.ends_with(b"tiny"))
+        );
+        s3.objects.fail_put.store(true, Ordering::SeqCst);
+        let response = server
+            .client
+            .put(format!("{}/api/artifacts/tiny.txt", server.url))
+            .header("content-type", "text/plain")
+            .body("replacement")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !dir.path().join("local/runtime-blobs").exists(),
+            "S3 failures must not switch to files"
+        );
+        let response = server
+            .client
+            .get(format!("{}/api/artifacts/tiny.txt", server.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "tiny");
+        s3.objects.fail_put.store(false, Ordering::SeqCst);
+        server.stop().await;
+        // Same S3 objects, independent server and local database handles.
+        let server = Server::start_with_s3(dir.path(), selection, Some(&s3)).await;
+        let response = server
+            .client
+            .get(format!("{}/api/artifacts/tiny.txt", server.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "tiny");
+        s3.objects.values.lock().unwrap().clear();
+        let response = server
+            .client
+            .get(format!("{}/api/artifacts/tiny.txt", server.url))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            !response.status().is_success(),
+            "missing S3 objects must not fall back"
+        );
+        server.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn runtime_filesystem_payloads_survive_restart_and_never_live_in_the_database() {
+    for selection in ["flag", "sled"] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start_with_s3(dir.path(), selection, None).await;
+        let result = server.tool("run_js", json!({"wait":true,"code":
+            "console.log('filesystem console'); artifact('file.bin', 'application/octet-stream', new Uint8Array(500000).fill(9));"
+        })).await;
+        assert_eq!(result["status"], "completed", "{result}");
+        let id = result["execution_id"].as_str().unwrap();
+        let output_path = format!("/api/executions/{id}/output");
+        let output = server.get(&output_path).await;
+        fn read_objects(directory: &Path) -> Vec<Vec<u8>> {
+            std::fs::read_dir(directory)
+                .unwrap()
+                .flat_map(|entry| {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        read_objects(&path)
+                    } else {
+                        vec![std::fs::read(path).unwrap()]
+                    }
+                })
+                .collect()
+        }
+        let files = read_objects(&dir.path().join("local/runtime-blobs/runtime"));
+        assert!(files.iter().any(|value| value.ends_with(&vec![9; 500_000])));
+        assert!(
+            files
+                .iter()
+                .any(|value| String::from_utf8_lossy(value).contains("filesystem console"))
+        );
+        if selection == "flag" {
+            let db = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
+            let value = db
+                .get("runtime_refs:v1:617274696661637473", b"file.bin")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                value.len() < 1024,
+                "database must contain only artifact metadata"
+            );
+        }
+        server.stop().await;
+        let server = Server::start_with_s3(dir.path(), selection, None).await;
+        let response = server
+            .client
+            .get(format!("{}/api/artifacts/file.bin", server.url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), vec![9; 500_000]);
+        let mut recovered = server.get(&output_path).await;
+        let mut output = output;
+        if selection == "sled" {
+            // Default sled execution status is process-local; compare the durable console page.
+            recovered.as_object_mut().unwrap().remove("status");
+            output.as_object_mut().unwrap().remove("status");
+        }
+        assert_eq!(recovered, output);
+        server.stop().await;
+    }
+    // A non-writable payload location is an error, never a database fallback.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("local")).unwrap();
+    std::fs::write(dir.path().join("local/runtime-blobs"), b"not a directory").unwrap();
+    let server = Server::start_with_s3(dir.path(), "flag", None).await;
+    let response = server
+        .client
+        .put(format!("{}/api/artifacts/file.txt", server.url))
+        .header("content-type", "text/plain")
+        .body("must not be inline")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let db = SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap();
+    assert!(
+        db.get("runtime_refs:v1:617274696661637473", b"file.txt")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.stop().await;
 }

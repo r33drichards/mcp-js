@@ -21,7 +21,7 @@ use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_RAFT_BODY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_APPEND_BYTES: usize = 12 * 1024 * 1024;
+pub(crate) const MAX_APPEND_BYTES: usize = 12 * 1024 * 1024;
 const MAX_APPEND_ENTRIES: usize = 32;
 const MAX_RAFT_TERM: u64 = (1 << 63) - 1;
 
@@ -766,6 +766,34 @@ impl ClusterNode {
     pub(crate) async fn sim_commit(self: &Arc<Self>) {
         self.update_commit_index().await;
     }
+    /// Apply ordering and bounds before reading/decoding values.
+    pub fn scan_prefix_window(
+        &self,
+        prefix: &str,
+        reverse: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<(String, String)>, String> {
+        if limit == Some(0) {
+            return Ok(vec![]);
+        }
+        let data = self.db.open_tree("data").map_err(|e| e.to_string())?;
+        let rows = data.scan_prefix(prefix.as_bytes());
+        let rows: Box<dyn Iterator<Item = sled::Result<(sled::IVec, sled::IVec)>>> = if reverse {
+            Box::new(rows.rev())
+        } else {
+            Box::new(rows)
+        };
+        rows.take(limit.unwrap_or(usize::MAX))
+            .map(|row| {
+                let (key, value) = row.map_err(|e| e.to_string())?;
+                Ok((
+                    String::from_utf8(key.to_vec()).map_err(|e| e.to_string())?,
+                    String::from_utf8(value.to_vec()).map_err(|e| e.to_string())?,
+                ))
+            })
+            .collect()
+    }
+
     pub fn shutdown(&self) {
         self.shutdown.cancel();
     }

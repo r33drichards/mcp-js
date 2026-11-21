@@ -15,7 +15,7 @@ agent one tool — `run_js` — and it writes code: looping, branching, transfor
 data, and calling other tools, often with far fewer tokens than equivalent
 tool-call chains.
 
-In its default *stateful* mode the V8 heap is saved as a content-addressed
+With heap persistence enabled (`--heap-store dir|s3`), the V8 heap is saved as a content-addressed
 snapshot, so an agent can build up state across many turns. Host capabilities
 (network, filesystem, subprocess, WebAssembly, module imports, and calls to other
 MCP servers) are all **off by default** and unlocked only by explicit
@@ -70,14 +70,14 @@ template setup.
 
 ```bash
 # Claude Code (stdio)
-claude mcp add mcp-v8 -- mcp-v8 --directory-path /tmp/mcp-v8-heaps   # stateful
-claude mcp add mcp-v8 -- mcp-v8 --stateless                          # stateless
+claude mcp add mcp-v8 -- mcp-v8 --heap-store dir --heap-dir /tmp/mcp-v8-heaps   # stateful
+claude mcp add mcp-v8 -- mcp-v8 --heap-store none                          # stateless
 ```
 
 For Claude Desktop / Cursor, add to the client's `mcpServers` config:
 
 ```json
-{ "mcpServers": { "js": { "command": "mcp-v8", "args": ["--stateless"] } } }
+{ "mcpServers": { "js": { "command": "mcp-v8", "args": ["--heap-store", "none"] } } }
 ```
 
 Then ask the agent: *"Run this JavaScript: `console.log([1,2,3].map(x => x*2))`"*.
@@ -85,7 +85,7 @@ Then ask the agent: *"Run this JavaScript: `console.log([1,2,3].map(x => x*2))`"
 ### Run over HTTP
 
 ```bash
-mcp-v8 --stateless --http-port 8080
+mcp-v8 --heap-store none --http-port 8080
 # MCP endpoint: POST http://localhost:8080/mcp
 # REST sidecar: POST http://localhost:8080/api/exec  (JSON body, or a raw-body file upload)
 ```
@@ -272,7 +272,7 @@ A fully-typed client for the REST API, generated from the OpenAPI spec via
 [progenitor](https://github.com/oxidecomputer/progenitor):
 
 ```bash
-mcp-v8 --stateless --http-port 3000 &
+mcp-v8 --heap-store none --http-port 3000 &
 mcp-v8-cli exec "console.log('hello'); 1 + 1"
 mcp-v8-cli exec --file ./script.js                # run a local file (uploaded as the code)
 mcp-v8-cli executions get <execution_id>
@@ -390,9 +390,10 @@ Dynamic HTTP handlers can be registered without restart. See [HTTP functions](do
 ### Scheduler and HTTP documentation
 
 The [Diátaxis documentation map](site-docs/reference/scheduler-http-status.md)
-links guided tutorials, operational how-to guides, reference, and explanations
-for the experimental scheduler and dynamic HTTP functions. It records the #284 hardening integrated
-through #287, #293, and #295, without implying a main merge or deployment.
+links tutorials, operational guides, references, and explanations for the scheduler
+and dynamic HTTP functions now merged into `main`. The scheduler remains
+experimental; [production-readiness work](https://github.com/r33drichards/mcp-js/issues/348)
+tracks recovery, storage lifecycle, upgrades, and operational validation.
 
 ### Optional DynamoDB metadata backend
 
@@ -405,7 +406,16 @@ schema, IAM, limits, and LocalStack/Testcontainers setup.
 ### Optional SQLite metadata backend
 
 Use `--sqlite-path ./data/metadata.sqlite` (or `MCP_V8_SQLITE_PATH`) for embedded
-SQLite session histories, heap tags, and filesystem labels/reflogs. Create the
-parent directory first and enable heap or filesystem persistence. This mode
-cannot be combined with `--cluster-port` or `--dynamodb-table`; other local stores
-still use sled. See [metadata backend configuration](server/metadata-store/README.md).
+SQLite session histories, heap tags, filesystem labels/reflogs, execution records,
+console pages, artifacts and upload grants. Create the parent directory first.
+Artifact and console payloads use `--s3-bucket` when configured, otherwise files
+under `<session-db-path>/runtime-blobs`; SQLite holds their references. Other runtime records stay in SQLite, with no size-based S3 offload.
+Snapshot blobs keep their separately selected backend. This mode cannot be
+combined with `--cluster-port`
+or `--dynamodb-table`; the Raft log and scheduler keep their existing stores.
+Existing sled data is not migrated automatically.
+See [metadata backend configuration](server/metadata-store/README.md).
+
+Local artifact and console objects have an explicit, reader-safe reclamation API;
+see [runtime blob maintenance](docs/runtime-blob-maintenance.md) for ownership,
+retention, and backend restrictions.

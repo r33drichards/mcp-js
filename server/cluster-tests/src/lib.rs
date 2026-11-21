@@ -129,3 +129,10 @@ mod learner;
 #[cfg(test)]
 #[path = "../../tests/cluster_simulation.rs"]
 mod simulation;
+
+#[path = "../../src/raft_metadata.rs"]
+pub mod raft_metadata;
+
+#[cfg(test)]
+#[path = "publication_tests.rs"]
+mod publication_tests;

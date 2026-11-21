@@ -16,3 +16,11 @@ cd "$root"
   --ts-dir "$root/node/generated" --lib-colocated --no-format
 
 cp "$library" "$root/node/generated/libserver.so"
+
+cp "$root/node/src/engine-dispose.ts" "$root/node/src/tool-runtime.ts" "$root/node/generated/"
+cat >> "$root/node/generated/index.ts" <<'TS'
+
+import "./engine-dispose.js";
+export { createToolRuntime } from "./tool-runtime.js";
+export type { HostTool, ToolRuntimeConfig, ToolRuntimeResult } from "./tool-runtime.js";
+TS

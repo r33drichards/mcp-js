@@ -206,14 +206,14 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ### `--dynamodb-table`
 
-Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode
+Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags, filesystem labels and runtime bookkeeping. Artifact and console payloads use S3 or local files; other metadata obeys native item limits. Incompatible with cluster mode
 
 - Environment: `MCP_V8_DYNAMODB_TABLE`
 - Value: `DYNAMODB_TABLE`
 
 ### `--sqlite-path`
 
-SQLite metadata file for session history, heap tags and filesystem labels. Parent directory must exist. Does not replace the Raft log or execution registry
+SQLite metadata file for session history, heap tags, filesystem labels and runtime bookkeeping. Parent directory must exist. Does not replace the Raft log
 
 - Environment: `MCP_V8_SQLITE_PATH`
 - Value: `SQLITE_PATH`
@@ -421,7 +421,7 @@ Remove `globalThis.SharedArrayBuffer` + `globalThis.Atomics` — the high-resolu
 
 ### `--s3-bucket`
 
-S3 bucket backing whichever axes select `s3`. Required when `--heap-store s3` or `--fs-store s3` is set
+S3 bucket for artifact and console payloads (otherwise stored on disk), and snapshot axes selecting `s3`. Required for `--heap-store s3` or `--fs-store s3`
 
 - Environment: `MCP_V8_S3_BUCKET`
 - Value: `S3_BUCKET`

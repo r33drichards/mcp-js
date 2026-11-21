@@ -56,7 +56,7 @@ These are two distinct, complementary concepts:
 | | Session | Heap |
 |---|---|---|
 | Identity | A string name supplied by the caller | A 64-char hex SHA-256 hash derived from content |
-| Lifetime | Persists in the sled metadata DB until explicitly cleared | Persists in heap storage (local FS or S3) indefinitely |
+| Lifetime | Stored in the selected metadata backend | Persists in heap storage (local FS or S3) indefinitely |
 | Purpose | Ordered audit log of which heaps were produced | The actual V8 state bytes |
 | Created by | `X-MCP-Session-Id` header on `initialize`, or `session` field in REST `POST /api/exec` | Every stateful execution |
 
@@ -64,12 +64,13 @@ A session does not own its heaps. Multiple sessions can reference the same heap 
 
 ## The session log
 
-Each stateful execution that has a session name writes a `SessionLogEntry` to the sled metadata database (at `--session-db-path`, default `/tmp/mcp-v8-sessions`):
+Each stateful execution that has a session name writes a `SessionLogEntry` to the selected session metadata store (sled by default, or configured SQLite/DynamoDB):
 
 ```
 SessionLogEntry {
     input_heap:  Option<String>,   // heap hash passed to this execution, or null
     output_heap: String,           // heap hash produced by this execution
+    output_fs:   Option<String>,   // independent filesystem snapshot, if enabled
     code:        String,           // JavaScript source that was executed
     timestamp:   String,           // RFC 3339 UTC timestamp
 }
@@ -81,15 +82,23 @@ Entries are appended in execution order and exposed through `list_session_snapsh
 
 Heap snapshots are immutable by definition: the key is derived from the content. Writing the same V8 state twice produces the same key and results in an idempotent storage write — no duplicate data is created. This property holds across nodes in a cluster because all nodes share the same storage backend.
 
-Tags (key-value metadata stored in sled under the `heap_tags` tree, keyed by `ht:<hash>`) are mutable and are not part of the content hash. Replacing tags on a heap does not produce a new heap.
+Tags (mutable key-value metadata in the selected heap-tag store) are mutable and are not part of the content hash. Replacing tags on a heap does not produce a new heap.
 
 ## Security and integrity
 
-The SHA-256 checksum in the snapshot header provides tamper detection. A snapshot loaded from an untrusted source whose checksum does not match the stored hash is rejected before the bytes reach V8. This prevents a corrupted or maliciously modified file from being executed.
+The SHA-256 checksum detects payload corruption; it does not authenticate the
+snapshot's author. Do not treat an attacker-supplied snapshot as safe because it
+has a matching checksum. V8 startup data is also validated for the current
+runtime before restoration. Snapshots are tied to compatible V8 versions,
+flags, and extensions; test retained heaps when upgrading the runtime.
 
 ## Stateful vs stateless mode
 
-Session and heap features are only available in stateful mode. In `--stateless` mode the engine holds no `HeapStorage`, `SessionLog`, or `HeapTagStore`; the heap-related tools are not exposed and `run_js` does not accept a `heap` parameter.
+Heap features require `--heap-store dir|s3`; both snapshot axes default to
+`none`. When only `--fs-store dir|s3` is enabled, sessions still record filesystem
+state without capturing V8 globals. Heap tags require heap persistence. With
+both axes off there is no session log or heap-tag store, but runtime payload and
+execution bookkeeping remain separate concerns.
 
 ## See also
 

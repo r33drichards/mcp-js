@@ -13,7 +13,7 @@ nix run github:r33drichards/mcp-js -- --help
 
 # Or build it into ./result/bin/server
 nix build github:r33drichards/mcp-js
-./result/bin/server --http-port=8080 --stateless
+./result/bin/server --http-port=8080 --heap-store none
 ```
 
 For local development, enter the dev shell (provides the Rust toolchain and the
@@ -25,8 +25,8 @@ cd mcp-js
 nix develop          # then: cargo run -p server -- --help
 ```
 
-> Building from source compiles V8 via `deno_core`; the flake wires up the
-> prefetched `RUSTY_V8_ARCHIVE` so the build stays offline-friendly.
+The default dev shell provides the pinned `RUSTY_V8_ARCHIVE`. Building the
+project does not require rebuilding V8 from source; keep that archive configured.
 
 ## Prebuilt binary (install scripts)
 
@@ -87,3 +87,14 @@ mcp-v8 --print-openapi   # prints the REST OpenAPI spec
 - [Tutorials](../tutorials/overview.md) — run your first code.
 - [Transports](../concepts/transports.md) — choose stdio, HTTP, or SSE.
 - [CLI flags reference](../reference/cli-flags.md) — every configuration flag.
+
+## Embed instead of running a server
+
+The [native JavaScript SDK](../how-to/native-javascript-sdk.md) runs the engine
+in-process on supported Linux x64 hosts. Choose the glibc or Alpine/musl release
+asset explicitly. The separate TypeScript HTTP client connects to a server.
+See [upgrade notes](../reference/release-upgrade.md) before changing persistence
+formats or runtime versions.
+
+For npm commands pinned to a GitHub release, use
+[Install packages from GitHub Releases](github-release-packages.md).

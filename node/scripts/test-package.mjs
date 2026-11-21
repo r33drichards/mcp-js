@@ -1,4 +1,5 @@
-import { mkdtempSync, writeFileSync, readFileSync, cpSync, rmSync, renameSync, existsSync } from 'node:fs';
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, readFileSync, cpSync, rmSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,12 +21,16 @@ try {
   }
   writeFileSync(join(temp, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball]);
-  const installedLibrary = join(temp, 'node_modules', '@wholelottahoopla', 'mcp-js-node', 'dist', 'libserver.so');
+  const installed = join(temp, 'node_modules', '@wholelottahoopla', 'mcp-js-node');
+  const installedLibrary = join(installed, 'dist', 'libserver.so');
+  const expectedLibc = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).libc;
+  const manifest = JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8'));
+  assert.deepEqual(manifest.libc, expectedLibc, 'Installed SDK targets the expected libc');
   checkElf(readFileSync(installedLibrary));
-  if (readFileSync(join(temp, 'node_modules/@wholelottahoopla/mcp-js-node/LICENSE'), 'utf8') !== readFileSync(join(root, '../LICENSE'), 'utf8')) throw new Error('Installed license differs from repository license');
-  checkDependencies(run('readelf', ['-d', installedLibrary]), run('ldd', [installedLibrary]));
+  if (readFileSync(join(installed, 'LICENSE'), 'utf8') !== readFileSync(join(root, '../LICENSE'), 'utf8')) throw new Error('Installed license differs from repository license');
+  checkDependencies(run('readelf', ['-d', installedLibrary]), run('ldd', [installedLibrary]), expectedLibc[0]);
   cpSync(join(root, 'tests/consumer.mjs'), join(temp, 'consumer.mjs'));
-  writeFileSync(join(temp, 'consumer.ts'), 'import { Engine } from "@wholelottahoopla/mcp-js-node";\nconst engine = Engine.createStateless(64n, 1n);\nengine.callTool("run_js", "{}", undefined, undefined);\nengine.close();\n');
+  writeFileSync(join(temp, 'consumer.ts'), 'import { Engine } from "@wholelottahoopla/mcp-js-node";\nconst engine = Engine.createStateless(64n, 1n);\nengine.callTool("run_js", "{}", undefined, undefined);\nengine.dispose();\n');
   run(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--noEmit', '--strict', '--skipLibCheck', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'consumer.ts']);
   // Hide source outputs: loading must use only the installed tarball, not the checkout.
   const hidden = [];
@@ -37,6 +42,18 @@ try {
       if (existsSync(source)) { renameSync(source, destination); hidden.push([source, destination]); }
     }
     console.log(run(process.execPath, ['consumer.mjs']));
+    if (process.env.TEST_WITH_BUN === '1') {
+      const bunConsumer = join(temp, 'bun-consumer');
+      mkdirSync(bunConsumer);
+      writeFileSync(join(bunConsumer, 'package.json'), JSON.stringify({
+        private: true,
+        type: 'module',
+        dependencies: { [manifest.name]: `file:${tarball}` },
+      }));
+      cpSync(join(temp, 'consumer.mjs'), join(bunConsumer, 'consumer.mjs'));
+      run('bun', ['install', '--ignore-scripts'], bunConsumer);
+      console.log(run('bun', ['consumer.mjs'], bunConsumer));
+    }
   } finally {
     for (const [source, destination] of hidden.reverse()) renameSync(destination, source);
     // Keep backups if restoration fails rather than deleting checkout outputs.

@@ -4,7 +4,7 @@ Recipes for submitting code, polling results, streaming output, cancelling runs,
 
 ## Submit and poll via MCP tools
 
-In stateful mode, `run_js` returns an `execution_id`. Poll with `get_execution` until the status leaves `running`.
+With heap or filesystem persistence enabled, `run_js` returns an `execution_id`. Poll with `get_execution` until the status leaves `running`.
 
 ```json
 // 1. Submit
@@ -19,6 +19,20 @@ In stateful mode, `run_js` returns an `execution_id`. Poll with `get_execution` 
 ```
 
 Poll until `status` is one of `completed`, `failed`, `cancelled`, or `timed_out`.
+
+## Wait for completion and persistence
+
+On the session-capable surface, request a settled result without manual polling:
+
+```json
+{ "tool": "run_js", "arguments": { "code": "console.log('hello')", "wait": true } }
+```
+
+The response retains `execution_id`. A bounded wait timeout sets
+`wait_timed_out` without resubmitting. Output above 1 MiB is truncated in this
+response; read subsequent pages with `get_execution_output`. Use this mode for
+Lambda so the request stays active through persistence. See the
+[lifecycle contract](../concepts/async-execution.md#wait-through-persistence).
 
 ## Read console output by line
 
@@ -103,7 +117,7 @@ curl -s http://localhost:8080/api/executions
 
 ## Use the stateless synchronous shortcut
 
-When the server is running in stateless mode (`--stateless`), `run_js` is the only available tool and it blocks until the execution completes (polling internally every 50 ms, up to 300 seconds). It returns the full console output directly — no separate `get_execution_output` call is needed.
+When both heap and filesystem stores are `none`, the stateless MCP `run_js` blocks until the execution completes (polling internally every 50 ms, up to 300 seconds). It returns the full console output directly — no separate `get_execution_output` call is needed.
 
 ```json
 { "tool": "run_js", "arguments": { "code": "console.log(1 + 1);" } }
@@ -111,7 +125,8 @@ When the server is running in stateless mode (`--stateless`), `run_js` is the on
 // Failure: { "output": "…", "error": "ReferenceError: x is not defined" }
 ```
 
-The stateless `run_js` accepts only `code`, `heap_memory_max_mb`, and `execution_timeout_secs`. The `heap`, `tags`, and `session` parameters are not available in stateless mode.
+The stateless `run_js` accepts `code`, an optional policy-gated `file` source,
+`heap_memory_max_mb`, and `execution_timeout_secs`. The `heap`, `tags`, and `session` parameters are not available in stateless mode.
 
 ## Pass execution options
 

@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*.*.*"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/npm-publish.yml"
   workflow_dispatch:
     inputs:
       package:
@@ -11,21 +15,22 @@ on:
         required: true
         default: both
         type: choice
-        options: [both, node, client]
+        options: [both, node, node-musl, client]
       version:
-        description: "Version to stage into selected package artifacts"
-        required: true
+        description: "Version to validate on main (tagged runs use the tag version)"
+        required: false
         type: string
 
-# Manual runs only produce artifacts. Only protected v*.*.* tag pushes can
-# publish both packages through the environment-gated OIDC publisher.
+# PRs that change this workflow validate the native package without publishing.
+# Manual runs on main validate packages; dispatch on an existing tag attaches
+# assets. Tag pushes also run the environment-gated npm publisher.
 permissions:
   contents: read
 
 jobs:
   build-tarballs:
     name: Build ${{ matrix.id }} tarball
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
@@ -42,13 +47,14 @@ jobs:
       - name: Select matrix package
         id: select
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          TAG_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
           PACKAGE_SELECTION: ${{ inputs.package }}
           PACKAGE_ID: ${{ matrix.id }}
+          EVENT: ${{ github.event_name }}
         run: |
-          if [ "$EVENT_NAME" = push ] ||
-             { [ "$EVENT_NAME" = workflow_dispatch ] && { [ "$PACKAGE_SELECTION" = both ] || [ "$PACKAGE_SELECTION" = "$PACKAGE_ID" ]; }; }; then
+          if [[ "$REF" == refs/tags/v* ]] ||
+             [[ "$EVENT" == pull_request && "$PACKAGE_ID" == node ]] ||
+             [[ "$PACKAGE_SELECTION" == both || "$PACKAGE_SELECTION" == "$PACKAGE_ID" ]]; then
             echo selected=true >> "$GITHUB_OUTPUT"
           else
             echo selected=false >> "$GITHUB_OUTPUT"
@@ -57,22 +63,25 @@ jobs:
         if: steps.select.outputs.selected == 'true'
         with:
           fetch-depth: 0
-      - name: Verify tag target or manual validation version
+      - name: Verify tag target or validation version
         if: steps.select.outputs.selected == 'true'
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           TAG_NAME: ${{ github.ref_name }}
-          PACKAGE_ID: ${{ matrix.id }}
           REQUESTED_VERSION: ${{ inputs.version }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
-          if [ "$EVENT_NAME" = push ]; then
+          if [[ "$REF" == refs/tags/v* ]]; then
             release="$(node node/scripts/release-tag.mjs "$TAG_NAME")"
             requested_version="$(node -p "JSON.parse(process.argv[1]).version" "$release")"
             tag_commit="$(git rev-list -n 1 "$TAG_NAME")"
             test "$tag_commit" = "$GITHUB_SHA"
             git merge-base --is-ancestor "$tag_commit" origin/main
+          elif [[ "$EVENT" == pull_request ]]; then
+            requested_version="$(node -p 'require("./node/package.json").version')"
+            node node/scripts/release-tag.mjs "v$requested_version" >/dev/null
           else
             test "$GITHUB_REF" = refs/heads/main
             requested_version="$REQUESTED_VERSION"
@@ -109,43 +118,32 @@ jobs:
         run: |
           nix build .#npm-client
           timeout 180s node clients/typescript/scripts-test-package.mjs result/*.tgz
-      - name: Restore reusable source-V8 build cache
+      - name: Cache glibc SDK build
         if: steps.select.outputs.selected == 'true' && matrix.id == 'node'
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/git
             ~/.cargo/registry
-            target/python-uniffi
-          key: python-uniffi-v8-146-81a3711c-shared-v4-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
-          restore-keys: |
-            python-uniffi-v8-146-shared-v3-${{ runner.os }}-
-      - name: Build the native engine
+            target/node-sdk-gnu
+          key: node-sdk-gnu-v1-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.nix', 'flake.lock', 'shell.nix') }}
+      - name: Build the native engine against the pinned glibc V8 archive
         if: steps.select.outputs.selected == 'true' && matrix.id == 'node'
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/node-sdk-gnu
+        # The default Nix shell supplies RUSTY_V8_ARCHIVE for this platform.
+        # Its upstream Linux archive supports cdylibs; the crates.io source
+        # distribution does not include ICU data for a source build.
         run: |
-          nix develop --command bash -c '
-            unset RUSTY_V8_ARCHIVE
-            export V8_FROM_SOURCE=1
-            export GN_ARGS="v8_monolithic=true v8_monolithic_for_shared_library=true"
-            export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
-            cargo build -p mcp-v8-uniffi-python --release \
-              --config mcp-v8-uniffi-python/cargo-config.toml
+          nix develop --command bash -euc '
+            test -s "$RUSTY_V8_ARCHIVE"
+            cargo build --locked --release -p mcp-v8-uniffi-python
           '
-      - name: Save source-V8 cache before package checks
-        if: steps.select.outputs.selected == 'true' && matrix.id == 'node' && success()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            target/python-uniffi
-          key: python-uniffi-v8-146-81a3711c-shared-v4-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
       - name: Build and verify native Nix tarball
         if: steps.select.outputs.selected == 'true' && matrix.id == 'node'
         run: |
           nix develop --command bash node/scripts/build-bindgen.sh
           nix develop --command bash node/scripts/generate.sh \
-            target/python-uniffi/release/libmcp_v8_uniffi.so
+            target/node-sdk-gnu/release/libmcp_v8_uniffi.so
           stage="$(mktemp -d)"
           tar --exclude=node/node_modules --exclude=node/dist -cf - LICENSE node | tar -C "$stage" -xf -
           NATIVE_NPM_SOURCE="$stage" nix build --impure --expr '
@@ -168,9 +166,11 @@ jobs:
         if: steps.select.outputs.selected == 'true'
         run: |
           set -euo pipefail
-          test "$(find -L result -maxdepth 1 -type f -name '*.tgz' | wc -l)" = 1
+          tarballs=(result/*.tgz)
+          test "${#tarballs[@]}" = 1
+          test -f "${tarballs[0]}"
           mkdir release-artifacts
-          cp result/*.tgz release-artifacts/
+          cp "${tarballs[0]}" release-artifacts/
       - uses: actions/upload-artifact@v4
         if: steps.select.outputs.selected == 'true'
         with:
@@ -178,6 +178,52 @@ jobs:
           path: release-artifacts/*.tgz
           if-no-files-found: error
           retention-days: 7
+
+  build-musl-tarball:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && (inputs.package == 'both' || inputs.package == 'node-musl'))
+    uses: ./.github/workflows/node-musl-package.yml
+    with:
+      version: ${{ inputs.version }}
+
+  attach-release-assets:
+    name: Attach tested SDKs to GitHub Release
+    needs: [build-tarballs, build-musl-tarball]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: npm-tarball-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Stage tar.gz release assets
+        id: assets
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release="$(node node/scripts/release-tag.mjs "$TAG")"
+          version="$(jq -r '.version' <<< "$release")"
+          policy="$(node scripts/release-policy.mjs classify "$TAG")"
+          echo "prerelease=$(jq -r '.prerelease' <<< "$policy")" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$(jq -r '.make_latest' <<< "$policy")" >> "$GITHUB_OUTPUT"
+          for sdk in client node; do
+            package="release-artifacts/wholelottahoopla-mcp-js-$sdk-$version"
+            test -s "$package.tgz"
+            mv "$package.tgz" "$package.tar.gz"
+          done
+          musl="release-artifacts/wholelottahoopla-mcp-js-node-$version-linux-x64-musl"
+          test -s "$musl.tgz"
+          mv "$musl.tgz" "$musl.tar.gz"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*.tar.gz
+          fail_on_unmatched_files: true
+          prerelease: ${{ steps.assets.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.assets.outputs.make_latest }}
 
   publish:
     name: Publish both tagged npm packages

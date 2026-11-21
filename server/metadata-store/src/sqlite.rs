@@ -16,7 +16,7 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     /// Open a local database file. Its parent directory must already exist.
-    /// Namespaces isolate sessions, tags and labels within the same file.
+    /// Namespaces isolate sessions, tags, labels and runtime records in one file.
     pub fn open(path: impl AsRef<Path>, namespace: &str) -> Result<Self> {
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
         connection

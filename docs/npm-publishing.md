@@ -9,8 +9,9 @@ This repository has two public npm package candidates:
 
 Do not publish either package until every gate in this document is satisfied.
 The repository's [`npm-publish.yml`](../.github/workflows/npm-publish.yml) is
-intentionally tag/manual-only. Manual runs only validate artifacts; only the
-repository's existing protected `v*.*.*` release tags publish both npm packages.
+intentionally tag/manual-only. Manual runs on `main` validate artifacts.
+Tag pushes and tagged runs dispatched by **Cut Release** attach the tested
+SDKs to GitHub Releases. Only tag pushes can publish to npm.
 It has no npm token fallback. The only job granted `id-token: write` is the
 GitHub Environment-protected `publish` job.
 
@@ -145,7 +146,7 @@ and publishes both package names at the same tag-derived version:
    version into both manifests and lockfiles before building.
 2. Optionally run **Publish npm Packages** manually on `main` with package
    `both` and the intended version to inspect both validated artifacts. Manual
-   dispatch has no publishing path.
+   dispatch on `main` has no publishing path.
 3. Create and push the same annotated tag used by the existing release and
    Docker workflows:
 

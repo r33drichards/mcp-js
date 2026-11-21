@@ -22,6 +22,7 @@ pub mod heap_tags;
 pub mod hooks;
 pub mod http2;
 pub mod mcp_client;
+pub mod host_tools;
 pub mod mcp_oauth;
 pub mod module_loader;
 pub mod node_compat;
@@ -124,7 +125,9 @@ fn validate_node_import_attributes(scope: &mut v8::PinScope, attributes: &HashMa
 }
 
 pub fn initialize_v8() {
-    v8::V8::set_flags_from_string("--js-defer-import-eval");
+    // Snapshot creators and live isolates share V8's read-only heap. Keep
+    // it sealed when producing a custom snapshot alongside live executions.
+    v8::V8::set_flags_from_string("--js-defer-import-eval --no-extensible-ro-snapshot");
 
     // deno_core initializes V8 automatically on first JsRuntime creation.
     // Kept as the common process-init hook for callers (main.rs, tests, fuzz).
@@ -1020,8 +1023,8 @@ pub struct ExecutionConfig<'a> {
     pub fs_mount: Option<fs::FsMountHandle>,
     pub mcp_headers: Option<serde_json::Value>,
     pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
-    pub console_tree: Option<sled::Tree>,
-    pub console_error_tree: Option<sled::Tree>,
+    pub console_tree: Option<mcp_metadata_store::RuntimeTree>,
+    pub console_error_tree: Option<mcp_metadata_store::RuntimeTree>,
     pub host_console_writer: Option<HostConsoleWriter>,
     pub process_exit_state: Option<&'a console::ProcessExitState>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
@@ -1053,8 +1056,8 @@ impl<'a> ExecutionConfig<'a> {
             mcp_headers: None,
             subprocess_config: None,
             console_tree: None,
-            console_error_tree: None,
             host_console_writer: None,
+            console_error_tree: None,
             process_exit_state: None,
             module_loader_config: None,
             bootstrap_script: None,
@@ -1106,13 +1109,8 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
-    pub fn maybe_console_tree(mut self, tree: Option<sled::Tree>) -> Self {
-        self.console_tree = tree;
-        self
-    }
-
-    pub fn console_tree(mut self, tree: sled::Tree) -> Self {
-        self.console_tree = Some(tree);
+    pub fn console_tree(mut self, tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
+        self.console_tree = Some(tree.into());
         self
     }
 
@@ -1121,8 +1119,8 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
-    pub fn console_error_tree(mut self, tree: sled::Tree) -> Self {
-        self.console_error_tree = Some(tree);
+    pub fn console_error_tree(mut self, tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
+        self.console_error_tree = Some(tree.into());
         self
     }
 
@@ -1222,8 +1220,8 @@ pub fn execute_stateless(
         mcp_headers,
         subprocess_config,
         console_tree,
-        console_error_tree,
         host_console_writer,
+        console_error_tree,
         process_exit_state,
         module_loader_config,
         bootstrap_script,
@@ -1470,7 +1468,7 @@ pub fn execute_stateless(
             };
 
         // Flush any remaining console output before runtime is dropped.
-        console::flush_console(&mut runtime);
+        console::flush_console(&mut runtime)?;
 
         *isolate_handle.lock().unwrap() = None;
 
@@ -1517,8 +1515,8 @@ pub fn execute_stateful(
         mcp_headers,
         subprocess_config,
         console_tree,
-        console_error_tree,
         host_console_writer,
+        console_error_tree,
         process_exit_state,
         module_loader_config,
         bootstrap_script,
@@ -1532,8 +1530,6 @@ pub fn execute_stateful(
     let _ = compile_module;
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let params = create_params_with_heap_limit(heap_memory_max_bytes);
-
         // Box::leak to get &'static [u8] required by RuntimeOptions::startup_snapshot.
         // We reclaim the memory after the runtime is consumed by snapshot().
         let leaked_snapshot: Option<(*mut [u8], &'static [u8])> =
@@ -1548,7 +1544,24 @@ pub fn execute_stateful(
             eprintln!("snapshot not found, creating new isolate...");
         }
 
+        if let Some((ptr, snapshot)) = leaked_snapshot {
+            // V8 aborts on a version mismatch. IsValid checks the embedded
+            // version without deserializing, but requires enough header bytes.
+            let compatible = snapshot.len() >= MIN_SNAPSHOT_PAYLOAD
+                && snapshot.len() <= i32::MAX as usize
+                && v8::StartupData::from(snapshot).is_valid();
+            if !compatible {
+                // The compatibility check has finished and no isolate owns it.
+                unsafe { drop(Box::from_raw(ptr)) };
+                return Err(
+                    "Heap snapshot is incompatible with this V8 runtime; start with a new heap"
+                        .to_string(),
+                );
+            }
+        }
+
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
+        let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
         let mut extensions = Vec::new();
         if console_tree.is_some() || host_console_writer.is_some() || process_exit_state.is_some() {
@@ -1795,7 +1808,7 @@ pub fn execute_stateful(
         };
 
         // Flush any remaining console output before snapshot.
-        console::flush_console_snapshot(&mut runtime);
+        console::flush_console_snapshot(&mut runtime)?;
 
         *isolate_handle.lock().unwrap() = None;
 
@@ -1969,6 +1982,7 @@ pub struct RunJsRequest<'a> {
     execution_timeout_secs: Option<u64>,
     tags: Option<HashMap<String, String>>,
     mcp_headers: Option<serde_json::Value>,
+    host_tools: Option<Arc<host_tools::HostToolRun>>,
 }
 
 impl<'a> RunJsRequest<'a> {
@@ -2037,6 +2051,11 @@ impl<'a> RunJsRequest<'a> {
         self
     }
 
+    pub(crate) fn maybe_host_tools(mut self, tools: Option<Arc<host_tools::HostToolRun>>) -> Self {
+        self.host_tools = tools;
+        self
+    }
+
     pub async fn execute(self) -> Result<ExecutionId, String> {
         self.engine
             .run_js_inner(
@@ -2049,6 +2068,7 @@ impl<'a> RunJsRequest<'a> {
                 self.execution_timeout_secs,
                 self.tags,
                 self.mcp_headers,
+                self.host_tools,
             )
             .await
     }
@@ -2527,6 +2547,7 @@ impl Engine {
             execution_timeout_secs: None,
             tags: None,
             mcp_headers: None,
+            host_tools: None,
         }
     }
 
@@ -2543,6 +2564,7 @@ impl Engine {
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
         mcp_headers: Option<serde_json::Value>,
+        host_tools: Option<Arc<host_tools::HostToolRun>>,
     ) -> Result<ExecutionId, String> {
         let registry = self
             .execution_registry
@@ -2567,6 +2589,10 @@ impl Engine {
 
         let id = uuid::Uuid::new_v4().to_string();
         let console_tree = registry.register(&id)?;
+        let host_console_writer = self
+            .host_console_bridge
+            .as_ref()
+            .map(|bridge| bridge.for_execution(id.clone()));
 
         // Resolve which heap snapshot to restore. An explicit `heap` always
         // wins. Otherwise, when a `session` is given, fall back to that
@@ -2637,6 +2663,7 @@ impl Engine {
 
         let engine = self.clone();
         let id_bg = id.clone();
+        let hcw_bg = host_console_writer.clone();
         let activity = Arc::new(ExecutionActivity {
             registry: self.execution_registry.as_ref().expect("registered execution").clone(),
             id: id.clone(),
@@ -2656,7 +2683,9 @@ impl Engine {
                     tags,
                     raw_snapshot,
                     console_tree,
+                    hcw_bg,
                     mcp_headers,
+                    host_tools,
                 )
                 .await;
         });
@@ -2717,8 +2746,10 @@ impl Engine {
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
         raw_snapshot: Option<Vec<u8>>,
-        console_tree: sled::Tree,
+        console_tree: mcp_metadata_store::RuntimeTree,
+        host_console_writer: Option<HostConsoleWriter>,
         mcp_headers: Option<serde_json::Value>,
+        host_tools: Option<Arc<host_tools::HostToolRun>>,
     ) {
         let registry = match &self.execution_registry {
             Some(r) => r.clone(),
@@ -2782,15 +2813,20 @@ impl Engine {
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
-                let writer = self.host_console_bridge.as_ref()
-                    .map(|bridge| bridge.for_execution(id.clone()));
-                let ct = if writer.is_some() { None } else { Some(console_tree) };
+                let ct = console_tree;
+                let hcw = host_console_writer;
                 let mlc = self.module_loader_config.clone();
-                let mc = self
-                    .mcp_client_manager
-                    .as_ref()
-                    .map(|m| mcp_client::McpConfig {
-                        client_manager: (**m).clone(),
+                let mc = host_tools
+                    .clone()
+                    .map(mcp_client::McpToolProvider::Host)
+                    .or_else(|| {
+                        self.mcp_client_manager
+                            .as_deref()
+                            .cloned()
+                            .map(mcp_client::McpToolProvider::Upstream)
+                    })
+                    .map(|provider| mcp_client::McpConfig {
+                        provider,
                         hooks: self.mcp_tools_hooks.clone(),
                     });
                 let fm = fs_mount.clone();
@@ -2799,6 +2835,7 @@ impl Engine {
                 // moved into the spawn_blocking closure below.
                 let code_for_log = code.clone();
                 let blocking_activity = activity.clone();
+                let timeout_host_tools = host_tools.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _activity = blocking_activity;
                     execute_stateless(
@@ -2816,8 +2853,8 @@ impl Engine {
                             .maybe_fs_config(fsc.as_deref())
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())
-                            .maybe_console_tree(ct)
-                            .maybe_host_console_writer(writer)
+                            .console_tree(ct)
+                            .maybe_host_console_writer(hcw)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
                             .maybe_artifact_state(ast),
@@ -2850,6 +2887,11 @@ impl Engine {
                         }
                     }
                     _ = tokio::time::sleep(timeout_dur) => {
+                        // An isolate can be idle while awaiting the host. Wake
+                        // its pending op before waiting for the blocking task.
+                        if let Some(tools) = timeout_host_tools {
+                            tools.stop_calls();
+                        }
                         if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
                             h.terminate_execution();
                         }
@@ -2915,15 +2957,13 @@ impl Engine {
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
-                let writer = self.host_console_bridge.as_ref()
-                    .map(|bridge| bridge.for_execution(id.clone()));
-                let ct = if writer.is_some() { None } else { Some(console_tree) };
+                let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self
                     .mcp_client_manager
                     .as_ref()
                     .map(|m| mcp_client::McpConfig {
-                        client_manager: (**m).clone(),
+                        provider: mcp_client::McpToolProvider::Upstream((**m).clone()),
                         hooks: self.mcp_tools_hooks.clone(),
                     });
 
@@ -2950,8 +2990,7 @@ impl Engine {
                             .maybe_fs_config(fsc.as_deref())
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())
-                            .maybe_console_tree(ct)
-                            .maybe_host_console_writer(writer)
+                            .console_tree(ct)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
                             .maybe_artifact_state(ast),

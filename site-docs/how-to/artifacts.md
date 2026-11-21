@@ -23,10 +23,11 @@ artifact("chart", "image/png", png);
 - `bytes` — a `Uint8Array`, any TypedArray, an `ArrayBuffer`, or a string
   (UTF-8 encoded). Max 16 MiB per artifact.
 
-Invalid arguments throw a `TypeError`/`Error` you can catch in JS. Artifacts
-are stored in the server's execution database, so they persist across
-executions (and server restarts) and are shared across sessions — keys are a
-single global namespace.
+Invalid arguments throw a `TypeError`/`Error` you can catch in JS. Artifact metadata is stored in the selected execution database; bytes use S3
+when configured, otherwise `<session-db-path>/runtime-blobs`. Keys share one
+namespace within that registry. Restarts need both the metadata and its blob
+backend. See [runtime payload storage](../concepts/runtime-storage.md) for hashing,
+publication, and local reclamation.
 
 ## Fetch an artifact over MCP
 

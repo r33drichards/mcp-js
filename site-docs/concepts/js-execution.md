@@ -4,7 +4,7 @@ An explanation of how mcp-v8 executes JavaScript and TypeScript: the V8 isolate 
 
 ## The V8 isolate model
 
-mcp-v8 embeds V8 through [`deno_core`](https://crates.io/crates/deno_core). Every call to `run_js` creates a fresh V8 runtime — a `JsRuntimeForSnapshot` in stateful mode or a `JsRuntime` in stateless mode. Code is loaded as an **ES module** (`file:///main_<n>.js`) so top-level `await` works without any wrapper.
+mcp-v8 embeds V8 through [`deno_core`](https://crates.io/crates/deno_core). Every call to `run_js` creates a fresh V8 runtime — a `JsRuntimeForSnapshot` in stateful mode or a `JsRuntime` in stateless mode. Code is loaded as an **ES module** (a unique `file:///main_<uuid>.js` URL for each execution, including after heap restore) so top-level `await` works without any wrapper.
 
 Isolates do not share memory. Any JavaScript state that must survive across calls must be captured in a **heap snapshot** (stateful mode). In stateless mode the isolate and all its state are discarded when the execution finishes.
 
@@ -22,7 +22,9 @@ Type errors are **not** reported. Only syntax errors (malformed TypeScript token
 
 ## Console capture
 
-The sandbox replaces `globalThis.console` with a custom object backed by the Rust op `op_console_write`. Console output is buffered in 4096-byte pages and persisted to a per-execution tree in the sled metadata database. It is never written to stdout or stderr, which would corrupt the JSON-RPC stream in stdio mode.
+The sandbox replaces `globalThis.console` with a custom object backed by the Rust op `op_console_write`. Server-configured console output is buffered into 256 KiB blob pages, with
+ordered descriptors in the selected sled, SQLite, or DynamoDB metadata store.
+Raw inline storage constructors retain 4 KiB pages. It is never written to stdout or stderr, which would corrupt the JSON-RPC stream in stdio mode.
 
 The six available console methods and the prefixes they add:
 
@@ -35,7 +37,8 @@ The six available console methods and the prefixes they add:
 | `console.warn` | `[WARN] ` |
 | `console.error` | `[ERROR] ` |
 
-Arguments are formatted: string values are used as-is; all other values are passed through `JSON.stringify`. Multiple arguments are joined with a single space. A `\n` is appended to every call. At the end of execution, any bytes remaining in the 4096-byte buffer are flushed.
+Arguments are formatted: string values are used as-is; all other values are passed through `JSON.stringify`. Multiple arguments are joined with a single space. A `\n` is appended to every call. At execution end, any remaining buffered bytes are flushed; publication failures
+are surfaced rather than silently storing the bytes in another backend.
 
 The captured output is read back through `get_execution_output` (MCP) or `GET /api/executions/{id}/output` (REST), both of which support line-based and byte-based pagination.
 
@@ -104,7 +107,9 @@ For stateless calls, the heap load/save steps are absent and `JsRuntime` + `exec
 
 ## Sandbox hardening
 
-After all capability extensions are injected (console, fetch, filesystem, timers, etc.), a hardening pass runs:
+Console capture neutralizes the direct print paths, including
+`__bootstrap.core.print`, so sandbox output does not corrupt stdio. Additional
+hardening is opt-in through the `--harden-*` flags (all default to off):
 
 1. Replaces `op_get_proxy_details`, `op_memory_usage`, and `op_is_terminal` with no-ops to prevent information leakage.
 2. Freezes `Deno.core.ops` so user code cannot replace or intercept any op.

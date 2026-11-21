@@ -48,15 +48,22 @@ snapshots remain JSON strings because their shapes are not fixed across tools.
 | Target | Status | Constraint |
 |---|---|---|
 | Linux host, static archive | Verified | Builds and generates Swift, Kotlin, Python, and Ruby bindings in CI |
-| Linux host, `cdylib` | Blocked with the repository's prebuilt V8 | V8 uses the executable-only TLS model |
+| Linux x64, `cdylib` | Used by the native JavaScript SDK CI | Build with the current pinned glibc V8 archive; validate ELF dependencies and host libc |
 | iOS static library | Design supported, target validation pending | Requires an iOS-compatible V8 archive and Xcode packaging |
 | Android shared library/AAR | Validation pending | Requires Android V8 builds, ABI matrix builds, and AAR packaging |
-| Desktop Kotlin/Python/Ruby | Packaging pending | Requires a loadable shared library built with shared-library-safe V8 TLS |
+| Desktop Kotlin/Python/Ruby | Binding generation and Python smoke path available; distribution packaging is separate | Requires a compatible loadable library for the consumer host |
 
-A Linux `cdylib` requires a V8 archive built for shared-library use, for example
-with `V8_FROM_SOURCE=1` and
-`GN_ARGS=v8_monolithic_for_shared_library=true`, or an equivalent archive
-provided through `RUSTY_V8_ARCHIVE`.
+For the current Linux glibc build, use the Nix shell's pinned
+`RUSTY_V8_ARCHIVE`. The old `V8_FROM_SOURCE=1` recipe is not a working shortcut
+with the published V8 crate, which omits ICU build inputs. Follow the
+[native JavaScript SDK build guide](../how-to/native-javascript-sdk.md#build-and-validate-a-package)
+and package checks. A successful static archive build alone does not establish
+shared-library portability on another host.
+
+The Node.js SDK uses the loadable `mcp-v8-uniffi-python` library with generated
+Node-API wrappers. Its Linux x64 glibc/musl release matrix is documented
+[separately](../how-to/native-javascript-sdk.md), not implied by the Swift/Kotlin
+binding generator's output.
 
 ## Generation command
 

@@ -58,7 +58,7 @@
   dynamodb_table = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode. Config-file key for the `--dynamodb-table` flag. Environment variable: `MCP_V8_DYNAMODB_TABLE`.";
+    description = "Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled. Covers session history, heap tags, filesystem labels and runtime bookkeeping. Artifact and console payloads use S3 or local files; other metadata obeys native item limits. Incompatible with cluster mode. Config-file key for the `--dynamodb-table` flag. Environment variable: `MCP_V8_DYNAMODB_TABLE`.";
   };
   election_timeout_max = lib.mkOption {
     type = lib.types.nullOr lib.types.ints.unsigned;
@@ -238,7 +238,7 @@
   s3_bucket = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "S3 bucket backing whichever axes select `s3`. Required when `--heap-store s3` or `--fs-store s3` is set. Config-file key for the `--s3-bucket` flag. Environment variable: `MCP_V8_S3_BUCKET`.";
+    description = "S3 bucket for artifact and console payloads (otherwise stored on disk), and snapshot axes selecting `s3`. Required for `--heap-store s3` or `--fs-store s3`. Config-file key for the `--s3-bucket` flag. Environment variable: `MCP_V8_S3_BUCKET`.";
   };
   sandbox = lib.mkOption {
     type = lib.types.nullOr (lib.types.attrsOf lib.types.anything);
@@ -268,7 +268,7 @@
   sqlite_path = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "SQLite metadata file for session history, heap tags and filesystem labels. Parent directory must exist. Does not replace the Raft log or execution registry. Config-file key for the `--sqlite-path` flag. Environment variable: `MCP_V8_SQLITE_PATH`.";
+    description = "SQLite metadata file for session history, heap tags, filesystem labels and runtime bookkeeping. Parent directory must exist. Does not replace the Raft log. Config-file key for the `--sqlite-path` flag. Environment variable: `MCP_V8_SQLITE_PATH`.";
   };
   sse_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;

@@ -8,6 +8,13 @@ tiny, fully-typed [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/)
 runtime — mirroring how the Rust client (`mcp-v8-client`) is generated with
 progenitor from the same spec.
 
+On a GitHub release that includes SDK assets, you can also install the HTTP
+client directly. Replace `VERSION` with the release version:
+
+```sh
+npm install '@wholelottahoopla/mcp-js-client@https://github.com/r33drichards/mcp-js/releases/download/vVERSION/wholelottahoopla-mcp-js-client-VERSION.tar.gz'
+```
+
 ## Package output
 
 `npm run build` compiles `src/index.ts` to ESM at `dist/index.js`, emits
@@ -26,7 +33,9 @@ repository's pre-AGPL license history. This is intentionally separate from the
 root AGPL-3.0 license used by `@wholelottahoopla/mcp-js-node`; do not replace
 this scoped MIT license with the root license when packaging the HTTP client.
 
-## Install (after the license blocker is resolved)
+## Install from the npm registry
+
+For a version available in the registry:
 
 ```bash
 npm install @wholelottahoopla/mcp-js-client

@@ -1,45 +1,15 @@
-use std::path::PathBuf;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::primitives::ByteStream;
+use std::path::PathBuf;
 
-use aws_config;
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
+use mcp_metadata_store::blob::BlobStaging;
+use aws_config;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
-#[async_trait]
-pub trait HeapStorage: Send + Sync + 'static {
-    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String>;
-    async fn get(&self, name: &str) -> Result<Vec<u8>, String>;
-
-    /// List every blob name in the backend. Used by fs snapshot GC. Backends
-    /// that cannot enumerate return an error (GC is then unavailable on them).
-    async fn list(&self) -> Result<Vec<String>, String> {
-        Err("list is not supported by this storage backend".to_string())
-    }
-
-    /// Delete a blob by name. Used by fs snapshot GC sweep.
-    async fn delete(&self, _name: &str) -> Result<(), String> {
-        Err("delete is not supported by this storage backend".to_string())
-    }
-
-    /// Whether a blob is present in this backend's *local* layer. Cheap by
-    /// default only where it can be (a local file/memory store); the generic
-    /// fallback actually fetches. Used by `warm` to skip already-local blobs.
-    async fn contains(&self, name: &str) -> Result<bool, String> {
-        Ok(self.get(name).await.is_ok())
-    }
-
-    /// Ensure a blob is materialized in this backend's local layer so a later
-    /// `get` does not have to cross to a remote backend (or another tokio
-    /// runtime). On a write-through cache this populates the local cache from
-    /// the primary; on a purely-local backend it is a no-op. Pre-staging fs
-    /// blobs via `warm` on the main runtime is what lets the isolate's
-    /// current-thread ops read them without awaiting remote I/O.
-    async fn warm(&self, name: &str) -> Result<(), String> {
-        self.get(name).await.map(|_| ())
-    }
-}
+/// Compatibility name for the shared blob backend used by heaps, filesystems and runtime payloads.
+pub use mcp_metadata_store::blob::BlobStorage as HeapStorage;
 
 /// In-memory blob backend. Primarily for tests and the `FsStore::in_memory`
 /// constructor, but kept in the normal build so integration test crates (which
@@ -57,6 +27,18 @@ impl MemoryHeapStorage {
 
 #[async_trait]
 impl HeapStorage for MemoryHeapStorage {
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let mut map = self.map.lock().unwrap();
+        match map.get(name) {
+            Some(existing) if existing != data => Err("immutable object conflict".into()),
+            Some(_) => Ok(()),
+            None => {
+                map.insert(name.into(), data.to_vec());
+                Ok(())
+            }
+        }
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         self.map
             .lock()
@@ -232,24 +214,379 @@ impl HeapStorage for SledHeapStorage {
 #[derive(Clone)]
 pub struct FileHeapStorage {
     dir: PathBuf,
+    creation: Arc<Mutex<()>>,
+    runtime_owner: Option<String>,
 }
 
 impl FileHeapStorage {
-
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        let dir = dir.into();
-        std::fs::create_dir_all(&dir).ok();
-        Self { dir }
+        Self {
+            dir: dir.into(),
+            creation: Arc::new(Mutex::new(())),
+            runtime_owner: None,
+        }
+    }
+
+    fn ensure_directory(path: &std::path::Path) -> Result<(), String> {
+        match std::fs::create_dir(path) {
+            Ok(()) => Self::sync_directory(
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(std::path::Path::new(".")),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if path.is_dir() {
+                    Ok(())
+                } else {
+                    Err("blob parent is not a directory".into())
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(std::path::Path::new("."));
+                Self::ensure_directory(parent)?;
+                // Another writer may create it while we synchronize its parent.
+                match std::fs::create_dir(path) {
+                    Ok(()) => Self::sync_directory(parent),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {
+                        Self::sync_directory(parent)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    fn sync_directory(path: &std::path::Path) -> Result<(), String> {
+        std::fs::File::open(path)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(unix)]
+    fn runtime_lock(&self, exclusive: bool) -> Result<std::fs::File, String> {
+        use std::os::fd::AsRawFd;
+        Self::ensure_directory(&self.dir)?;
+        let path = self.dir.join(".runtime.lock");
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .map_err(|e| e.to_string())?,
+            Err(e) => return Err(e.to_string()),
+        };
+        let operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } != 0 {
+            return Err(format!(
+                "runtime storage maintenance is busy; retry: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(file)
+    }
+    fn mark_unmanaged_runtime(&self, name: &str) -> Result<(), String> {
+        if self.runtime_owner.is_none()
+            && name.starts_with("runtime/v2/")
+            && !self.dir.join(".runtime-unmanaged").exists()
+        {
+            self.atomic_write(".runtime-unmanaged", b"unmanaged runtime objects", true)?;
+        }
+        Ok(())
+    }
+    fn runtime_files(&self) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+        fn visit(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            out: &mut Vec<(String, std::path::PathBuf)>,
+        ) -> Result<(), String> {
+            let metadata = match path.symlink_metadata() {
+                Ok(metadata) => metadata,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(e.to_string()),
+            };
+            if metadata.file_type().is_symlink() {
+                return Err("runtime collection refuses symlinked object directories".into());
+            }
+            for entry in std::fs::read_dir(path).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let ty = entry.file_type().map_err(|e| e.to_string())?;
+                if ty.is_dir() {
+                    visit(root, &entry.path(), out)?
+                } else if ty.is_file() {
+                    out.push((
+                        entry
+                            .path()
+                            .strip_prefix(root)
+                            .map_err(|e| e.to_string())?
+                            .to_str()
+                            .ok_or("non-UTF8 runtime key")?
+                            .replace('\\', "/"),
+                        entry.path(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        let runtime = self.dir.join("runtime");
+        match runtime.symlink_metadata() {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err("runtime collection refuses symlinked object directories".into());
+            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+            _ => (),
+        }
+        let mut out = Vec::new();
+        visit(&self.dir, &runtime.join("v2"), &mut out)?;
+        Ok(out)
+    }
+    fn atomic_write(&self, name: &str, data: &[u8], immutable: bool) -> Result<(), String> {
+        self.publish_blob(name, data, immutable, true)
+    }
+
+    fn publish_blob(
+        &self,
+        name: &str,
+        data: &[u8],
+        immutable: bool,
+        durable: bool,
+    ) -> Result<(), String> {
+        use std::io::Write;
+        if name.is_empty()
+            || std::path::Path::new(name)
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err("invalid blob key".into());
+        }
+        let path = self.dir.join(name);
+        let parent = path.parent().ok_or("invalid blob parent")?;
+        if durable {
+            // Root provisioning and newly created descendants must be durable
+            // before a sibling writer can publish an object below them.
+            let _creation = self
+                .creation
+                .lock()
+                .map_err(|_| "blob directory lock poisoned")?;
+            Self::ensure_directory(&self.dir)?;
+            let mut directory = self.dir.clone();
+            for component in parent
+                .strip_prefix(&self.dir)
+                .map_err(|e| e.to_string())?
+                .components()
+            {
+                let child = directory.join(component);
+                match std::fs::create_dir(&child) {
+                    Ok(()) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && child.is_dir() => (),
+                    Err(e) => return Err(e.to_string()),
+                }
+                // Sync within the configured root, also covering a directory
+                // that a concurrent instance has just created. Never walk above
+                // an existing root to reopen unrelated ancestors.
+                Self::sync_directory(&directory)?;
+                directory = child;
+            }
+        } else {
+            // Cache data is reconstructible. Create the directory lazily and
+            // publish atomically without syncing the local cache to disk.
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let temp = parent.join(format!(".object-{}", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .map_err(|e| e.to_string())?;
+            file.write_all(data).map_err(|e| e.to_string())?;
+            if durable {
+                file.sync_all().map_err(|e| e.to_string())?;
+            }
+            if immutable {
+                match std::fs::hard_link(&temp, &path) {
+                    Ok(()) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if std::fs::read(&path).map_err(|e| e.to_string())? != data {
+                            return Err("immutable object conflict".into());
+                        }
+                        std::fs::File::open(&path)
+                            .and_then(|f| f.sync_all())
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            } else {
+                std::fs::rename(&temp, &path).map_err(|e| e.to_string())?;
+            }
+            if durable {
+                Self::sync_directory(parent)?;
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(temp);
+        result
     }
 }
 
 #[async_trait]
 impl HeapStorage for FileHeapStorage {
+    fn runtime_gc_identity(&self) -> Option<Vec<u8>> {
+        #[cfg(unix)]
+        {
+            Some(
+                self.dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.dir.clone())
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec(),
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+    fn runtime_scope(&self, owner: &str) -> Result<Arc<dyn HeapStorage>, String> {
+        #[cfg(unix)]
+        {
+            let id = uuid::Uuid::parse_str(owner).map_err(|e| e.to_string())?;
+            if id.to_string() != owner {
+                return Err("invalid runtime owner".into());
+            }
+            let owner_key = format!(".runtime-owners/{owner}");
+            if !self.dir.join(&owner_key).exists() {
+                let _exclusive = self.runtime_lock(true)?;
+                if !self.dir.join(".runtime-owners").exists()
+                    && !self.dir.join(".runtime-unmanaged").exists()
+                    && !self.runtime_files()?.is_empty()
+                {
+                    self.atomic_write(
+                        ".runtime-unmanaged",
+                        b"legacy runtime objects require explicit adoption",
+                        true,
+                    )?;
+                }
+                self.atomic_write(&owner_key, b"runtime metadata owner", true)?;
+            }
+            let mut scoped = self.clone();
+            scoped.runtime_owner = Some(owner.into());
+            Ok(Arc::new(scoped))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = owner;
+            Err("local runtime collection requires filesystem locking".into())
+        }
+    }
+    fn runtime_read_lease(&self) -> Result<Arc<dyn mcp_metadata_store::blob::BlobLease>, String> {
+        #[cfg(unix)]
+        {
+            Ok(Arc::new(self.runtime_lock(false)?))
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Arc::new(()))
+        }
+    }
+    fn collect_runtime_objects(
+        &self,
+        owners: &std::collections::BTreeSet<String>,
+        minimum_age: std::time::Duration,
+        roots: &mut dyn FnMut() -> Result<std::collections::BTreeSet<String>, String>,
+    ) -> Result<usize, String> {
+        #[cfg(unix)]
+        {
+            let _exclusive = self.runtime_lock(true)?;
+            if self.dir.join(".runtime-unmanaged").exists() {
+                return Err(
+                    "runtime root contains unmanaged/legacy objects; collection is disabled".into(),
+                );
+            }
+            let registered = std::fs::read_dir(self.dir.join(".runtime-owners"))
+                .map_err(|e| e.to_string())?
+                .map(|e| {
+                    e.map_err(|e| e.to_string()).and_then(|e| {
+                        e.file_name()
+                            .into_string()
+                            .map_err(|_| "invalid runtime owner".into())
+                    })
+                })
+                .collect::<Result<std::collections::BTreeSet<_>, String>>()?;
+            if &registered != owners {
+                return Err(
+                    "all registered metadata owners must participate in runtime collection".into(),
+                );
+            }
+            let reachable = roots()?;
+            let mut removed = 0;
+            for (key, path) in self.runtime_files()? {
+                let parts: Vec<_> = key.split('/').collect();
+                if parts.len() != 4
+                    || !matches!(parts[2], "artifact" | "console")
+                    || parts[3].len() != 64
+                    || !parts[3]
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    continue;
+                }
+                if reachable.contains(&key) {
+                    continue;
+                }
+                let age = path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map_err(|e| e.to_string())?
+                    .elapsed();
+                if age.is_ok_and(|age| age >= minimum_age) {
+                    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                    Self::sync_directory(path.parent().ok_or("invalid runtime object parent")?)?;
+                    removed += 1;
+                }
+            }
+            Ok(removed)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (owners, minimum_age, roots);
+            Err("local runtime collection requires filesystem locking".into())
+        }
+    }
+
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let _lease = if name.starts_with("runtime/v2/") {
+            Some(self.runtime_read_lease()?)
+        } else {
+            None
+        };
+        self.mark_unmanaged_runtime(name)?;
+        self.atomic_write(name, data, true)
+    }
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
-        let path = self.dir.join(name);
-        std::fs::write(path, data).map_err(|e| e.to_string())
+        let _lease = if name.starts_with("runtime/v2/") {
+            Some(self.runtime_read_lease()?)
+        } else {
+            None
+        };
+        self.mark_unmanaged_runtime(name)?;
+        self.atomic_write(name, data, false)
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        let _lease = if name.starts_with("runtime/v2/") {
+            Some(self.runtime_read_lease()?)
+        } else {
+            None
+        };
         let path = self.dir.join(name);
         std::fs::read(path).map_err(|e| e.to_string())
     }
@@ -265,7 +602,11 @@ impl HeapStorage for FileHeapStorage {
             let entry = entry.map_err(|e| e.to_string())?;
             if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                 if let Some(name) = entry.file_name().to_str() {
-                    out.push(name.to_string());
+                    if !matches!(name, ".runtime.lock" | ".runtime-unmanaged")
+                        && !name.starts_with(".object-")
+                    {
+                        out.push(name.to_string());
+                    }
                 }
             }
         }
@@ -325,12 +666,31 @@ impl S3HeapStorage {
             s3_builder = s3_builder.force_path_style(true);
         }
 
-        let client = S3Client::from_conf(s3_builder.build());
+        Self::from_client(bucket, S3Client::from_conf(s3_builder.build()))
+    }
+
+    /// Explicit clients support embedders and isolated endpoint contract tests.
+    pub fn from_client(bucket: impl Into<String>, client: S3Client) -> Self {
         Self {
             bucket: bucket.into(),
             client: Arc::new(client),
             runtime: tokio::runtime::Handle::current(),
         }
+    }
+
+    async fn on_runtime<T: Send + 'static>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
+    ) -> Result<T, String> {
+        struct CancelOnDrop(tokio::task::AbortHandle);
+        impl Drop for CancelOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let task = self.runtime.spawn(future);
+        let _cancel = CancelOnDrop(task.abort_handle());
+        task.await.map_err(|e| format!("S3 task failed: {e}"))?
     }
 
     async fn put_blocking(&self, name: &str, data: &[u8]) -> Result<(), String> {
@@ -340,45 +700,86 @@ impl S3HeapStorage {
         let data = data.to_vec();
         // Run on the S3 client's own runtime (see `runtime` field), awaiting the
         // JoinHandle — which is safe to poll from any runtime.
-        self.runtime
-            .spawn(async move {
-                client
-                    .put_object()
-                    .bucket(bucket)
-                    .key(name)
-                    .body(ByteStream::from(data))
-                    .send()
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .map_err(|e| format!("s3 put task join error: {e}"))?
+        self.on_runtime(async move {
+            client
+                .put_object()
+                .bucket(bucket)
+                .key(name)
+                .body(ByteStream::from(data))
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     async fn get_blocking(&self, name: &str) -> Result<Vec<u8>, String> {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let name = name.to_string();
-        self.runtime
-            .spawn(async move {
-                let output = client
-                    .get_object()
-                    .bucket(bucket)
-                    .key(name)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let data = output.body.collect().await.map_err(|e| e.to_string())?;
-                Ok::<Vec<u8>, String>(data.into_bytes().to_vec())
-            })
-            .await
-            .map_err(|e| format!("s3 get task join error: {e}"))?
+        self.on_runtime(async move {
+            let output = client
+                .get_object()
+                .bucket(bucket)
+                .key(name)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let data = output.body.collect().await.map_err(|e| e.to_string())?;
+            Ok::<Vec<u8>, String>(data.into_bytes().to_vec())
+        })
+        .await
     }
 }
 
 #[async_trait]
 impl HeapStorage for S3HeapStorage {
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let name = name.to_owned();
+        let data = data.to_vec();
+        self.on_runtime(async move {
+            match client
+                .put_object()
+                .bucket(&bucket)
+                .key(&name)
+                .if_none_match("*")
+                .body(ByteStream::from(data.clone()))
+                .send()
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(error)
+                    if error
+                        .raw_response()
+                        .is_some_and(|r| r.status().as_u16() == 412) =>
+                {
+                    let existing = client
+                        .get_object()
+                        .bucket(&bucket)
+                        .key(&name)
+                        .send()
+                        .await
+                        .map_err(|e| format!("immutable object verification: {e}"))?
+                        .body
+                        .collect()
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .into_bytes();
+                    if existing.as_ref() == data.as_slice() {
+                        Ok(())
+                    } else {
+                        Err("immutable object conflict".into())
+                    }
+                }
+                Err(e) => Err(format!("immutable S3 write: {e}")),
+            }
+        })
+        .await
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         self.put_blocking(name, data).await
     }
@@ -398,45 +799,114 @@ pub const DEFAULT_CACHE_CAPACITY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// and re-cached on the next `get`.
 #[derive(Default)]
 struct CacheBound {
-    sizes: HashMap<String, u64>,
-    order: VecDeque<String>,
+    entries: HashMap<String, (u64, u64)>,
+    evictable: BTreeMap<u64, String>,
+    reserved: BTreeMap<u64, String>,
     total: u64,
     cap: u64,
+    next_id: u64,
+    pins: HashMap<String, HashSet<u64>>,
+    staging: HashMap<u64, HashSet<String>>,
 }
 
 impl CacheBound {
-    /// Record `name` at `size` bytes and return the keys that must be evicted
-    /// from the local cache to stay within `cap`.
+    fn allocate_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
     fn record(&mut self, name: &str, size: u64) -> Vec<String> {
-        if let Some(old) = self.sizes.insert(name.to_string(), size) {
-            self.total -= old;
+        if let Some((old_size, _)) = self.entries.get_mut(name) {
+            self.total -= *old_size;
+            *old_size = size;
         } else {
-            self.order.push_back(name.to_string());
+            let id = self.allocate_id();
+            self.entries.insert(name.to_owned(), (size, id));
+            let order = if self.pins.contains_key(name) { &mut self.reserved } else { &mut self.evictable };
+            order.insert(id, name.to_owned());
         }
         self.total += size;
 
         let mut evicted = Vec::new();
-        while self.total > self.cap {
-            // Never evict the entry we just recorded (it is at the back).
-            if self.order.len() <= 1 {
-                break;
-            }
-            let Some(victim) = self.order.pop_front() else { break };
-            if let Some(sz) = self.sizes.remove(&victim) {
-                self.total -= sz;
-            }
+        while self.total > self.cap && self.entries.len() > 1 {
+            let victim = self.evictable.values().take(2).find(|key| key.as_str() != name)
+                .or_else(|| self.evictable.first_key_value().map(|(_, key)| key))
+                .or_else(|| self.reserved.values().take(2).find(|key| key.as_str() != name))
+                .expect("cache has multiple entries")
+                .clone();
+            self.forget(&victim);
             evicted.push(victim);
         }
         evicted
     }
 
     fn forget(&mut self, name: &str) {
-        if let Some(sz) = self.sizes.remove(name) {
-            self.total -= sz;
-            if let Some(pos) = self.order.iter().position(|k| k == name) {
-                self.order.remove(pos);
+        if let Some((size, id)) = self.entries.remove(name) {
+            self.total -= size;
+            self.evictable.remove(&id);
+            self.reserved.remove(&id);
+        }
+        // Evicted keys are no longer tracked by any staging operation.
+        if let Some(owners) = self.pins.remove(name) {
+            for owner in owners {
+                self.staging.get_mut(&owner).expect("active reservation").remove(name);
             }
         }
+    }
+
+    fn pin(&mut self, owner: u64, name: &str) {
+        let names = self.staging.get_mut(&owner).expect("active reservation");
+        if !names.contains(name) {
+            names.insert(name.to_owned());
+            self.pins.entry(name.to_owned()).or_default().insert(owner);
+            if let Some((_, id)) = self.entries.get(name) {
+                if let Some(key) = self.evictable.remove(id) {
+                    self.reserved.insert(*id, key);
+                }
+            }
+        }
+    }
+
+    fn unpin_all(&mut self, owner: u64) {
+        for name in self.staging.remove(&owner).expect("active reservation") {
+            let owners = self.pins.get_mut(&name).expect("reserved key");
+            owners.remove(&owner);
+            if owners.is_empty() {
+                self.pins.remove(&name);
+                if let Some((_, id)) = self.entries.get(&name) {
+                    if let Some(key) = self.reserved.remove(id) {
+                        self.evictable.insert(*id, key);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Reservations for resident and queued chunks, released when staging ends.
+struct CachePins<'a, P: HeapStorage + Clone> {
+    cache: &'a WriteThroughCacheHeapStorage<P>,
+    owner: u64,
+}
+
+#[async_trait]
+impl<P: HeapStorage + Clone> BlobStaging for CachePins<'_, P> {
+    fn reserve(&mut self, names: &[String]) {
+        let mut bound = self.cache.bound.lock().unwrap();
+        for name in names {
+            bound.pin(self.owner, name);
+        }
+    }
+
+    async fn warm(&self, name: &str) -> Result<(), String> {
+        self.cache.warm_reserved(name, Some(self.owner)).await
+    }
+}
+
+impl<P: HeapStorage + Clone> Drop for CachePins<'_, P> {
+    fn drop(&mut self) {
+        self.cache.bound.lock().unwrap().unpin_all(self.owner);
     }
 }
 
@@ -444,8 +914,9 @@ impl CacheBound {
 /// local filesystem cache.
 /// On put: writes to both the local FS cache and the primary storage.
 /// On get: checks the FS cache first; falls back to the primary and caches the
-/// result locally. When the cache exceeds its capacity, the oldest entries are
-/// evicted from local disk (the primary is untouched, so reads still succeed).
+/// result locally. At capacity, eviction prefers the oldest entry outside
+/// any staging reservation. If the staged data exceeds capacity, the cache
+/// can still evict reserved entries. The primary remains untouched.
 #[derive(Clone)]
 pub struct WriteThroughCacheHeapStorage<P: HeapStorage + Clone> {
     primary: P,
@@ -470,37 +941,74 @@ impl<P: HeapStorage + Clone> WriteThroughCacheHeapStorage<P> {
         }
     }
 
-    /// Record a freshly-cached blob and evict the oldest entries (from the local
-    /// cache only) to stay within capacity. Eviction is best-effort.
-    async fn note_cached(&self, name: &str, size: u64) {
-        let evicted = self.bound.lock().unwrap().record(name, size);
-        for key in evicted {
-            let _ = self.cache.delete(&key).await;
+    /// File cache operations are synchronous. Serialize writes and eviction
+    /// accounting so eviction cannot delete a key another task just reinserted.
+    fn cache_blob(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let mut bound = self.bound.lock().unwrap();
+        self.write_cache(&mut bound, name, data)
+    }
+
+    fn write_cache(&self, bound: &mut CacheBound, name: &str, data: &[u8]) -> Result<(), String> {
+        self.cache.publish_blob(name, data, false, false)?;
+        self.record_cached(bound, name, data.len() as u64);
+        Ok(())
+    }
+
+    fn record_cached(&self, bound: &mut CacheBound, name: &str, size: u64) {
+        for key in bound.record(name, size) {
+            let _ = std::fs::remove_file(self.cache.dir.join(key));
         }
+    }
+
+    async fn warm_reserved(&self, name: &str, owner: Option<u64>) -> Result<(), String> {
+        {
+            let mut bound = self.bound.lock().unwrap();
+            if let Some(owner) = owner {
+                bound.pin(owner, name);
+            }
+            if let Ok(meta) = std::fs::metadata(self.cache.dir.join(name)) {
+                if owner.is_some() && !bound.entries.contains_key(name) {
+                    self.record_cached(&mut bound, name, meta.len());
+                }
+                return Ok(());
+            }
+        }
+        let data = self.primary.get(name).await?;
+        let mut bound = self.bound.lock().unwrap();
+        if let Some(owner) = owner {
+            bound.pin(owner, name);
+        }
+        self.write_cache(&mut bound, name, &data)
     }
 }
 
 #[async_trait]
 impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.primary.put_immutable(name, data).await?;
+        // The primary is durable; an unavailable cache must not invalidate it.
+        let _ = self.cache_blob(name, data);
+        Ok(())
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         // Write-through: write to both FS cache and primary
-        self.cache.put(name, data).await?;
         self.primary.put(name, data).await?;
-        self.note_cached(name, data.len() as u64).await;
-        Ok(())
+        self.cache_blob(name, data)
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         // Check FS cache first
-        if let Ok(data) = self.cache.get(name).await {
-            return Ok(data);
+        {
+            let _bound = self.bound.lock().unwrap();
+            if let Ok(data) = std::fs::read(self.cache.dir.join(name)) {
+                return Ok(data);
+            }
         }
         // Cache miss: fetch from primary and populate cache
         let data = self.primary.get(name).await?;
         // Best-effort cache population; don't fail if local write fails
-        if let Err(e) = self.cache.put(name, &data).await {
+        if let Err(e) = self.cache_blob(name, &data) {
             tracing::warn!("Failed to populate FS cache for {}: {}", name, e);
-        } else {
-            self.note_cached(name, data.len() as u64).await;
         }
         Ok(data)
     }
@@ -509,27 +1017,25 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
     }
     async fn delete(&self, name: &str) -> Result<(), String> {
         // Remove from both layers; the cache delete is best-effort.
-        self.bound.lock().unwrap().forget(name);
-        let _ = self.cache.delete(name).await;
+        {
+            let mut bound = self.bound.lock().unwrap();
+            bound.forget(name);
+            let _ = std::fs::remove_file(self.cache.dir.join(name));
+        }
         self.primary.delete(name).await
     }
     async fn contains(&self, name: &str) -> Result<bool, String> {
         self.cache.contains(name).await
     }
     async fn warm(&self, name: &str) -> Result<(), String> {
-        // Already cached locally — nothing to fetch.
-        if self.cache.contains(name).await.unwrap_or(false) {
-            return Ok(());
-        }
-        // Pull from the primary (e.g. S3) and populate the local cache, so a
-        // later get() served from the cache never crosses to a remote backend.
-        let data = self.primary.get(name).await?;
-        if let Err(e) = self.cache.put(name, &data).await {
-            tracing::warn!("Failed to warm FS cache for {}: {}", name, e);
-        } else {
-            self.note_cached(name, data.len() as u64).await;
-        }
-        Ok(())
+        self.warm_reserved(name, None).await
+    }
+
+    fn prefetch_staging(&self) -> Option<Box<dyn BlobStaging + '_>> {
+        let mut bound = self.bound.lock().unwrap();
+        let owner = bound.allocate_id();
+        bound.staging.insert(owner, HashSet::new());
+        Some(Box::new(CachePins { cache: self, owner }))
     }
 }
 
@@ -543,11 +1049,44 @@ pub enum AnyHeapStorage {
     S3WithFsCache(S3WithFsCacheHeapStorage),
 }
 
-
-
-
 #[async_trait::async_trait]
 impl HeapStorage for AnyHeapStorage {
+    fn prefetch_staging(&self) -> Option<Box<dyn BlobStaging + '_>> {
+        match self {
+            Self::S3WithFsCache(inner) => inner.prefetch_staging(),
+            _ => None,
+        }
+    }
+
+    async fn warm(&self, name: &str) -> Result<(), String> {
+        match self {
+            Self::File(inner) => inner.warm(name).await,
+            Self::S3(inner) => inner.warm(name).await,
+            Self::S3WithFsCache(inner) => inner.warm(name).await,
+        }
+    }
+
+    fn runtime_gc_identity(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::File(inner) => inner.runtime_gc_identity(),
+            _ => None,
+        }
+    }
+    fn runtime_scope(&self, owner: &str) -> Result<Arc<dyn HeapStorage>, String> {
+        match self {
+            Self::File(inner) => inner.runtime_scope(owner),
+            _ => Err("runtime collection unsupported".into()),
+        }
+    }
+
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        match self {
+            Self::File(inner) => inner.put_immutable(name, data).await,
+            Self::S3(inner) => inner.put_immutable(name, data).await,
+            Self::S3WithFsCache(inner) => inner.put_immutable(name, data).await,
+        }
+    }
+
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         match self {
             AnyHeapStorage::File(inner) => inner.put(name, data).await,
@@ -575,5 +1114,79 @@ impl HeapStorage for AnyHeapStorage {
             AnyHeapStorage::S3(inner) => inner.delete(name).await,
             AnyHeapStorage::S3WithFsCache(inner) => inner.delete(name).await,
         }
+    }
+}
+/// Compatibility adapter; new callers can use the shared blob backend directly.
+pub struct RuntimeHeapStorage<T: HeapStorage>(pub T);
+#[async_trait]
+impl<T: HeapStorage> HeapStorage for RuntimeHeapStorage<T> {
+    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.0.put(name, data).await
+    }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.0.get(name).await
+    }
+    async fn put_immutable(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.0.put_immutable(name, data).await
+    }
+}
+
+/// Shared construction used by all storage domains; callers retain their own
+/// enablement and directory defaults. Creating an S3 client must happen on the
+/// runtime that will perform its I/O.
+pub enum BlobBackendConfig {
+    Directory {
+        path: PathBuf,
+    },
+    S3 {
+        bucket: String,
+        cache_dir: Option<PathBuf>,
+    },
+}
+impl BlobBackendConfig {
+    pub async fn build(self) -> AnyHeapStorage {
+        match self {
+            Self::Directory { path } => AnyHeapStorage::File(FileHeapStorage::new(path)),
+            Self::S3 {
+                bucket,
+                cache_dir: Some(path),
+            } => AnyHeapStorage::S3WithFsCache(WriteThroughCacheHeapStorage::new(
+                S3HeapStorage::new(bucket).await,
+                path,
+            )),
+            Self::S3 {
+                bucket,
+                cache_dir: None,
+            } => AnyHeapStorage::S3(S3HeapStorage::new(bucket).await),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prefetch_cache_tests {
+    use super::*;
+
+    #[test]
+    fn reservations_only_track_resident_and_queued_keys() {
+        let mut cache = CacheBound { cap: 2, ..Default::default() };
+        let owner = cache.allocate_id();
+        cache.staging.insert(owner, HashSet::new());
+        for start in (0..4096).step_by(32) {
+            let keys: Vec<_> = (start..start + 32).map(|i| format!("chunk-{i}")).collect();
+            for key in &keys {
+                cache.pin(owner, key);
+            }
+            assert!(cache.pins.len() <= 34);
+            assert!(cache.staging[&owner].len() <= 34);
+            for key in &keys {
+                cache.record(key, 1);
+            }
+            assert_eq!(cache.pins.len(), 2);
+            assert_eq!(cache.staging[&owner].len(), 2);
+            assert_eq!(cache.reserved.len(), 2);
+        }
+        cache.unpin_all(owner);
+        assert!(cache.pins.is_empty());
+        assert_eq!(cache.evictable.len(), 2);
     }
 }

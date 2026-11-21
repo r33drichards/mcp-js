@@ -5,6 +5,10 @@ on:
       - 'server/src/**'
       - 'server/metadata-store/**'
       - 'server/tests/sqlite_integration.rs'
+      - 'server/tests/runtime_storage_review.rs'
+      - 'server/tests/blob_contract.rs'
+      - 'server/tests/write_through_cache.rs'
+      - 'server/tests/support/**'
       - 'server/tests/metadata_backends.rs'
       - 'server/Cargo.toml'
       - 'Cargo.toml'
@@ -17,6 +21,10 @@ on:
       - 'server/src/**'
       - 'server/metadata-store/**'
       - 'server/tests/sqlite_integration.rs'
+      - 'server/tests/runtime_storage_review.rs'
+      - 'server/tests/blob_contract.rs'
+      - 'server/tests/write_through_cache.rs'
+      - 'server/tests/support/**'
       - 'server/tests/metadata_backends.rs'
       - 'server/Cargo.toml'
       - 'Cargo.toml'
@@ -43,7 +51,9 @@ jobs:
         with:
           shared-key: native-server
       - name: Storage contracts (SQLite and sled)
-        run: cargo test --locked -p mcp-metadata-store --test contract
+        run: cargo test --locked -p mcp-metadata-store --test contract --test content --test publication --test runtime_review
+      - name: Shared blob backend and cache contracts
+        run: cargo test --locked -p server --test blob_contract --test write_through_cache --test runtime_storage_review -- --test-threads=1
       - name: SQLite consumers
         run: cargo test --locked -p server --test metadata_backends sqlite -- --test-threads=1
       - name: SQLite integration and heap restore with both metadata backends

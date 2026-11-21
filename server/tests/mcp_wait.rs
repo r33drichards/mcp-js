@@ -9,7 +9,7 @@ use std::{path::Path, sync::Arc};
 
 fn engine(dir: &Path) -> Arc<Engine> {
     let policy = dir.join("fs.rego");
-    std::fs::write(&policy, "package mcp.filesystem\ndefault allow = false\nallow if { startswith(input.path, \"/work/\") }\n").unwrap();
+    std::fs::write(&policy, "package mcp.filesystem\ndefault allow = false\nallow if { startswith(input.path, \"/workspace/\") }\n").unwrap();
     Engine::create(
         EngineConfigBuilder::new()
             .limits(
@@ -48,6 +48,7 @@ async fn call(engine: &Arc<Engine>, args: Value) -> Value {
             arguments_json: args.to_string(),
             session_id: Some("wait-proof".into()),
             mcp_headers: None,
+            host_tools: None,
         })
         .await
         .unwrap()
@@ -59,7 +60,7 @@ async fn wait_settles_execution_and_filesystem_before_reply() {
     initialize_v8();
     let dir = tempfile::tempdir().unwrap();
     let first = engine(dir.path());
-    let written = call(&first, json!({"wait":true,"code":"await new Promise(r => setTimeout(r, 50)); await fs.writeFile('/work/proof.txt', 'persisted'); console.log('written');"})).await;
+    let written = call(&first, json!({"wait":true,"code":"await new Promise(r => setTimeout(r, 50)); await fs.writeFile('/workspace/proof.txt', 'persisted'); console.log('written');"})).await;
     assert_eq!(written["status"], "completed", "{written}");
     assert!(written["output"].as_str().unwrap().contains("written"));
     assert_eq!(written["output_truncated"], false);
@@ -70,11 +71,18 @@ async fn wait_settles_execution_and_filesystem_before_reply() {
     let reopened = engine(dir.path());
     let read = call(
         &reopened,
-        json!({"wait":true,"code":"console.log(await fs.readFile('/work/proof.txt', 'utf8'));"}),
+        json!({"wait":true,"code":"console.log(await fs.readFile('/workspace/proof.txt', 'utf8'));"}),
     )
     .await;
     assert_eq!(read["status"], "completed", "{read}");
     assert!(read["output"].as_str().unwrap().contains("persisted"));
+    // Persistence belongs to the policy-approved virtual workspace, not host /tmp.
+    let outside = call(
+        &reopened,
+        json!({"wait":true,"code":"await fs.writeFile('/tmp/not-a-workspace-file', 'denied');"}),
+    )
+    .await;
+    assert_eq!(outside["status"], "failed", "{outside}");
     let output = reopened
         .get_execution_output(
             read["execution_id"].as_str().unwrap().into(),
@@ -97,7 +105,7 @@ async fn wait_settles_execution_and_filesystem_before_reply() {
             .unwrap()
             .contains("expected failure")
     );
-    let rejected = call(&reopened, json!({"wait":true,"file":"/work/proof.txt"})).await;
+    let rejected = call(&reopened, json!({"wait":true,"file":"/workspace/proof.txt"})).await;
     assert!(
         rejected["error"]
             .as_str()
@@ -208,10 +216,54 @@ async fn waiting_request_does_not_block_other_tools_or_cancellation() {
     }).await.unwrap();
     let cancelled = tokio::time::timeout(std::time::Duration::from_secs(1), engine.invoke_tool_response(ToolCallRequest {
         name: "cancel_execution".into(), arguments_json: json!({"execution_id": id}).to_string(),
-        session_id: Some("another-session".into()), mcp_headers: None,
+        session_id: Some("another-session".into()), mcp_headers: None, host_tools: None,
     })).await.expect("wait must not hold lifecycle lock").unwrap();
     assert!(cancelled.json.get("error").is_none(), "{}", cancelled.json);
     let result = waiting.await.unwrap();
     assert_eq!(result["status"], "cancelled", "{result}");
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn dropping_invocation_closes_pending_host_consumer() {
+    use server::engine::{ToolDefinition, host_tools::HostToolRun};
+    use std::time::Duration;
+
+    initialize_v8();
+    let engine = Engine::create_stateless(64, 10).unwrap();
+    let channel = HostToolRun::create(
+        "host".into(),
+        vec![ToolDefinition {
+            name: "echo".into(),
+            description: None,
+            input_schema_json: r#"{"type":"object"}"#.into(),
+        }],
+    )
+    .unwrap();
+
+    let mut invocation = Box::pin(engine.invoke_tool_response(ToolCallRequest {
+        name: "run_js".into(),
+        arguments_json: json!({"code": "await mcp.callTool('host', 'echo', {})"}).to_string(),
+        session_id: None,
+        mcp_headers: None,
+        host_tools: Some(channel.clone()),
+    }));
+
+    tokio::select! {
+        call = tokio::time::timeout(Duration::from_secs(5), channel.next_call()) => {
+            assert_eq!(call.expect("guest reached the host").unwrap().name, "echo");
+        }
+        _ = &mut invocation => panic!("invocation finished before the host responded"),
+    }
+
+    let mut pending = Box::pin(channel.next_call());
+    assert!(futures::poll!(&mut pending).is_pending());
+    drop(invocation);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("dropping the invocation wakes the host consumer")
+            .is_none()
+    );
     engine.shutdown().await;
 }

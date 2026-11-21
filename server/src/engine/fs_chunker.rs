@@ -90,11 +90,18 @@ pub fn maybe_compress(chunk: &[u8]) -> Vec<u8> {
 
 /// Inverse of [`maybe_compress`]: strip the tag and decode if needed.
 pub fn decompress(stored: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    decompress_into(stored, &mut out)?;
+    Ok(out)
+}
+
+pub(super) fn decompress_into(stored: &[u8], out: &mut Vec<u8>) -> anyhow::Result<()> {
     match stored.split_first() {
-        Some((&TAG_RAW, rest)) => Ok(rest.to_vec()),
+        Some((&TAG_RAW, rest)) => out.extend_from_slice(rest),
         Some((&TAG_ZSTD, rest)) => {
-            Ok(zstd::decode_all(rest).map_err(|e| anyhow::anyhow!("zstd decode: {e}"))?)
+            zstd::stream::copy_decode(rest, out).map_err(|e| anyhow::anyhow!("zstd decode: {e}"))?;
         }
         _ => anyhow::bail!("corrupt chunk blob: missing compression tag"),
     }
+    Ok(())
 }

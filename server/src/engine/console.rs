@@ -1,9 +1,8 @@
 //! Console output capture for the JavaScript runtime.
 //!
 //! Intercepts `console.log`, `console.info`, `console.warn`, and `console.error`
-//! calls and streams the output as a byte stream into a sled tree. Writes are
-//! buffered in-memory and flushed to sled in fixed-size pages (WAL-style) for
-//! efficient batching.
+//! calls and buffers output in fixed-size pages. Server registries put each
+//! page in the S3/filesystem blob backend and retain its ordered reference in the metadata database.
 
 use std::cell::RefCell;
 use std::sync::{
@@ -13,16 +12,16 @@ use std::sync::{
 
 use deno_core::{JsRuntime, OpState, op2, v8};
 use tokio::sync::mpsc;
+
 use super::execution::ExecutionRegistry;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
-/// Probe: process-global epoch for ordering diagnostics across crates.
-
-/// Page size for WAL-style writes to sled. When the in-memory buffer reaches
-/// this size, a full page is flushed to sled. Remaining bytes are flushed on
+/// Page size for buffered payload writes. When the in-memory buffer reaches
+/// this size, a full page is persisted. Remaining bytes are flushed on
 /// execution end.
-const PAGE_SIZE: usize = 4096;
+pub const BLOB_PAGE_SIZE: usize = 256 * 1024;
+const INLINE_PAGE_SIZE: usize = 4096;
 
 #[derive(Clone, Default)]
 pub struct ProcessExitState {
@@ -50,7 +49,163 @@ impl ProcessExitState {
 }
 
 /// Per-execution console output state, stored in deno_core's `OpState`.
-/// Buffers console output bytes and flushes them to sled in fixed-size pages.
+/// Buffers console output bytes and persists them in fixed-size pages.
+pub struct ConsoleLogState {
+    tree: Option<mcp_metadata_store::RuntimeTree>,
+    host_writer: Option<HostConsoleWriter>,
+    page_size: usize,
+    error: RefCell<Option<String>>,
+    seq: AtomicU64,
+    buffer: RefCell<Vec<u8>>,
+    stderr_tree: Option<mcp_metadata_store::RuntimeTree>,
+    stderr_seq: AtomicU64,
+    stderr_buffer: RefCell<Vec<u8>>,
+}
+
+// Safety: ConsoleLogState is only accessed from a single V8 thread.
+// The RefCell ensures runtime borrow checking. AtomicU64 is inherently
+// thread-safe. mcp_metadata_store::RuntimeTree is Send+Sync.
+unsafe impl Send for ConsoleLogState {}
+unsafe impl Sync for ConsoleLogState {}
+
+impl ConsoleLogState {
+    pub fn new(tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
+        let tree = tree.into();
+        let page_size = if tree.has_objects() {
+            BLOB_PAGE_SIZE
+        } else {
+            INLINE_PAGE_SIZE
+        };
+        Self {
+            tree: Some(tree),
+            host_writer: None,
+            page_size,
+            error: RefCell::new(None),
+            seq: AtomicU64::new(0),
+            buffer: RefCell::new(Vec::with_capacity(page_size)),
+            stderr_tree: None,
+            stderr_seq: AtomicU64::new(0),
+            stderr_buffer: RefCell::new(Vec::with_capacity(page_size)),
+        }
+    }
+
+    pub fn new_with_stderr(
+        tree: impl Into<mcp_metadata_store::RuntimeTree>,
+        stderr_tree: impl Into<mcp_metadata_store::RuntimeTree>,
+    ) -> Self {
+        let mut state = Self::new(tree);
+        state.stderr_tree = Some(stderr_tree.into());
+        state
+    }
+
+    /// Host-owned console: pages are routed through the owning host's pump
+    /// instead of being written from the V8 thread.
+    pub fn new_with_host(writer: HostConsoleWriter) -> Self {
+        Self {
+            tree: None,
+            host_writer: Some(writer),
+            page_size: INLINE_PAGE_SIZE,
+            error: RefCell::new(None),
+            seq: AtomicU64::new(0),
+            buffer: RefCell::new(Vec::with_capacity(INLINE_PAGE_SIZE)),
+            stderr_tree: None,
+            stderr_seq: AtomicU64::new(0),
+            stderr_buffer: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn write_buffer(
+        &self,
+        tree: Option<&mcp_metadata_store::RuntimeTree>,
+        seq: &AtomicU64,
+        buffer: &RefCell<Vec<u8>>,
+        data: &[u8],
+        error: &RefCell<Option<String>>,
+    ) {
+        if error.borrow().is_some() {
+            return;
+        }
+        let mut buffer = buffer.borrow_mut();
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let count = (self.page_size - buffer.len()).min(remaining.len());
+            buffer.extend_from_slice(&remaining[..count]);
+            remaining = &remaining[count..];
+            if buffer.len() == self.page_size {
+                let page = std::mem::replace(&mut *buffer, Vec::with_capacity(self.page_size));
+                let index = seq.fetch_add(1, Ordering::Relaxed);
+                let res = match (&self.host_writer, tree) {
+                    (Some(w), _) => w.write_page(index, page),
+                    (None, Some(tree)) => tree
+                        .insert(index.to_be_bytes(), page)
+                        .map_err(|e| e.to_string()),
+                    (None, None) => Err("no console sink for this execution".to_string()),
+                };
+                if let Err(e) = res {
+                    *error.borrow_mut() = Some(e);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Append bytes to the stdout buffer, persisting full pages.
+    pub fn write(&self, data: &[u8]) {
+        self.write_buffer(self.tree.as_ref(), &self.seq, &self.buffer, data, &self.error);
+    }
+
+    pub fn write_stderr(&self, data: &[u8]) {
+        if let Some(tree) = &self.stderr_tree {
+            self.write_buffer(Some(tree), &self.stderr_seq, &self.stderr_buffer, data, &self.error);
+        } else {
+            self.write(data);
+        }
+    }
+
+    pub fn separates_stderr(&self) -> bool {
+        self.stderr_tree.is_some()
+    }
+
+    fn flush_buffer(
+        &self,
+        tree: Option<&mcp_metadata_store::RuntimeTree>,
+        seq: &AtomicU64,
+        buffer: &RefCell<Vec<u8>>,
+        error: &RefCell<Option<String>>,
+    ) {
+        if error.borrow().is_some() {
+            return;
+        }
+        let mut buffer = buffer.borrow_mut();
+        if !buffer.is_empty() {
+            let page: Vec<u8> = buffer.drain(..).collect();
+            let seq = seq.fetch_add(1, Ordering::Relaxed);
+            let res = match (&self.host_writer, tree) {
+                (Some(w), _) => w.write_page(seq, page),
+                (None, Some(tree)) => tree
+                    .insert(seq.to_be_bytes(), page)
+                    .map_err(|e| e.to_string()),
+                (None, None) => Err("no console sink for this execution".to_string()),
+            };
+            if let Err(e) = res {
+                *error.borrow_mut() = Some(e);
+            }
+        }
+    }
+
+    /// Flush any remaining buffered bytes (call on execution end).
+    pub fn flush(&self) -> Result<(), String> {
+        self.flush_buffer(self.tree.as_ref(), &self.seq, &self.buffer, &self.error);
+        if let Some(tree) = &self.stderr_tree {
+            self.flush_buffer(Some(tree), &self.stderr_seq, &self.stderr_buffer, &self.error);
+        }
+        match self.error.borrow().as_ref() {
+            Some(e) => Err(format!("console persistence failed: {e}")),
+            None => Ok(()),
+        }
+    }
+}
+
 /// DB-free worker client. The owner-host pump alone opens and writes console trees.
 #[derive(Clone)]
 pub struct HostConsoleWriter {
@@ -112,118 +267,6 @@ impl HostConsoleWriter {
     }
 }
 
-pub struct ConsoleLogState {
-    tree: Option<sled::Tree>,
-    host_writer: Option<HostConsoleWriter>,
-    seq: AtomicU64,
-    buffer: RefCell<Vec<u8>>,
-    stderr_tree: Option<sled::Tree>,
-    stderr_seq: AtomicU64,
-    stderr_buffer: RefCell<Vec<u8>>,
-}
-
-// Safety: ConsoleLogState is only accessed from a single V8 thread.
-// The RefCell ensures runtime borrow checking. AtomicU64 is inherently
-// thread-safe. sled::Tree is Send+Sync.
-unsafe impl Send for ConsoleLogState {}
-unsafe impl Sync for ConsoleLogState {}
-
-impl ConsoleLogState {
-    pub fn new(tree: sled::Tree) -> Self {
-        Self {
-            tree: Some(tree),
-            host_writer: None,
-            seq: AtomicU64::new(0),
-            buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
-            stderr_tree: None,
-            stderr_seq: AtomicU64::new(0),
-            stderr_buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
-        }
-    }
-
-    pub fn new_with_host(writer: HostConsoleWriter) -> Self {
-        let mut state = Self::new_without_tree();
-        state.host_writer = Some(writer);
-        state
-    }
-
-    fn new_without_tree() -> Self {
-        Self {
-            tree: None,
-            host_writer: None,
-            seq: AtomicU64::new(0),
-            buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
-            stderr_tree: None,
-            stderr_seq: AtomicU64::new(0),
-            stderr_buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
-        }
-    }
-
-    pub fn new_with_stderr(tree: sled::Tree, stderr_tree: sled::Tree) -> Self {
-        let mut state = Self::new(tree);
-        state.stderr_tree = Some(stderr_tree);
-        state
-    }
-
-    fn write_buffer(
-        tree: Option<&sled::Tree>,
-        writer: Option<&HostConsoleWriter>,
-        seq: &AtomicU64,
-        buffer: &RefCell<Vec<u8>>,
-        data: &[u8],
-    ) {
-        let mut buffer = buffer.borrow_mut();
-        buffer.extend_from_slice(data);
-        while buffer.len() >= PAGE_SIZE {
-            let page: Vec<u8> = buffer.drain(..PAGE_SIZE).collect();
-            let seq = seq.fetch_add(1, Ordering::Relaxed);
-            if let Some(tree) = tree {
-                let _ = tree.insert(seq.to_be_bytes(), page);
-            } else if let Some(writer) = writer {
-                let _ = writer.write_page(seq, page);
-            }
-        }
-    }
-
-    /// Append bytes to the stdout buffer, flushing full pages to sled.
-    pub fn write(&self, data: &[u8]) {
-        Self::write_buffer(self.tree.as_ref(), self.host_writer.as_ref(), &self.seq, &self.buffer, data);
-    }
-
-    pub fn write_stderr(&self, data: &[u8]) {
-        if let Some(tree) = &self.stderr_tree {
-            Self::write_buffer(Some(tree), None, &self.stderr_seq, &self.stderr_buffer, data);
-        } else {
-            self.write(data);
-        }
-    }
-
-    pub fn separates_stderr(&self) -> bool {
-        self.stderr_tree.is_some()
-    }
-
-    fn flush_buffer(tree: Option<&sled::Tree>, writer: Option<&HostConsoleWriter>, seq: &AtomicU64, buffer: &RefCell<Vec<u8>>) {
-        let mut buffer = buffer.borrow_mut();
-        if !buffer.is_empty() {
-            let page: Vec<u8> = buffer.drain(..).collect();
-            let seq = seq.fetch_add(1, Ordering::Relaxed);
-            if let Some(tree) = tree {
-                let _ = tree.insert(seq.to_be_bytes(), page);
-            } else if let Some(writer) = writer {
-                let _ = writer.write_page(seq, page);
-            }
-        }
-    }
-
-    /// Flush any remaining buffered bytes to sled (call on execution end).
-    pub fn flush(&self) {
-        Self::flush_buffer(self.tree.as_ref(), self.host_writer.as_ref(), &self.seq, &self.buffer);
-        if let Some(tree) = &self.stderr_tree {
-            Self::flush_buffer(Some(tree), None, &self.stderr_seq, &self.stderr_buffer);
-        }
-    }
-}
-
 // ── Op definition ────────────────────────────────────────────────────────
 
 /// Sync op: writes formatted console output bytes into the buffered WAL.
@@ -268,11 +311,7 @@ fn op_process_set_exit_code(state: &mut OpState, #[smi] code: i32) {
 }
 
 #[op2(fast)]
-fn op_process_exit(
-    scope: &mut v8::PinScope<'_, '_>,
-    state: &mut OpState,
-    #[smi] code: i32,
-) {
+fn op_process_exit(scope: &mut v8::PinScope<'_, '_>, state: &mut OpState, #[smi] code: i32) {
     if let Some(exit_state) = state.try_borrow::<ProcessExitState>() {
         exit_state.request_exit(code);
         scope.terminate_execution();
@@ -283,7 +322,12 @@ fn op_process_exit(
 
 deno_core::extension!(
     console_ext,
-    ops = [op_console_write, op_process_exec_path, op_process_set_exit_code, op_process_exit],
+    ops = [
+        op_console_write,
+        op_process_exec_path,
+        op_process_set_exit_code,
+        op_process_exit
+    ],
 );
 
 /// Create the console extension for use in `RuntimeOptions::extensions`.
@@ -469,7 +513,9 @@ pub fn inject_console(runtime: &mut JsRuntime) -> Result<(), String> {
 }
 
 /// Overload for JsRuntimeForSnapshot (stateful mode).
-pub fn inject_console_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+pub fn inject_console_snapshot(
+    runtime: &mut deno_core::JsRuntimeForSnapshot,
+) -> Result<(), String> {
     runtime
         .execute_script("<console-setup>", CONSOLE_JS_WRAPPER.to_string())
         .map_err(|e| format!("Failed to install console wrapper: {}", e))?;
@@ -905,7 +951,9 @@ pub fn inject_web_apis(runtime: &mut JsRuntime) -> Result<(), String> {
     Ok(())
 }
 
-pub fn inject_web_apis_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+pub fn inject_web_apis_snapshot(
+    runtime: &mut deno_core::JsRuntimeForSnapshot,
+) -> Result<(), String> {
     runtime
         .execute_script("<web-apis-setup>", WEB_APIS_JS.to_string())
         .map_err(|e| format!("Failed to install Blob/File/FormData: {}", e))?;
@@ -1063,19 +1111,21 @@ const WEB_APIS_JS: &str = r#"
 
 /// Flush any remaining console output from the runtime's OpState.
 /// Call this after V8 execution completes but before the runtime is dropped.
-pub fn flush_console(runtime: &mut JsRuntime) {
+pub fn flush_console(runtime: &mut JsRuntime) -> Result<(), String> {
     let state = runtime.op_state();
     let state = state.borrow();
     if let Some(console_state) = state.try_borrow::<ConsoleLogState>() {
-        console_state.flush();
+        console_state.flush()?;
     }
+    Ok(())
 }
 
 /// Flush helper for JsRuntimeForSnapshot (stateful mode).
-pub fn flush_console_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) {
+pub fn flush_console_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
     let state = runtime.op_state();
     let state = state.borrow();
     if let Some(console_state) = state.try_borrow::<ConsoleLogState>() {
-        console_state.flush();
+        console_state.flush()?;
     }
+    Ok(())
 }

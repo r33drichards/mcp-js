@@ -18,5 +18,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures = "0.3"
 tracing = "0.1"
 
+async-trait = "0.1"
+hex = "0.4"
+mcp-metadata-store = { path = "../metadata-store", default-features = false }
+
 [dev-dependencies]
 turmoil = "0.7.2"
+
+[profile.dev]
+debug = "line-tables-only"

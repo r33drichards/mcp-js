@@ -15,12 +15,13 @@
 //! materialises a whole `Manifest`; it walks the tree lazily so a multi-TB
 //! snapshot costs O(touched paths), not O(total).
 
-use crate::engine::fs_chunker::{chunk_refs, decompress, maybe_compress, SMALL_FILE_MAX, MAX};
+use crate::engine::fs_chunker::{chunk_refs, decompress_into, maybe_compress, SMALL_FILE_MAX, MAX};
 use crate::engine::fs_tree::{components_of, path_of, tree_key, TreeChild, TreeNode};
 use crate::engine::heap_storage::{HeapStorage, MemoryHeapStorage};
 use blake3::Hash;
+use mcp_metadata_store::blob::BlobStaging;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -101,10 +102,14 @@ impl NodeCache {
     }
 }
 
+const PREFETCH_IO_LIMIT: usize = 32;
+
 #[derive(Clone)]
 pub struct FsStore {
     blobs: Arc<dyn HeapStorage>,
     nodes: Arc<Mutex<NodeCache>>,
+    prefetch_io: Arc<tokio::sync::Semaphore>,
+    lookahead_io: Arc<tokio::sync::Semaphore>,
 }
 
 impl FsStore {
@@ -113,6 +118,11 @@ impl FsStore {
         Self {
             blobs,
             nodes: Arc::new(Mutex::new(NodeCache::new(8192))),
+            // Shared across mounts. At most 32 maximum-size chunk payloads
+            // (128 MiB before backend copies) can be fetched at once.
+            prefetch_io: Arc::new(tokio::sync::Semaphore::new(PREFETCH_IO_LIMIT)),
+            // Leave capacity for required reads while siblings are pending.
+            lookahead_io: Arc::new(tokio::sync::Semaphore::new(PREFETCH_IO_LIMIT / 2)),
         }
     }
 
@@ -160,7 +170,7 @@ impl FsStore {
                         .get(&key)
                         .await
                         .map_err(|e| anyhow::anyhow!("get chunk: {e}"))?;
-                    out.extend_from_slice(&decompress(&stored)?);
+                    decompress_into(&stored, &mut out)?;
                 }
                 Ok(out)
             }
@@ -176,27 +186,120 @@ impl FsStore {
     /// the in-op reads pure local-cache hits. Already-local blobs are skipped
     /// cheaply via `HeapStorage::contains`.
     pub async fn prefetch(&self, root: [u8; 32]) -> anyhow::Result<()> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        const LOOKAHEAD: usize = 128;
         let mut stack = vec![root];
+        let mut ready = HashMap::new();
+        let mut scheduled = HashSet::new();
+        let mut pending = FuturesUnordered::new();
+        let mut pins = self.blobs.prefetch_staging();
+
         while let Some(id) = stack.pop() {
-            // Fetching the node populates the cache (write-through) and lets us
-            // walk its children.
-            let node = self.get_node(&id).await?;
-            for child in node.children.values() {
-                if let Some(entry) = &child.file {
-                    if let Content::Chunks(hashes) = &entry.content {
-                        for h in hashes {
-                            self.blobs
-                                .warm(&chunk_key(h))
-                                .await
-                                .map_err(|e| anyhow::anyhow!("warm chunk: {e}"))?;
-                        }
+            // Queue the current directory first. Speculative reads keep
+            // running during chunk staging, independently of traversal.
+            for key in std::iter::once(id).chain(stack.iter().rev().take(LOOKAHEAD - 1).copied()) {
+                let speculative = key != id;
+                if speculative && scheduled.len() + ready.len() >= LOOKAHEAD {
+                    break;
+                }
+                if ready.contains_key(&key) || !scheduled.insert(key) {
+                    continue;
+                }
+                pending.push(async move {
+                    let _lookahead = if speculative {
+                        Some(self.lookahead_io.acquire().await.expect("lookahead budget stays open"))
+                    } else {
+                        None
+                    };
+                    self.prefetch_node(&key).await.map(|node| (key, node))
+                });
+            }
+
+            let node = loop {
+                if let Some(node) = ready.remove(&id) {
+                    break node;
+                }
+                let (key, node) = pending.next().await.expect("current directory is queued")?;
+                scheduled.remove(&key);
+                ready.insert(key, node);
+            };
+
+            let chunks = self.prefetch_chunks(&node, &mut pins);
+            tokio::pin!(chunks);
+            loop {
+                tokio::select! {
+                    result = &mut chunks => {
+                        result?;
+                        break;
+                    }
+                    result = pending.next(), if !pending.is_empty() => {
+                        let (key, node) = result.expect("lookahead request is queued")?;
+                        scheduled.remove(&key);
+                        ready.insert(key, node);
                     }
                 }
-                if let Some(d) = child.dir {
-                    stack.push(d);
+            }
+            stack.extend(node.children.values().filter_map(|child| child.dir));
+        }
+        Ok(())
+    }
+
+    async fn prefetch_chunks(&self, node: &TreeNode, pins: &mut Option<Box<dyn BlobStaging + '_>>) -> anyhow::Result<()> {
+        const PARALLEL_CHUNKS: usize = 96;
+        let mut active = Vec::new();
+        for child in node.children.values() {
+            if let Some(entry) = &child.file {
+                if let Content::Chunks(hashes) = &entry.content {
+                    for hash in hashes {
+                        if active.contains(&hash) {
+                            continue;
+                        }
+                        if active.len() == PARALLEL_CHUNKS {
+                            self.warm_batch(&active, pins).await?;
+                            active.clear();
+                        }
+                        active.push(hash);
+                    }
                 }
             }
         }
+        if !active.is_empty() {
+            self.warm_batch(&active, pins).await?;
+        }
+        Ok(())
+    }
+
+    async fn prefetch_node(&self, id: &[u8; 32]) -> anyhow::Result<Arc<TreeNode>> {
+        let _permit = self
+            .prefetch_io
+            .acquire()
+            .await
+            .expect("prefetch budget stays open");
+        self.get_node(id).await
+    }
+
+    async fn warm_batch(&self, hashes: &[&[u8; 32]], pins: &mut Option<Box<dyn BlobStaging + '_>>) -> anyhow::Result<()> {
+        use futures::stream::{FuturesUnordered, TryStreamExt};
+
+        let keys: Vec<_> = hashes.iter().map(|hash| chunk_key(hash)).collect();
+        if let Some(pins) = pins.as_deref_mut() {
+            pins.reserve(&keys);
+        }
+        let pins = pins.as_deref();
+        let mut pending: FuturesUnordered<_> = keys.iter().map(|key| async move {
+            let _permit = self
+                .prefetch_io
+                .acquire()
+                .await
+                .expect("prefetch budget stays open");
+            let result = match pins {
+                Some(staging) => staging.warm(key).await,
+                None => self.blobs.warm(key).await,
+            };
+            result.map_err(|e| anyhow::anyhow!("warm chunk: {e}"))
+        }).collect();
+        while pending.try_next().await?.is_some() {}
         Ok(())
     }
 

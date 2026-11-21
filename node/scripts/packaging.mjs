@@ -15,12 +15,22 @@ export function checkElf(bytes) {
   assert.equal(bytes.readUInt16LE(18), 62, 'Native library must be x86-64');
 }
 
-export function checkDependencies(dynamic, dependencies) {
+export function checkDependencies(dynamic, dependencies, libc = 'glibc') {
+  assert.ok(libc === 'glibc' || libc === 'musl', `Unsupported libc: ${libc}`);
   assert.doesNotMatch(dynamic, /\((?:RPATH|RUNPATH)\)/, 'Remove build-host RPATH/RUNPATH before packaging');
   assert.doesNotMatch(dynamic, /Shared library: \[[^\]]*\//, 'Absolute/path-based DT_NEEDED is not portable');
   assert.doesNotMatch(dependencies, /not found|\/nix\/store\/|not a dynamic executable|statically linked/i,
     'Native dependencies must resolve outside the Nix store');
-  assert.match(dependencies, /libc\.so/, 'Expected Linux glibc dynamic dependency report');
+  if (libc === 'musl') {
+    assert.match(dynamic, /Shared library: \[libc(?:\.musl-x86_64)?\.so(?:\.1)?\]/,
+      'Expected a dynamic musl libc dependency');
+    assert.doesNotMatch(`${dynamic}\n${dependencies}`, /libc\.so\.6|ld-linux/,
+      'The musl package must not depend on glibc');
+    assert.match(dependencies, /ld-musl-x86_64\.so\.1|libc(?:\.musl-x86_64)?\.so(?:\.1)?[ \t]/,
+      'Expected the Alpine musl loader');
+  } else {
+    assert.match(dependencies, /libc\.so\.6/, 'Expected Linux glibc dynamic dependency report');
+  }
   assert.doesNotMatch(`${dynamic}\n${dependencies}`, /\/nix\/store\/|\/home\/runner\/work\//,
     'Native runtime metadata must not reference the Nix store or CI workspace');
 }

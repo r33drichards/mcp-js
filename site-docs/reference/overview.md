@@ -12,6 +12,9 @@ edited by hand:
 - [HTTP API](http-api.md) — the REST surface (from `openapi.json` via Widdershins).
 - [MCP tools](mcp-tools.md) — the built-in MCP tools (from the tool registry).
 
+- [Release upgrade notes](release-upgrade.md) — selectors, format compatibility, SDK targets, and experimental boundaries.
+
+
 Hand-written platform reference:
 
 - [Native UniFFI bindings](uniffi-bindings.md) — artifacts, exported API groups, and platform constraints.
@@ -22,6 +25,6 @@ For feature-level explanations and behaviour, see the
 
 ## Scheduler and HTTP functions
 
-- [Scheduler and HTTP feature status](scheduler-http-status.md) — implemented baseline and pending parent integration.
+- [Scheduler and HTTP feature status](scheduler-http-status.md) — implemented behavior and production-readiness limits.
 - [Scheduler](scheduler.md) — configuration, calendar policies, commands, and limits.
 - [HTTP functions](http-functions.md) — routes, definitions, handler contract, and bounds.

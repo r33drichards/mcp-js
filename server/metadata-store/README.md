@@ -1,7 +1,8 @@
 # Metadata backends
 
 `MetadataStore` is the asynchronous, binary-safe persistence boundary for
-mcp-js session histories, heap tags, and filesystem label heads/reflogs.
+mcp-js session histories, heap tags, filesystem label heads/reflogs and runtime
+bookkeeping (execution records, console pages, artifacts and upload grants).
 `SledStore` preserves existing sled tree names/key/value encodings and remains
 the default. `SqliteStore` adds embedded SQLite and `DynamoDbStore` adds shared
 DynamoDB metadata.
@@ -15,9 +16,43 @@ mcp-v8 --http-port 3000 --sqlite-path ./data/metadata.sqlite --fs-store dir
 
 `MCP_V8_SQLITE_PATH` or `sqlite_path` in a TOML/JSON config file selects the same
 backend. The parent directory must exist; the database and schema are created
-on first use by an enabled persistence axis (`--heap-store` or `--fs-store`).
-Sessions, tags and labels use separate namespaces inside one database file.
+at startup. Sessions, tags, labels and runtime bookkeeping use separate namespaces
+inside one database file. Runtime records use the `runtime` namespace, independent
+of the HTTP port, and survive process replacement. Runtime persistence also works
+without heap or filesystem snapshot persistence. Default sled runtime metadata
+uses the execution database under the configured session database directory.
 An open/schema error aborts startup instead of falling back to sled.
+
+The server stores artifact and console payloads outside the database, including
+empty artifacts and small console pages. Configure `--s3-bucket` (or
+`MCP_V8_S3_BUCKET`) to use S3; otherwise payloads use files under
+`<session-db-path>/runtime-blobs`. This applies with SQLite, DynamoDB or default
+sled metadata. The database reference is published only after the blob write
+succeeds. Overwrites publish a new immutable object reference, and sled references
+are flushed before acknowledgement.
+
+Both backends reuse the heap `HeapStorage` interface: `S3HeapStorage` and
+`FileHeapStorage`. Objects use the `runtime/` prefix (S3 needs `s3:PutObject` and
+`s3:GetObject` permissions there). Backend selection happens at startup: S3
+errors never switch to filesystem storage, and filesystem errors never store the
+payload inline. Heap/filesystem snapshot selection remains independent.
+
+Old inline records and legacy S3 references remain readable. New artifact/console
+writes always use the selected blob backend. Changing that backend requires
+moving existing objects; no read-error fallback or automatic migration is
+performed. Processes sharing metadata must also share the same S3 bucket or
+filesystem payload directory. Overwrites and failed reference publication may
+leave unreferenced objects. Local managed roots offer an explicit reader-safe
+collector; it requires all registered metadata owners and has no automatic timer.
+See [runtime blob maintenance](../../docs/runtime-blob-maintenance.md). S3 and
+cross-domain reclamation remain unsupported. New content-addressed references use `runtime/v2/` keys;
+include that prefix in existing `runtime/` object permissions.
+
+Execution records and upload grants remain database values. There is no 128 KiB
+spill threshold: the selected database enforces its native limits, and oversized
+metadata writes fail rather than being externalized to S3. SQLite can therefore
+keep large execution results, while DynamoDB rejects items above its 400 KiB
+limit (including keys and attributes).
 
 SQLite uses a bundled library, WAL journaling, `synchronous=FULL`, and a five-second
 busy timeout. Async operations run on Tokio's blocking pool. CAS reserves the
@@ -30,9 +65,9 @@ This is embedded, local SQLite, not rqlite. `--sqlite-path` conflicts with
 `--dynamodb-table` and `--cluster-port`; it does not change the app's sled-backed
 Raft log. Use a local filesystem that supports SQLite locking, and include the
 WAL in live backups or use SQLite's backup API. No automatic migration from sled
-is performed. The execution registry, console output, artifacts, scheduler and
-HTTP-function definitions still use their existing stores. Snapshot blobs still
-use the separately selected directory or S3 backend. FFI constructors retain sled
+is performed, including existing console, artifact and upload-grant data in sled.
+Scheduler and HTTP-function definitions still use their existing stores.
+Snapshot blobs still use the separately selected directory or S3 backend. FFI constructors retain sled
 as their default.
 
 ```sh
@@ -48,6 +83,15 @@ through HTTP, and verifies rejected label CAS writes no reflog entry. It also
 checks CLI/environment/config selection against the actual SQLite rows and
 invalid-path startup failure without sled fallback. These tests need neither
 Docker nor an external database and run in the SQLite metadata CI workflow.
+
+Runtime coverage checks all three selection methods across hard process restarts:
+large execution results, paginated console output, artifacts, grant redemption,
+one-time use across independent server processes, and rejection of reuse after
+another restart. Tests use a disposable S3 HTTP fixture through the real AWS SDK,
+inspect SQLite references and verify no sled execution database was created.
+Coverage also checks small payloads with sled, filesystem persistence across
+hard restarts, failed S3 uploads preserving the previous reference, missing
+objects without fallback, and filesystem errors without database fallback.
 
 ## Server configuration
 
@@ -79,9 +123,66 @@ by the server. Namespace isolation is logical, not an authorization boundary.
 
 DynamoDB cannot be combined with `--cluster-port`: it already arbitrates shared
 metadata writes and is not a backend for the existing Raft log. Raft, scheduler
-checkpoints, HTTP-function definitions, execution registry and console output
-are **not migrated** by this change. This flag does not promise a completely
+checkpoints and HTTP-function definitions are **not migrated** by this change.
+Execution records, console pages, artifact records and upload grants use the
+`/runtime` namespace. Artifact and console bytes use the configured S3 bucket or
+the local payload directory; execution records and upload grants stay in DynamoDB
+and obey its native item limits.
+Completed records can be read by a fresh process, but running isolates and
+cancellation handles remain process-local. This flag does not promise a completely
 diskless runtime. FFI constructors keep their existing sled defaults.
+
+For deployment steps, see the [Lambda tutorial](../../site-docs/tutorials/lambda-dynamodb.md).
+
+## Shared object and publication APIs
+
+`blob::BlobStorage` is the shared named-blob boundary (`HeapStorage` and
+`RuntimeBlobs` remain compatibility names). Immutable writes must acknowledge an
+identical existing object or fail on conflicting content; they never overwrite
+it. Server memory, filesystem and S3 backends implement the contract. Common
+backend construction also gives runtime S3 storage the existing cache support.
+
+`content::ContentObjects` stores versioned SHA-256 objects and verifies size and
+digest when reading. New console pages hold compact typed references. Artifact
+metadata stays in the database and points to payload-only objects, so timestamps
+and MIME types do not change payload identity; listing metadata needs no blob
+fetch. New descriptors live in a separate `runtime_refs:v1:<hex tree name>`
+index; arbitrary legacy inline bytes are never interpreted using a magic prefix.
+Inline records and explicit old DynamoDB S3 envelope references remain readable;
+legacy object names must be exactly `runtime/<canonical UUID>`. Earlier unmerged
+marker-only PR formats are ambiguous and need an explicit migration if used. Heap/fs
+snapshot hashes and formats are unchanged. Compatibility is one-way: old binaries
+do not understand the new runtime reference format. Shared deployments must
+pause runtime writes while upgrading their readers. Rolling back requires
+restoring compatible metadata/object formats.
+Direct execution registries initialize
+filesystem payload storage by default; explicit raw-tree APIs and `from_store`
+without an attached blob backend retain inline behavior. Console objects use
+256 KiB pages and indexed lengths/newline counts for lazy byte/line windows.
+Blob work has bounded concurrency and a queue-inclusive deadline, independently
+of the metadata reactor.
+
+`publication::MetadataPublication` is an opt-in revisioned metadata facade.
+Publication commits the primary, operation receipt and index companions atomically
+and flushes before acknowledgement. Retries use a per-key operation ID, including
+a request fingerprint; a reused ID with different input fails. Tombstones retain
+revisions. Preflight validation returns known backend size/shape errors before
+mutation; transport/flush uncertainty after mutation returns `UnknownOutcome`.
+Receipts have no automatic expiry in this initial API.
+
+`publication::ObjectPublication` composes immutable object storage with the
+publication facade, writing the object before metadata. The optional server
+`raft_metadata::RaftMetadataStore` adapts binary metadata to consensus. Its reads
+are local committed reads; stronger reads are rejected and pending CAS conflicts
+remain explicitly provisional. It is exercised by the V8-free consensus harness,
+not implicitly enabled for existing server domains. No SQLite Raft persistence
+or automatic blob replication is introduced. Cross-domain GC and migration of
+existing domain routing are separate work.
+
+The metadata crate's default `dynamodb` feature preserves the existing SDK-backed
+backend. Consensus-only consumers can disable default features to avoid compiling
+that SDK. See the [content-addressed storage design](../../docs/content-addressed-storage-design.md)
+for the boundaries, migration stages and remaining guarantees.
 
 ## Semantics and limits
 
@@ -137,3 +238,37 @@ file contents, and verifies the recorded input/output heap chain. Generated entr
 module URLs must remain unique across processes because their module registrations
 are retained in the heap snapshot. The CI command runs this entire test binary,
 including the sled regression.
+
+### Publication example (Rust)
+
+```rust,ignore
+use mcp_metadata_store::{content::{ContentObjects, ObjectKind}, publication::{
+    MetadataPublication, ObjectPublication, Publication, PublishOutcome,
+}};
+
+// metadata: Arc<dyn MetadataStore>, e.g. SqliteStore or RaftMetadataStore.
+// blobs: Arc<dyn BlobStorage>, e.g. FileHeapStorage or S3HeapStorage.
+let service = ObjectPublication {
+    objects: ContentObjects::new(blobs),
+    metadata: MetadataPublication::new(metadata, "artifacts")?,
+};
+let outcome = service.publish(Publication {
+    operation_id: request_id, // retain this ID and the same request when retrying
+    key: b"report.csv".to_vec(),
+    expected_revision: None, // create; updates supply the observed revision
+    value: None, // ObjectPublication fills in the typed content reference
+    companions: vec![],
+}, ObjectKind::Artifact, &bytes).await?;
+match outcome {
+    PublishOutcome::Committed { revision } => { /* acknowledge revision */ }
+    PublishOutcome::UnknownOutcome { .. } => { /* retry same operation ID */ }
+    PublishOutcome::ProvisionalConflict => { /* pending Raft mismatch; no ownership claim */ }
+    PublishOutcome::Conflict => { /* standalone CAS conflict; choose next operation */ }
+}
+```
+
+References returned by `MetadataPublication::read` use `ObjectRef::decode` on the
+record value, followed by `ContentObjects::get` for verified bytes. A tombstone
+retains its revision but has no value. An operation ID is scoped to its key and
+publication namespace; receipts are not an authorization boundary or a garbage
+collection policy.

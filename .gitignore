@@ -16,3 +16,8 @@ __pycache__/
 .mcpregistry*
 pi-checkout/
 node/pi-harness/node_modules/
+
+/.fs-grep-data/
+/.auto/log.jsonl
+/.auto/ideas.md
+/.auto/references/

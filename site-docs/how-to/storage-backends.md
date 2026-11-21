@@ -1,97 +1,84 @@
-# Heap storage backends
+# Configure heap storage
 
-Recipes for selecting and configuring the heap snapshot store that `mcp-v8` uses in stateful mode.
+Heap snapshots are disabled by default. Enable them explicitly; filesystem
+snapshots and runtime payload storage are separate choices.
 
-## Use local directory storage
-
-Pass `--directory-path` to store heap snapshots in a specific local directory:
+## Store heaps in a directory
 
 ```bash
-mcp-v8 --http-port=8080 --directory-path=/var/lib/mcp-v8/heaps
+mcp-v8 --http-port 8080 --heap-store dir \
+  --heap-dir /var/lib/mcp-v8/heaps --session-db-path /var/lib/mcp-v8/sessions
 ```
 
-The directory is created automatically if it does not exist. Omitting `--directory-path` (and all other storage flags) uses the default path `/tmp/mcp-v8-heaps`.
+The heap directory is created on write. If `--heap-dir` is omitted, an enabled
+directory heap store uses `/tmp/mcp-v8-heaps`. Use a durable location for state
+that must survive reboot.
 
-This backend is well-suited for single-node deployments where the heap directory lives on fast local storage (e.g. an SSD or a RAM-backed tmpfs).
+## Store heaps in S3
 
-## Use S3 storage
-
-Set `--s3-bucket` to store heap snapshots in an S3 bucket:
+Use an existing bucket and the normal AWS credential chain:
 
 ```bash
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-export AWS_DEFAULT_REGION=us-east-1
-
-mcp-v8 --http-port=8080 --s3-bucket=my-mcp-heaps
+export AWS_REGION=us-east-1
+mcp-v8 --http-port 8080 --heap-store s3 --s3-bucket my-mcp-blobs
 ```
 
-The server initialises the S3 client from the environment at startup using the standard AWS SDK credential chain. The bucket must already exist; the server does not create it.
+All nodes sharing heap references must access the same objects. S3 errors are
+returned; they do not cause a filesystem fallback. Setting `--s3-bucket` alone
+selects S3 for runtime payloads but does not enable heap snapshots.
 
-S3 storage lets multiple nodes share the same heap store, which is required for a horizontally-scaled or clustered deployment.
-
-## Use an S3-compatible store (MinIO, LocalStack)
-
-Point the S3 client at a non-AWS endpoint with `AWS_ENDPOINT_URL`, and enable
-path-style addressing with `AWS_S3_FORCE_PATH_STYLE` (most S3-compatible stores
-serve `host/bucket/key` rather than `bucket.host/key`):
+## Use an S3-compatible service
 
 ```bash
-export AWS_ENDPOINT_URL=http://localhost:9000
+export AWS_ENDPOINT_URL=http://127.0.0.1:9000
 export AWS_S3_FORCE_PATH_STYLE=true
-export AWS_ACCESS_KEY_ID=minioadmin
-export AWS_SECRET_ACCESS_KEY=minioadmin
-export AWS_DEFAULT_REGION=us-east-1
-
-mcp-v8 --http-port=8080 --s3-bucket=my-mcp-heaps
+export AWS_REGION=us-east-1
+# Supply the service's credentials through the normal AWS environment/profile.
+mcp-v8 --http-port 8080 --heap-store s3 --s3-bucket my-mcp-blobs
 ```
 
-The bucket must already exist (create it with `mc mb` or the store's console).
-Leave `AWS_ENDPOINT_URL` / `AWS_S3_FORCE_PATH_STYLE` unset for real AWS S3.
+Create the bucket first. Unset the endpoint/path-style overrides when returning
+to AWS S3.
 
-## Add a local FS write-through cache in front of S3
-
-Use `--cache-dir` together with `--s3-bucket` to keep a local disk cache:
+## Add a local cache
 
 ```bash
-mcp-v8 --http-port=8080 \
-  --s3-bucket=my-mcp-heaps \
-  --cache-dir=/var/cache/mcp-v8/heaps
+mcp-v8 --http-port 8080 --heap-store s3 --s3-bucket my-mcp-blobs \
+  --cache-dir /var/cache/mcp-v8/blobs
 ```
 
-With this configuration every `put` writes to the local cache directory first and then to S3 (both writes must succeed). Every `get` checks the local cache first; on a miss it fetches from S3, populates the cache, and returns the data. A warning is logged if the cache write after an S3 fetch fails, but the `get` still succeeds.
+The cache is bounded to 512 MiB by default. Writes reach S3 before the local
+cache; reads prefer complete cached files and populate on misses. Mutable writes
+report cache-write errors after the primary succeeds; immutable runtime writes
+treat that cache update as best-effort. See [storage behavior](../concepts/storage-backends.md).
 
-`--cache-dir` requires `--s3-bucket` and cannot be used alone.
-
-## Run stateless (no heap persistence)
-
-Pass `--stateless` to disable heap persistence entirely:
+## Disable heap persistence independently
 
 ```bash
-mcp-v8 --http-port=8080 --stateless
+mcp-v8 --http-port 8080 --heap-store none
 ```
 
-In stateless mode each `run_js` invocation executes in a fresh V8 isolate, waits synchronously for completion, and returns `{output}` or `{output, error}` directly. No heap snapshot is ever written. The session log and heap tag index are not opened; the execution registry sled database (under `--session-db-path`) is still used.
-
-Stateless mode is appropriate for sandboxed, fire-and-forget executions where cross-call state is neither needed nor desired.
-
-`--stateless` conflicts with `--s3-bucket` and `--directory-path`; passing more than one of these three flags is a startup error.
-
-## Change the session metadata path
-
-The sled metadata database (session log, heap tags, execution registry) is stored at `--session-db-path`, which defaults to `/tmp/mcp-v8-sessions`. Override it when you want the metadata to persist across reboots:
+This is the default. To retain filesystem state while leaving heaps disabled:
 
 ```bash
-mcp-v8 --http-port=8080 \
-  --directory-path=/var/lib/mcp-v8/heaps \
-  --session-db-path=/var/lib/mcp-v8/sessions
+mcp-v8 --http-port 8080 --heap-store none --fs-store dir \
+  --session-db-path /var/lib/mcp-v8/sessions
 ```
 
-This flag is independent of the heap storage backend selection and applies in both stateful and stateless modes.
+WASM requires heap persistence to be off and can still use filesystem snapshots.
+With both snapshot axes off, the stateless MCP surface returns output inline;
+execution metadata and artifact/console payload storage still exist.
 
-## See also
+## Select metadata separately
 
-- [Concepts: Heap storage backends](../concepts/storage-backends.md)
-- [Concepts: Stateful sessions & heap snapshots](../concepts/sessions-and-heaps.md)
-- [Concepts: Clustering & replication (Raft)](../concepts/clustering.md)
-- [CLI flags reference](../reference/cli-flags.md)
+Use [metadata backend setup](metadata-backends.md) for SQLite and DynamoDB.
+`--session-db-path` remains the parent for default local runtime blob storage,
+even when metadata is in SQLite or DynamoDB. Back up the metadata and blobs
+consistently; changing a selector does not migrate existing records.
+
+## Source and related guides
+
+- [Storage bootstrap](https://github.com/r33drichards/mcp-js/blob/main/server/src/bootstrap.rs)
+- [Blob backends and cache](https://github.com/r33drichards/mcp-js/blob/main/server/src/engine/heap_storage.rs)
+- [Filesystem snapshots](fs-snapshots.md)
+- [Runtime payloads](../concepts/runtime-storage.md)

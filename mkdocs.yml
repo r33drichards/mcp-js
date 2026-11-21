@@ -26,6 +26,11 @@ nav:
   - Install:
       - Overview: install/overview.md
 
+  - Releases:
+      - GitHub Releases: https://github.com/r33drichards/mcp-js/releases
+      - Install packages from GitHub: install/github-release-packages.md
+      - Upgrade notes: reference/release-upgrade.md
+
   - Tutorials:
       - Overview: tutorials/overview.md
       - Schedule your first run: tutorials/first-schedule.md
@@ -33,6 +38,7 @@ nav:
       - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
       - Render charts with Chart.js: tutorials/chartjs.md
       - Call Modal (serverless GPUs/sandboxes): tutorials/modal.md
+      - Deploy on Lambda with DynamoDB and S3: tutorials/lambda-dynamodb.md
 
   - How-to:
       - Overview: how-to/overview.md
@@ -42,6 +48,9 @@ nav:
       - Running JavaScript & TypeScript: how-to/js-execution.md
       - Stateful sessions & heap snapshots: how-to/sessions-and-heaps.md
       - Heap storage backends: how-to/storage-backends.md
+      - Metadata backends: how-to/metadata-backends.md
+      - Native JavaScript SDK: how-to/native-javascript-sdk.md
+      - Development and performance validation: how-to/development-validation.md
       - Asynchronous execution & output: how-to/async-execution.md
       - Returning images & artifacts: how-to/artifacts.md
       - Transports (stdio, HTTP, SSE): how-to/transports.md
@@ -67,7 +76,8 @@ nav:
       - HTTP revisions and execution lifetime: concepts/http-functions.md
       - Running JavaScript & TypeScript: concepts/js-execution.md
       - Stateful sessions & heap snapshots: concepts/sessions-and-heaps.md
-      - Heap storage backends: concepts/storage-backends.md
+      - Storage backends: concepts/storage-backends.md
+      - Runtime payloads and publication: concepts/runtime-storage.md
       - Asynchronous execution & output: concepts/async-execution.md
       - Transports (stdio, HTTP, SSE): concepts/transports.md
       - Network access with fetch: concepts/fetch.md

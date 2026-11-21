@@ -435,7 +435,7 @@ pub fn engine_with_cluster_host(
     use server::engine::heap_storage::{HostBlobStorage, SledHeapStorage};
     use server::engine::console::HostConsoleBridge;
 
-    let registry = Arc::new(ExecutionRegistry::from_db(db.clone()));
+    let registry = Arc::new(ExecutionRegistry::from_db(db.clone()).expect("host execution registry"));
     let (console_bridge, console_pump) = HostConsoleBridge::new(registry.clone());
     let console_pump = tokio::spawn(console_pump);
     let labels = LabelStore::from_db(db.clone()).with_cluster(node);

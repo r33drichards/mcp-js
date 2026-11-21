@@ -1,9 +1,12 @@
+#[cfg(feature = "dynamodb")]
 use aws_sdk_dynamodb::{
     Client,
     config::{Credentials, Region},
     types::{AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType},
 };
-use mcp_metadata_store::{DynamoDbStore, MetadataStore, SledStore, SqliteStore, Write};
+#[cfg(feature = "dynamodb")]
+use mcp_metadata_store::DynamoDbStore;
+use mcp_metadata_store::{MetadataStore, SledStore, SqliteStore, Write};
 use std::sync::Arc;
 
 async fn contract(store: Arc<dyn MetadataStore>) {
@@ -231,6 +234,7 @@ async fn sqlite_binary_prefix_boundaries_and_storage_error_rollback() {
     assert!(SqliteStore::open(dir.path().join("missing").join("db"), "test").is_err());
 }
 
+#[cfg(feature = "dynamodb")]
 async fn dynamodb_contract(endpoint: String) {
     // Explicit fake credentials and endpoint: these tests never use AWS IAM.
     assert!(endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("http://localhost:"));
@@ -303,6 +307,68 @@ async fn dynamodb_contract(endpoint: String) {
         DynamoDbStore::new(client.clone(), &table, "test").unwrap(),
     ))
     .await;
+    let runtime_store =
+        Arc::new(DynamoDbStore::new(client.clone(), &table, "runtime-test").unwrap());
+    {
+        use mcp_metadata_store::publication::{MetadataPublication, Publication, PublishOutcome};
+        let publication = MetadataPublication::new(runtime_store.clone(), "contract").unwrap();
+        let mut request = Publication {
+            operation_id: "once".into(),
+            key: b"head".to_vec(),
+            expected_revision: None,
+            value: Some(vec![7; 200_000]),
+            companions: vec![Write::new("reflog", b"entry", b"event")],
+        };
+        assert_eq!(
+            publication.publish(&request).await.unwrap(),
+            PublishOutcome::Committed { revision: 1 }
+        );
+        assert_eq!(
+            publication.publish(&request).await.unwrap(),
+            PublishOutcome::Committed { revision: 1 }
+        );
+        request.operation_id = "oversized".into();
+        request.key = b"large".to_vec();
+        request.value = Some(vec![0; 500_000]);
+        assert!(
+            publication
+                .publish(&request)
+                .await
+                .unwrap_err()
+                .contains("size limit exceeded")
+        );
+    }
+    tokio::task::spawn_blocking(move || {
+        runtime_contract(runtime_store.clone());
+        let blobs = Arc::new(TestBlobs::default());
+        let runtime = mcp_metadata_store::RuntimeStore::new(runtime_store)
+            .unwrap()
+            .with_blobs(blobs.clone());
+        let tree = runtime.tree("runtime-size-limit");
+        // Above the old threshold but below DynamoDB's native item limit.
+        tree.insert(b"metadata", vec![7; 200_000]).unwrap();
+        let error = tree.insert(b"large", vec![0; 500_000]).unwrap_err();
+        assert!(error.contains("size limit exceeded"), "{error}");
+        assert!(tree.get(b"large").unwrap().is_none());
+        assert!(
+            tree.compare_and_swap(b"metadata", Some(vec![7; 200_000]), Some(vec![0; 500_000]))
+                .is_err()
+        );
+        assert_eq!(tree.get(b"metadata").unwrap(), Some(vec![7; 200_000]));
+        assert!(
+            blobs.0.lock().unwrap().is_empty(),
+            "metadata must never spill to S3"
+        );
+        for name in ["artifacts", "ex:test"] {
+            let payloads = runtime.tree(name);
+            for bytes in [b"tiny".to_vec(), vec![8; 500_000]] {
+                payloads.insert(b"key", &bytes).unwrap();
+                assert_eq!(payloads.get(b"key").unwrap(), Some(bytes));
+            }
+        }
+    })
+    .await
+    .unwrap();
     let reopened = DynamoDbStore::new(client.clone(), &table, "test").unwrap();
     assert!(reopened.get("heads", b"main").await.unwrap().is_some());
     let other = DynamoDbStore::new(client.clone(), &table, "test-other").unwrap();
@@ -332,6 +398,7 @@ async fn dynamodb_contract(endpoint: String) {
 }
 
 #[tokio::test]
+#[cfg(feature = "dynamodb")]
 #[ignore = "requires a loopback DynamoDB Local/LocalStack endpoint"]
 async fn dynamodb_endpoint_contract() {
     dynamodb_contract(std::env::var("DYNAMODB_TEST_ENDPOINT").expect("set DYNAMODB_TEST_ENDPOINT"))
@@ -356,4 +423,256 @@ async fn localstack_testcontainer_contract() {
     let port = container.get_host_port_ipv4(4566.tcp()).await.unwrap();
     dynamodb_contract(format!("http://127.0.0.1:{port}")).await;
     // Container lifecycle is owned by Testcontainers, including panic cleanup.
+}
+
+fn runtime_contract(store: Arc<dyn MetadataStore>) {
+    use mcp_metadata_store::RuntimeStore;
+    let runtime = RuntimeStore::new(store.clone()).unwrap();
+    let tree = runtime.tree("runtime-contract");
+    tree.insert(b"a", b"first").unwrap();
+    let reopened = RuntimeStore::new(store).unwrap().tree("runtime-contract");
+    assert_eq!(reopened.get(b"a").unwrap(), Some(b"first".to_vec()));
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let t = reopened.clone();
+        handles.push(std::thread::spawn(move || {
+            t.compare_and_swap(b"a", Some(b"first".to_vec()), Some(b"claimed".to_vec()))
+                .unwrap()
+                .is_ok()
+        }));
+    }
+    assert_eq!(
+        handles
+            .into_iter()
+            .map(|h| usize::from(h.join().unwrap()))
+            .sum::<usize>(),
+        1
+    );
+    // A second value and a tombstone must not appear as a phantom scan row.
+    tree.insert(b"b", b"second").unwrap();
+    tree.remove(b"b").unwrap();
+    assert!(tree.get(b"b").unwrap().is_none());
+    assert_eq!(tree.iter().collect::<Result<Vec<_>, _>>().unwrap().len(), 1);
+    assert!(
+        tree.compare_and_swap(b"b", None, Some(b"reborn".to_vec()))
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(tree.get(b"b").unwrap(), Some(b"reborn".to_vec()));
+}
+
+#[test]
+fn runtime_sled_contract() {
+    let db = sled::Config::new().temporary(true).open().unwrap();
+    runtime_contract(Arc::new(SledStore(db)));
+}
+
+#[derive(Default)]
+struct TestBlobs(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+#[async_trait::async_trait]
+impl mcp_metadata_store::runtime_tree::RuntimeBlobs for TestBlobs {
+    async fn put_immutable(&self, name: &str, value: &[u8]) -> Result<(), String> {
+        let mut objects = self.0.lock().unwrap();
+        match objects.get(name) {
+            Some(existing) if existing != value => Err("immutable conflict".into()),
+            Some(_) => Ok(()),
+            None => {
+                objects.insert(name.into(), value.to_vec());
+                Ok(())
+            }
+        }
+    }
+    async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> {
+        self.0.lock().unwrap().insert(name.into(), value.to_vec());
+        Ok(())
+    }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or("missing runtime blob".into())
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_artifact_values_are_blob_references_and_missing_blobs_fail() {
+    use mcp_metadata_store::RuntimeStore;
+    let db = Arc::new(SledStore(
+        sled::Config::new().temporary(true).open().unwrap(),
+    ));
+    let blobs = Arc::new(TestBlobs::default());
+    let tree = RuntimeStore::new(db.clone())
+        .unwrap()
+        .with_blobs(blobs.clone())
+        .tree("artifacts");
+    let value = vec![42; 500_000];
+    tree.insert(b"artifact", &value).unwrap();
+    assert_eq!(tree.get(b"artifact").unwrap(), Some(value.clone()));
+    let raw = db
+        .get("runtime_refs:v1:617274696661637473", b"artifact")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw[0], 1);
+    assert!(raw.len() < 100);
+    let reopened = RuntimeStore::new(db)
+        .unwrap()
+        .with_blobs(blobs.clone())
+        .tree("artifacts");
+    assert_eq!(reopened.get(b"artifact").unwrap(), Some(value));
+    blobs.0.lock().unwrap().clear();
+    assert!(reopened.get(b"artifact").is_err());
+}
+
+#[test]
+fn runtime_sqlite_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    runtime_contract(Arc::new(
+        SqliteStore::open(dir.path().join("metadata.sqlite"), "runtime").unwrap(),
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_sqlite_metadata_reopen_and_cas_without_blob_storage() {
+    use mcp_metadata_store::RuntimeStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite");
+    let store = Arc::new(SqliteStore::open(&path, "runtime").unwrap());
+    let tree = RuntimeStore::new(store.clone())
+        .unwrap()
+        .tree("execution_records");
+    let first = vec![42; 500_000];
+    tree.insert(b"large", &first).unwrap();
+    drop(tree);
+
+    // A fresh connection must read the payload from SQLite, with no blob client.
+    let reopened = RuntimeStore::new(Arc::new(SqliteStore::open(&path, "runtime").unwrap()))
+        .unwrap()
+        .tree("execution_records");
+    assert_eq!(reopened.get(b"large").unwrap(), Some(first.clone()));
+    let second = vec![43; 600_000];
+    assert!(
+        reopened
+            .compare_and_swap(b"large", Some(first.clone()), Some(second.clone()))
+            .unwrap()
+            .is_ok()
+    );
+    assert!(
+        reopened
+            .compare_and_swap(b"large", Some(first), Some(vec![0]))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        reopened.iter().collect::<Result<Vec<_>, _>>().unwrap(),
+        vec![(b"large".to_vec(), second.clone())]
+    );
+    let raw = store
+        .get("execution_records", b"large")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        raw[0], 1,
+        "metadata remains inline, subject to SQLite limits"
+    );
+    assert_eq!(&raw[1..], second);
+    reopened.remove(b"large").unwrap();
+    assert!(reopened.get(b"large").unwrap().is_none());
+    assert!(
+        reopened
+            .compare_and_swap(b"large", None, Some(second.clone()))
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(reopened.get(b"large").unwrap(), Some(second));
+    assert!(
+        SqliteStore::open(&path, "other")
+            .unwrap()
+            .get("execution_records", b"large")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_payloads_always_use_blobs_and_metadata_never_spills() {
+    use mcp_metadata_store::RuntimeStore;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.sqlite");
+    let db = Arc::new(SqliteStore::open(&path, "runtime").unwrap());
+    let blobs = Arc::new(TestBlobs::default());
+    let store = RuntimeStore::new(db.clone())
+        .unwrap()
+        .with_blobs(blobs.clone());
+    for name in ["artifacts", "ex:stdout", "ex:stderr"] {
+        let tree = store.tree(name);
+        // Even empty and tiny payloads must live in blob storage.
+        for payload in [vec![], b"tiny".to_vec(), vec![42; 500_000]] {
+            tree.insert(b"key", &payload).unwrap();
+            let raw = db
+                .get(&format!("runtime_refs:v1:{}", hex::encode(name)), b"key")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(raw.len() < 128, "payload was stored in the database");
+            assert_ne!(raw, [vec![1], payload.clone()].concat());
+            let reopened =
+                RuntimeStore::new(Arc::new(SqliteStore::open(&path, "runtime").unwrap()))
+                    .unwrap()
+                    .with_blobs(blobs.clone())
+                    .tree(name);
+            assert_eq!(reopened.get(b"key").unwrap(), Some(payload));
+        }
+    }
+    let metadata = store.tree("execution_records");
+    metadata.insert(b"key", b"small").unwrap();
+    let count = blobs.0.lock().unwrap().len();
+    metadata.insert(b"key", vec![0; 500_000]).unwrap();
+    assert_eq!(metadata.get(b"key").unwrap(), Some(vec![0; 500_000]));
+    assert_eq!(
+        blobs.0.lock().unwrap().len(),
+        count,
+        "metadata must never spill to S3"
+    );
+    let no_blobs = RuntimeStore::new(db.clone()).unwrap().tree("artifacts");
+    no_blobs.insert(b"inline", b"tiny").unwrap();
+    assert_eq!(no_blobs.get(b"inline").unwrap(), Some(b"tiny".to_vec()));
+    blobs.0.lock().unwrap().clear();
+    assert!(store.tree("artifacts").get(b"key").is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_inline_markers_and_tagged_dynamodb_references_remain_readable() {
+    use mcp_metadata_store::{RuntimeStore, Write};
+    let backend = Arc::new(TestBlobs::default());
+    let db = Arc::new(SledStore(
+        sled::Config::new().temporary(true).open().unwrap(),
+    ));
+    let name = "runtime/00000000-0000-4000-8000-000000000001";
+    mcp_metadata_store::blob::BlobStorage::put(backend.as_ref(), name, b"old payload")
+        .await
+        .unwrap();
+    let mut inline = vec![1];
+    inline.extend(b"\0mcp-runtime-blob-v1\0");
+    inline.extend(name.as_bytes());
+    db.put(Write::new("artifacts", b"uuid", inline))
+        .await
+        .unwrap();
+    let mut old_ddb = vec![2];
+    old_ddb.extend(name.as_bytes());
+    db.put(Write::new("artifacts", b"ddb", old_ddb))
+        .await
+        .unwrap();
+    let tree = RuntimeStore::new(db)
+        .unwrap()
+        .with_blobs(backend)
+        .tree("artifacts");
+    let mut original = b"\0mcp-runtime-blob-v1\0".to_vec();
+    original.extend(name.as_bytes());
+    assert_eq!(tree.get(b"uuid").unwrap(), Some(original));
+    assert_eq!(tree.get(b"ddb").unwrap(), Some(b"old payload".to_vec()));
 }

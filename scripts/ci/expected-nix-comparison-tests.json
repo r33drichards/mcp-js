@@ -96,6 +96,15 @@
       "src_path": "server/tests/base64_and_formdata.rs"
     },
     {
+      "name": "blob_contract",
+      "kind": [
+        "test"
+      ],
+      "test": true,
+      "doctest": false,
+      "src_path": "server/tests/blob_contract.rs"
+    },
+    {
       "name": "cli_endpoints_e2e",
       "kind": [
         "test"
@@ -544,6 +553,15 @@
       "test": true,
       "doctest": false,
       "src_path": "server/tests/rss_growth.rs"
+    },
+    {
+      "name": "runtime_storage_review",
+      "kind": [
+        "test"
+      ],
+      "test": true,
+      "doctest": false,
+      "src_path": "server/tests/runtime_storage_review.rs"
     },
     {
       "name": "sandbox_e2e",

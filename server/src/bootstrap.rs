@@ -10,7 +10,7 @@ use crate::engine::execution::ExecutionRegistry;
 use crate::engine::fs_labels::LabelStore;
 use crate::engine::fs_store::FsStore;
 use crate::engine::heap_storage::{
-    AnyHeapStorage, FileHeapStorage, HeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage,
+    AnyHeapStorage, HeapStorage,
 };
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
@@ -527,42 +527,24 @@ pub async fn build_storage_engine(
     let engine = attach_heap_tags(engine, &config, cluster_node.as_ref()).await?;
     let engine = attach_filesystem(engine, &config, cluster_node.as_ref()).await?;
     Ok(RuntimeBootstrap {
-        engine: attach_execution_registry(engine, &config),
+        engine: attach_execution_registry(engine, &config).await?,
         cluster_node,
     })
 }
 
 async fn build_heap_storage(config: &StorageBootstrapConfig) -> Result<AnyHeapStorage> {
-    match config.heap_store {
-        StoreKind::S3 => {
-            let bucket = config
-                .s3_bucket
-                .clone()
-                .ok_or_else(|| anyhow!("--heap-store s3 requires --s3-bucket"))?;
-            if let Some(cache_dir) = config.cache_dir.clone() {
-                tracing::info!(
-                    "Heap: S3 bucket '{}' with write-through cache at {}",
-                    bucket,
-                    cache_dir
-                );
-                Ok(AnyHeapStorage::S3WithFsCache(
-                    WriteThroughCacheHeapStorage::new(S3HeapStorage::new(bucket).await, cache_dir),
-                ))
-            } else {
-                tracing::info!("Heap: S3 bucket '{}'", bucket);
-                Ok(AnyHeapStorage::S3(S3HeapStorage::new(bucket).await))
-            }
-        }
-        StoreKind::Dir => {
-            let dir = config
-                .heap_dir
-                .clone()
-                .unwrap_or_else(|| "/tmp/mcp-v8-heaps".to_string());
-            tracing::info!("Heap: directory store at {}", dir);
-            Ok(AnyHeapStorage::File(FileHeapStorage::new(dir)))
-        }
+    use crate::engine::heap_storage::BlobBackendConfig;
+    let backend = match config.heap_store {
+        StoreKind::S3 => BlobBackendConfig::S3 {
+            bucket: config.s3_bucket.clone().ok_or_else(||anyhow!("--heap-store s3 requires --s3-bucket"))?,
+            cache_dir: config.cache_dir.as_ref().map(Into::into),
+        },
+        StoreKind::Dir => BlobBackendConfig::Directory {
+            path: config.heap_dir.clone().unwrap_or_else(||"/tmp/mcp-v8-heaps".into()).into(),
+        },
         StoreKind::None => bail!("heap storage requested while heap persistence is disabled"),
-    }
+    };
+    Ok(backend.build().await)
 }
 
 async fn configured_metadata(config: &StorageBootstrapConfig, domain: &str) -> Result<Option<Arc<dyn mcp_metadata_store::MetadataStore>>> {
@@ -667,28 +649,14 @@ async fn attach_filesystem(
         .fs_labels_db
         .clone()
         .unwrap_or_else(|| format!("{}/fs-labels", config.session_db_path));
-    let backend: Arc<dyn HeapStorage> = if config.fs_store == StoreKind::S3 {
-        let bucket = config
-            .s3_bucket
-            .clone()
-            .ok_or_else(|| anyhow!("--fs-store s3 requires --s3-bucket"))?;
-        if let Some(cache_dir) = &config.cache_dir {
-            tracing::info!(
-                "FS snapshots: shared S3 blob storage (bucket {}) with write-through cache at {}",
-                bucket,
-                cache_dir
-            );
-            Arc::new(WriteThroughCacheHeapStorage::new(
-                S3HeapStorage::new(bucket.clone()).await,
-                cache_dir.clone(),
-            ))
-        } else {
-            tracing::info!("FS snapshots: shared S3 blob storage (bucket {})", bucket);
-            Arc::new(S3HeapStorage::new(bucket).await)
+    use crate::engine::heap_storage::BlobBackendConfig;
+    let backend = if config.fs_store == StoreKind::S3 {
+        BlobBackendConfig::S3 {
+            bucket: config.s3_bucket.clone().ok_or_else(||anyhow!("--fs-store s3 requires --s3-bucket"))?,
+            cache_dir: config.cache_dir.as_ref().map(Into::into),
         }
-    } else {
-        Arc::new(FileHeapStorage::new(&store_dir))
-    };
+    } else { BlobBackendConfig::Directory { path: store_dir.clone().into() } };
+    let backend: Arc<dyn HeapStorage> = Arc::new(backend.build().await);
     let store = Arc::new(FsStore::new(backend));
     match if let Some(store) = configured_metadata(config, "labels").await? {
         Ok(LabelStore::from_store(store))
@@ -718,7 +686,42 @@ async fn attach_filesystem(
     }
 }
 
-fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) -> Engine {
+async fn runtime_blobs(
+    bucket: Option<String>, directory: std::path::PathBuf, cache_dir: Option<String>,
+) -> Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs> {
+    use crate::engine::heap_storage::BlobBackendConfig;
+    let config = match bucket {
+        Some(bucket) => BlobBackendConfig::S3 { bucket, cache_dir: cache_dir.map(Into::into) },
+        None => BlobBackendConfig::Directory { path: directory },
+    };
+    Arc::new(config.build().await)
+}
+
+async fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) -> Result<Engine> {
+    let payload_directory = std::path::Path::new(&config.session_db_path).join("runtime-blobs");
+    let cache_dir = config.cache_dir.clone();
+    if config.sqlite_path.is_some() {
+        let store = configured_metadata(config, "runtime")
+            .await?
+            .ok_or_else(|| anyhow!("SQLite runtime metadata backend is unavailable"))?;
+        let bucket = config.s3_bucket.clone();
+        let remote = mcp_metadata_store::RuntimeStore::from_factory(async move {
+            Ok((store, Some(runtime_blobs(bucket, payload_directory, cache_dir).await)))
+        }).map_err(|error|anyhow!(error))?;
+        return Ok(engine.with_execution_registry(Arc::new(ExecutionRegistry::from_runtime(remote))));
+    }
+    if let Some(table) = config.dynamodb_table.clone() {
+        let namespace = format!("{}/runtime", config.dynamodb_namespace);
+        let bucket = config.s3_bucket.clone();
+        let remote = mcp_metadata_store::RuntimeStore::from_factory(async move {
+            let sdk = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let store: Arc<dyn mcp_metadata_store::MetadataStore> = Arc::new(mcp_metadata_store::DynamoDbStore::new(aws_sdk_dynamodb::Client::new(&sdk), table, &namespace)?);
+            store.get("__probe", b"ready").await?;
+            let blobs = Some(runtime_blobs(bucket, payload_directory, cache_dir).await);
+            Ok((store, blobs))
+        }).map_err(|e|anyhow!(e))?;
+        return Ok(engine.with_execution_registry(Arc::new(ExecutionRegistry::from_runtime(remote))));
+    }
     let path = config
         .execution_db_path
         .clone()
@@ -726,10 +729,13 @@ fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) ->
             Some(port) => format!("{}/executions-{}", config.session_db_path, port),
             None => format!("{}/executions", config.session_db_path),
         });
-    match ExecutionRegistry::new(&path) {
+    let bucket = config.s3_bucket.clone();
+    match ExecutionRegistry::new(&path).and_then(|registry| registry.with_local_blob_factory(async move {
+        Ok(Some(runtime_blobs(bucket, payload_directory, cache_dir).await))
+    })) {
         Ok(registry) => {
             tracing::info!("Execution registry opened at {}", path);
-            engine.with_execution_registry(Arc::new(registry))
+            Ok(engine.with_execution_registry(Arc::new(registry)))
         }
         Err(error) => {
             tracing::warn!(
@@ -737,7 +743,7 @@ fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) ->
                 path,
                 error
             );
-            engine
+            Ok(engine)
         }
     }
 }

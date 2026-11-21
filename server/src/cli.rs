@@ -194,13 +194,14 @@ pub struct Cli {
     pub session_db_path: String,
 
     /// Shared DynamoDB metadata table (String keys pk/sk). Overrides default sled.
-    /// Covers session history, heap tags and filesystem labels, not Raft or
-    /// the local execution registry. Incompatible with cluster mode.
+    /// Covers session history, heap tags, filesystem labels and runtime bookkeeping.
+    /// Artifact and console payloads use S3 or local files; other metadata obeys native item limits.
+    /// Incompatible with cluster mode.
     #[arg(long, env = "MCP_V8_DYNAMODB_TABLE", conflicts_with = "cluster_port", help_heading = "Core")]
     pub dynamodb_table: Option<String>,
 
-    /// SQLite metadata file for session history, heap tags and filesystem labels.
-    /// Parent directory must exist. Does not replace the Raft log or execution registry.
+    /// SQLite metadata file for session history, heap tags, filesystem labels and runtime bookkeeping.
+    /// Parent directory must exist. Does not replace the Raft log.
     #[arg(long, env = "MCP_V8_SQLITE_PATH", conflicts_with_all = ["dynamodb_table", "cluster_port"], help_heading = "Core")]
     pub sqlite_path: Option<String>,
 
@@ -357,9 +358,9 @@ pub struct Cli {
     )]
     pub sandbox_manifest: Option<String>,
 
-    // ── Shared S3 backend (used by heap-store=s3 and/or fs-store=s3) ──────────
-    /// S3 bucket backing whichever axes select `s3`. Required when
-    /// `--heap-store s3` or `--fs-store s3` is set.
+    // ── Shared S3 backend ─────────────────────────────────────────────────
+    /// S3 bucket for artifact and console payloads (otherwise stored on disk), and snapshot axes selecting `s3`.
+    /// Required for `--heap-store s3` or `--fs-store s3`.
     #[arg(long, env = "MCP_V8_S3_BUCKET", help_heading = "Storage (S3)")]
     pub s3_bucket: Option<String>,
 

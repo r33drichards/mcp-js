@@ -39,7 +39,20 @@ When an execution mounts a snapshot it does **not** materialise files on a real 
 
 Reads resolve the upper first (a `Data` entry shadows the base, a `Whiteout` means "deleted") and fall through to the base otherwise. A write does a copy-up: it stores the new bytes in the content plane and records a `Data` entry in the upper. A delete records a `Whiteout`. Directories are **implicit**: a path is a directory if anything lives under it, so `mkdir` is a no-op that merely lets a caller mkdir-then-write. Recursive directory `rename` is supported — it rewrites the path prefix of every descendant. A non-recursive removal of a non-empty directory fails, mirroring Node's `fs.rm`.
 
-The base is **never loaded whole**. `pull` pins only the root hash; a read walks just the tree nodes on its path, fetching them lazily (a small bounded node cache backs this). So mounting and reading a multi-terabyte snapshot costs work proportional to the paths actually touched, not the size of the tree.
+The overlay retains a root reference and resolves paths through tree nodes with
+a bounded decoded-node cache. Before an isolate runs, however, the Engine
+prefetches every reachable tree node and file chunk on the owning async runtime
+so guest operations do not block on cross-runtime remote I/O. Cold mount/staging
+cost therefore depends on the reachable snapshot, not just the paths later read.
+
+Prefetch overlaps directory lookahead and chunk warming with a shared budget of
+32 I/O operations per `FsStore`, up to 128 lookahead directories, and chunk
+batches of 96. Temporary staging reservations prevent concurrent cache eviction
+from defeating an active warm batch; oversized batches can temporarily exceed
+the resident cache target and are trimmed after reservations are released. This
+is not a permanent whole-snapshot pin or a new replication guarantee. See the
+[prefetch implementation](https://github.com/r33drichards/mcp-js/blob/main/server/src/engine/fs_store.rs)
+and [reproducible benchmark](../how-to/development-validation.md#reproduce-the-filesystem-workload).
 
 Two properties follow from this design:
 
@@ -79,7 +92,7 @@ Before reporting a divergent path as a conflict, a **type-aware content merge** 
 The two-plane split is what makes clustering tractable. The planes are replicated very differently:
 
 - **The pointer plane is the only replicated state.** Label moves route through the Raft leader so a compare-and-set is linearizable across the whole cluster. Crucially, a label move replicates the head pointer **and** its reflog entry as a *single atomic replicated entry* — the head can never advance without the reflog recording it. That guarantee is not just asserted; it is checked with a TLA+ model in [`specs/FsLabelAtomicWrite.tla`](https://github.com/r33drichards/mcp-js/blob/main/specs/FsLabelAtomicWrite.tla): the model proves that the naive design, writing the head and the reflog as two separate replicated entries, violates the invariant that a settled head is always covered by the reflog, while the combined single-entry design holds. Since reset and the reflog-rooted GC both depend on the reflog covering every head a label has ever pointed at, a head that moved without a recorded reflog entry would be silent corruption.
-- **The content plane is node-local unless shared storage is configured.** Blobs and tree nodes are written wherever that node's blob backend points. With node-local file storage, a tree node written on one node does not exist on another — so a label advanced on node A would resolve on node B to a tree node B is missing. For that reason node-local blobs are **single-node only**, and the server **refuses to enable fs snapshots in cluster mode without shared storage** (`--s3-bucket`, optionally fronted by a write-through cache). With shared storage the content plane resolves identically on every node, exactly as content-addressing intends.
+- **The content plane is node-local unless shared storage is configured.** Blobs and tree nodes are written wherever that node's blob backend points. With node-local file storage, a tree node written on one node does not exist on another — so a label advanced on node A would resolve on node B to a tree node B is missing. For that reason node-local blobs are **single-node only**, and the server **refuses to enable fs snapshots in cluster mode without shared storage** (`--fs-store s3 --s3-bucket BUCKET`, optionally fronted by a write-through cache). With shared storage the content plane resolves identically on every node, exactly as content-addressing intends.
 
 ## Out of scope / non-goals
 

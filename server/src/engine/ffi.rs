@@ -14,6 +14,7 @@ use crate::bootstrap::{
     RuntimeBootstrap, StorageBootstrapConfig,
 };
 use crate::cli::StoreKind;
+use uniffi_builder_derive::UniffiBuilder;
 
 /// Runtime clones can be released on a Tokio worker when an execution ends.
 /// Nonblocking teardown avoids Tokio's panic when the last owner drops there.
@@ -69,12 +70,15 @@ pub struct McpRequestHeaders {
     pub values: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, uniffi::Record, UniffiBuilder)]
+#[uniffi_builder(RuntimeError)]
 pub struct ToolCallRequest {
     pub name: String,
     pub arguments_json: String,
     pub session_id: Option<String>,
     pub mcp_headers: Option<McpRequestHeaders>,
+    /// Optional execution-scoped host tools. Accepted only for `run_js`.
+    pub host_tools: Option<Arc<host_tools::HostToolRun>>,
 }
 
 #[derive(Clone, Debug, Serialize, uniffi::Record)]
@@ -282,6 +286,7 @@ impl Engine {
                 policies_json: filesystem_policy_json,
                 passthrough: None,
             }),
+            mcp_tools_policies_json: None,
             heap_store: None,
             fs_snapshot_store: None,
             fs_labels_db: None,
@@ -436,6 +441,7 @@ impl Engine {
             },
             data_dir: None,
             filesystem: None,
+            mcp_tools_policies_json: None,
             heap_store: None,
             fs_snapshot_store: None,
             fs_labels_db: None,
@@ -519,6 +525,15 @@ impl Engine {
             })
             .transpose()?;
 
+        let mcp_tools = config
+            .mcp_tools_policies_json
+            .as_deref()
+            .map(serde_json::from_str::<opa::OperationPolicies>)
+            .transpose()
+            .map_err(|error| RuntimeError::InvalidConfig {
+                message: format!("mcp_tools_policies_json: {error}"),
+            })?;
+
         let (data_dir, ephemeral) = match config.data_dir {
             Some(path) => (path, None),
             None => {
@@ -599,6 +614,7 @@ impl Engine {
                 .with_policy_config(
                     PolicyBootstrapConfig {
                         filesystem,
+                        mcp_tools,
                         ..PolicyBootstrapConfig::default()
                     },
                     CapabilityBootstrapConfig {
@@ -766,6 +782,7 @@ impl Engine {
     pub fn get_execution(&self, execution_id: String) -> Result<ExecutionInfo, RuntimeError> {
         self.execution_registry()?
             .get(&execution_id)
+            .map_err(operation_message)?
             .ok_or_else(|| operation_message(format!("Execution '{}' not found", execution_id)))
     }
 
@@ -795,7 +812,7 @@ impl Engine {
     }
 
     pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, RuntimeError> {
-        Ok(self.execution_registry()?.list())
+        self.execution_registry()?.list().map_err(operation_message)
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<String>, RuntimeError> {
@@ -1193,6 +1210,7 @@ impl Engine {
             arguments_json,
             session_id,
             mcp_headers,
+            host_tools: None,
         }))
     }
 
@@ -1204,36 +1222,34 @@ impl Engine {
         session_id: Option<String>,
         mcp_headers: Option<McpRequestHeaders>,
     ) -> Result<String, RuntimeError> {
-        let request = ToolCallRequest {
+        self.invoke_tool(ToolCallRequest {
             name,
             arguments_json,
             session_id,
             mcp_headers,
-        };
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return self.invoke_tool(request).await;
-        }
-        let tokio_runtime = self
-            .tokio_runtime
-            .as_ref()
-            .ok_or_else(|| RuntimeError::Initialization {
-                message: "asynchronous tool calls require an active or library-created runtime"
-                    .to_string(),
-            })?;
-        let engine = self.clone();
-        tokio_runtime
-            .spawn(async move { engine.invoke_tool(request).await })
-            .await
-            .map_err(|error| RuntimeError::Operation {
-                message: format!("asynchronous tool call task failed: {error}"),
-            })?
+            host_tools: None,
+        })
+        .await
     }
 
+    /// Invoke a typed tool request without blocking the foreign caller's host thread.
     pub async fn invoke_tool(&self, request: ToolCallRequest) -> Result<String, RuntimeError> {
-        let result = self.invoke_tool_response(request).await?;
-        serde_json::to_string(&result.json).map_err(|error| RuntimeError::ToolCall {
-            message: format!("failed to serialize result: {error}"),
+        let engine = self.clone();
+        self.on_runtime(async move {
+            let result = engine.invoke_tool_response(request).await?;
+            serde_json::to_string(&result.json).map_err(|error| RuntimeError::ToolCall {
+                message: format!("failed to serialize result: {error}"),
+            })
         })
+        .await
+    }
+}
+
+struct CloseHostToolRun<'a>(&'a host_tools::HostToolRun);
+
+impl Drop for CloseHostToolRun<'_> {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
@@ -1243,6 +1259,11 @@ impl Engine {
         &self,
         request: ToolCallRequest,
     ) -> Result<crate::mcp_dispatch::ToolResponse, RuntimeError> {
+        if request.host_tools.is_some() && request.name != "run_js" {
+            return Err(RuntimeError::InvalidConfig {
+                message: "Host tools can only be attached to run_js".into(),
+            });
+        }
         if crate::http_functions::is_management_tool(&request.name) {
             self.ensure_running()?;
             let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
@@ -1254,19 +1275,52 @@ impl Engine {
         self.ensure_running()?;
         let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
         let mcp_headers = request.mcp_headers.map(mcp_headers_value);
-        if self.session_capable() && request.name == "run_js"
-            && arguments.get("wait").and_then(Value::as_bool).unwrap_or(false)
-        {
+        let host_tools = request.host_tools;
+        let wait = arguments
+            .get("wait")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if request.name == "run_js" && (host_tools.is_some() || self.session_capable() && wait) {
+            let _host_tool_guard = if let Some(channel) = host_tools.as_deref() {
+                if self.heap_enabled() || self.mcp_client_manager().is_some() {
+                    return Err(RuntimeError::InvalidConfig {
+                        message: "Host tools require an engine without heap snapshots or upstream MCP".into(),
+                    });
+                }
+                channel.start()?;
+                Some(CloseHostToolRun(channel))
+            } else {
+                None
+            };
             // Register while protected from shutdown, but let cancellation,
             // unrelated tools and shutdown proceed while this request waits.
             let submitted = crate::mcp_dispatch::submit_run_js(
-                self, request.session_id.as_deref(), mcp_headers.as_ref(), &arguments,
-            ).await;
+                self,
+                request.session_id.as_deref(),
+                mcp_headers.as_ref(),
+                &arguments,
+                host_tools.clone(),
+            )
+            .await;
             drop(_lifecycle_guard);
-            return Ok(match submitted {
-                Ok(id) => crate::mcp_dispatch::wait_for_execution(self, id).await,
-                Err(error) => json!({"error": error}),
-            }.into());
+            let response = match (submitted, host_tools.as_ref()) {
+                (Ok(id), Some(channel)) => {
+                    let response = tokio::select! {
+                        response = crate::mcp_dispatch::wait_for_execution(self, id.clone()) => response,
+                        _ = channel.cancelled() => {
+                            let _ = self.cancel_execution(id.clone());
+                            json!({"execution_id": id, "status": "cancelled"})
+                        },
+                    };
+                    if response.get("wait_timed_out").and_then(Value::as_bool) == Some(true) {
+                        let _ = self.cancel_execution(id);
+                    }
+                    response
+                }
+                (Ok(id), None) => crate::mcp_dispatch::wait_for_execution(self, id).await,
+                (Err(error), _) => json!({"error": error}),
+            };
+            return Ok(response.into());
         }
         let result = self
             .dispatch_tool(
@@ -2131,6 +2185,7 @@ mod tests {
                 arguments_json: r#"{"code":"console.log(1)"}"#.to_string(),
                 session_id: None,
                 mcp_headers: None,
+                host_tools: None,
             })
             .await
             .unwrap_err();

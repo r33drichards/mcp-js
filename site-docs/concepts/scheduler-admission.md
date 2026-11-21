@@ -85,3 +85,10 @@ The MCP tool description instructs agents not to infer or auto-approve it.
 The extra listener is loopback-only. Fixed-voter Raft authenticates separately
 and still requires private network boundaries and encrypted remote transport.
 Neither the integrated hardening nor management adapters make the stack production-ready. See the [authorization matrix](../reference/scheduler.md#authorization-matrix).
+
+## Production readiness
+
+The scheduler is merged into `main` but remains experimental.
+[Issue #348](https://github.com/r33drichards/mcp-js/issues/348) tracks recovery
+workflows, compaction, upgrades, observability, and fault/soak validation.
+The existing safeguards and explicit recovery attestation remain in force.

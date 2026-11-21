@@ -74,7 +74,7 @@ fn execution_registry_reuses_host_owned_persistent_sled() {
     sim.host("n0", || async {
         let config = || sled::Config::new().path("/registry").flush_every_ms(None);
         let db = config().open().unwrap();
-        let registry = ExecutionRegistry::from_db(db.clone());
+        let registry = ExecutionRegistry::from_db(db.clone()).expect("host registry");
         let console = registry.register("first").unwrap();
         console.insert(b"line", b"persisted").unwrap();
         db.flush().unwrap();

@@ -6,15 +6,15 @@ declarations, not an HTTP client, Python bridge, or runtime CLI wrapper.
 
 ## Supported target and release status
 
-This packaging path targets **Linux x64 with glibc 2.39 or newer only**. macOS, Windows,
-ARM64 and musl/Alpine are not supported by this package. No registry publication
-is performed by the build or CI. Version 0.1.0 is initial package metadata, not
-an assertion that a registry release exists.
+Release assets target **Linux x64**. The standard SDK requires glibc 2.39
+or newer. Releases that include a `linux-x64-musl` asset also support Alpine
+through that tarball. Both variants use the same package name and API; use
+the tarball for your host's libc. Tagged builds use the tag version.
 
 Colocated loading makes the package movable; it does **not** make the shared
-library self-contained. The engine still needs compatible glibc, libstdc++,
-and any other ELF dependencies on the consumer host. CI targets Ubuntu 24.04;
-no older glibc baseline or broader Linux compatibility is claimed. A source
+library self-contained. The engine still needs compatible libc and any
+other ELF dependencies on the consumer host. The glibc build targets
+Ubuntu 24.04. The musl release is tested in the Bun Alpine image. A source
 build using Nix can carry Nix-store RPATHs and dependencies. `prepack` rejects
 all RPATH/RUNPATH entries, path-based DT_NEEDED entries, Nix-store resolutions,
 and unresolved dependencies. Such a build is not release-ready. Rebuild for
@@ -22,24 +22,54 @@ the intended distribution baseline or deliberately stage compatible dependencies
 with appropriate licensing, then rerun all gates. Do not bypass the checks with
 `--ignore-scripts`; removing RPATH alone does not establish portability.
 
-## Build and validate
+## Install from GitHub Releases
 
-From the repository root:
+On a release that includes SDK assets, replace `VERSION` with the version
+listed on the release, including any prerelease suffix:
 
 ```sh
-nix develop --command bash -c '
-  unset RUSTY_V8_ARCHIVE
-  export V8_FROM_SOURCE=1
-  export GN_ARGS="v8_monolithic=true v8_monolithic_for_shared_library=true"
-  export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
-  cargo build -p mcp-v8-uniffi-python --release \
-    --config mcp-v8-uniffi-python/cargo-config.toml
+npm install '@wholelottahoopla/mcp-js-node@https://github.com/r33drichards/mcp-js/releases/download/vVERSION/wholelottahoopla-mcp-js-node-VERSION.tar.gz'
+```
+
+For Alpine on x64, select the musl asset explicitly:
+
+```sh
+bun add '@wholelottahoopla/mcp-js-node@https://github.com/r33drichards/mcp-js/releases/download/vVERSION/wholelottahoopla-mcp-js-node-VERSION-linux-x64-musl.tar.gz'
+```
+
+The package embeds the engine in-process through UniFFI. For remote execution, use the
+[HTTP client](../clients/typescript/README.md) together with a server.
+
+## Build and validate
+
+To build the musl asset on a Linux x64 host with Nix, Node.js, and Docker:
+
+```sh
+npm ci --include=dev --prefix node
+bash node/scripts/package-musl.sh release-artifacts
+```
+
+This builds against the pinned upstream musl V8 archive, then packs and
+installs the SDK inside Alpine. Both Node.js and Bun must execute JavaScript
+and call a host tool successfully before the script copies out the tarball.
+
+### glibc
+
+From the repository root on Linux x64, use the pinned glibc V8 archive supplied by
+the default Nix shell. The published V8 crate omits ICU data needed to rebuild
+V8 itself from source.
+
+```sh
+nix develop --command bash -euc '
+  test -s "$RUSTY_V8_ARCHIVE"
+  export CARGO_TARGET_DIR="$PWD/target/node-sdk-gnu"
+  cargo build --locked --release -p mcp-v8-uniffi-python
 '
 nix develop --command bash node/scripts/build-bindgen.sh
 npm ci --include=dev --prefix node
 npm run test:unit --prefix node
 nix develop --command bash node/scripts/generate.sh \
-  target/python-uniffi/release/libmcp_v8_uniffi.so
+  target/node-sdk-gnu/release/libmcp_v8_uniffi.so
 npm run typecheck --prefix node
 timeout 90s npm test --prefix node
 npm run build --prefix node
@@ -80,16 +110,93 @@ try {
   ));
   console.log(result.output); // 42
 } finally {
-  engine.close();
-  engine.uniffiDestroy();
+  engine.dispose();
 }
 ```
+
+`engine.dispose()` shuts down the runtime and releases the native handle.
+Call it when your application is finished with the engine. Repeated calls are safe.
 
 `callToolAsync` returns a Promise and does not block the Node event loop. The
 same positional arguments are accepted by synchronous `callTool`, which is
 useful in scripts but blocks the host thread. The native engine awaits Promises
 in the executed JavaScript. Execution errors and deadlines are returned in
 JSON; native API failures reject the Promise (or throw from `callTool`).
+
+## Bind host tools to guest JavaScript
+
+`createToolRuntime(engine, config)` binds a named registry of host tool schemas
+and handlers.
+Reuse the wrapper for calls that share the same permissions. For an app with
+request-specific tools, create one wrapper per request. Each run has its own
+request channel and can make up to 32 host tool calls. Internally,
+`runJs` uses `ToolCallRequestBuilder` to attach that channel to the regular
+`run_js` request and submits it through `engine.invokeTool(request)`.
+Each tool handler receives
+an AbortSignal that is aborted when the run ends. Pass an AbortSignal as the
+second argument to `runJs` to cancel the execution. Validate arguments and
+enforce permissions in the handler.
+
+```js
+import { Engine, createToolRuntime } from '@wholelottahoopla/mcp-js-node';
+
+const engine = Engine.createStateless(64n, 5n);
+try {
+  const runtime = createToolRuntime(engine, {
+    server: "host",
+    tools: {
+      echo: {
+        description: "Echo a message",
+        inputSchema: {
+          type: "object",
+          properties: { message: { type: "string" } },
+          required: ["message"],
+        },
+        run({ message }) {
+          if (typeof message !== "string") {
+            throw new Error("Expected a message string");
+          }
+          return { message };
+        },
+      },
+    },
+  });
+
+  // Advertise these discovery stubs alongside your model's run_js tool.
+  console.log(runtime.listTools());
+
+  const result = await runtime.runJs(`
+    const reply = await mcp.callTool("host", "echo", { message: "hello" });
+    console.log(JSON.parse(reply.content[0].text).message);
+  `);
+  console.log(result.output);
+} finally {
+  engine.dispose();
+}
+```
+
+Guest code can also discover tools with `mcp.listTools("host")`. The stub
+definitions use the server's stub format and default `runjs__` prefix. Set
+`stubs: false` to hide them, or set `stubPrefix` to change the prefix.
+`runtime.stubInstructions(name, args)` returns the server-style redirect for a
+direct call to a known stub. The wrapper runs on engines without heap snapshots or upstream MCP.
+Host requests and JSON responses are limited to 256 KiB each.
+
+To use the same MCP authorization and hooks as the standalone server, set
+`EngineConfigBuilder.mcpToolsPoliciesJson(JSON.stringify(config))`. Pass the
+contents of the server's `mcp_tools` config entry. The shared chain runs the
+pre-hooks and policy before dispatch, and post-hooks can redact or change the
+MCP result. The same setting also accepts the server's layered `stack` form.
+
+```js
+const config = new EngineConfigBuilder()
+  .limits(new ExecutionLimitsBuilder().heapMemoryMaxMb(64n).executionTimeoutSecs(5n).build())
+  .mcpToolsPoliciesJson(JSON.stringify({
+    policies: [{ url: "file:///etc/mcp/mcp_tools.rego" }],
+  }))
+  .build();
+const engine = Engine.create(config);
+```
 
 ## Configuring an engine
 

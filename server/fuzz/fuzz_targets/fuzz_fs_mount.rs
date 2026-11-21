@@ -258,24 +258,18 @@ fuzz_target!(|ops: Vec<Op>| {
                     if link_key.as_os_str().is_empty() {
                         continue;
                     }
-                    let res =
-                        mount.symlink(Path::new(&target_raw), Path::new(&link_raw)).await;
-                    if model.contains_key(&link_key) {
-                        // The mount bails EEXIST when the link path already
-                        // exists (mirror of Node fs.symlink); creating a link
-                        // over an existing entry must fail, not replace it.
+                    // Like POSIX `symlink(2)`, the mount fails with EEXIST when
+                    // the link path already exists — as a file, or as a
+                    // (non-empty, i.e. implicitly materialized) directory.
+                    let link_exists = model.contains_key(&link_key)
+                        || !descendants(&model, &link_key).is_empty();
+                    let res = mount
+                        .symlink(Path::new(&target_raw), Path::new(&link_raw))
+                        .await;
+                    if link_exists {
                         assert!(
                             res.is_err(),
-                            "symlink over existing {link_raw:?} must fail"
-                        );
-                    } else if !descendants(&model, &link_key).is_empty() {
-                        // The link path is an implicit directory (parent of a
-                        // live file); the mount reports EEXIST for it exactly
-                        // as it does for files, and a symlink must not replace
-                        // a directory.
-                        assert!(
-                            res.is_err(),
-                            "symlink over directory {link_raw:?} must fail"
+                            "symlink of existing {link_raw:?} must fail"
                         );
                     } else {
                         res.expect("symlink");

@@ -1,9 +1,9 @@
 # Deploy and test scheduler and HTTP features on NixOS
 
-Use a flake revision containing the features you need. The
-[status page](../reference/scheduler-http-status.md) identifies this documentation's
-integrated scheduler hardening boundary. The examples are configuration guidance,
-not evidence of passing combined-stack VM validation.
+Use a release or pinned `main` revision containing the scheduler and HTTP
+features. The [status page](../reference/scheduler-http-status.md) describes their
+current contract. The scheduler remains experimental; the commands below build
+and test your chosen revision rather than asserting historical PR results.
 
 ## Enable HTTP functions in the server module
 
