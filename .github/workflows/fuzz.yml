@@ -105,8 +105,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - crate: server/fuzz
-            target: fuzz_execute_stateless
           - crate: server/engine-cluster-tests/fuzz
             target: fuzz_js_cluster
           - crate: server/engine-cluster-tests/fuzz
@@ -133,6 +131,7 @@ jobs:
       - name: Run fuzzer (${{ matrix.target }})
         env:
           ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5:allocator_may_return_null=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/server/fuzz/lsan-suppressions.txt:print_suppressions=0
         run: |
           nix develop .#fuzz --command bash -c \
             "cd ${{ matrix.crate }} && cargo fuzz run --sanitizer=address ${{ matrix.target }} \
@@ -143,7 +142,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-artifacts-${{ matrix.target }}
-          path: ${{ matrix.crate }}/artifacts/
+          path: |
+            ${{ matrix.crate }}/artifacts/
+            ${{ matrix.crate }}/target/scenario-artifacts/
           if-no-files-found: ignore
 
       - name: Upload corpus

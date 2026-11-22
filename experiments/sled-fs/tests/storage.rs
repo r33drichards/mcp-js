@@ -19,7 +19,7 @@ fn std_roundtrip_and_lock() {
 #[cfg(feature = "sim")]
 mod simulated {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
     use turmoil::fs::shim::std::fs;
@@ -131,133 +131,107 @@ mod simulated {
     #[test]
     fn crash_recovery_without_destructor_flush() -> turmoil::Result {
         for seed in [7, 42, 314] {
-            for (flush_last, explicit_sync) in [(false, true), (true, true), (true, false)] {
-                let mut builder = turmoil::Builder::new();
-                builder.rng_seed(seed).fs().sync_probability(0.0);
-                let mut sim = builder.build();
-                let phase = Arc::new(AtomicUsize::new(0));
-                let completed = Arc::new(AtomicUsize::new(0));
-                let p = phase.clone();
-                let c = completed.clone();
-                sim.host("host", move || {
-                    let p = p.clone();
-                    let c = c.clone();
-                    async move {
-                        let db = config("/crash").open()?;
-                        if p.load(Ordering::SeqCst) == 0 {
-                            db.insert("committed", b"yes")?;
-                            db.flush()?;
-                            // Both the adapter-only and explicitly synced cases must recover.
-                            if explicit_sync {
-                                fs::OpenOptions::new()
-                                    .write(true)
-                                    .open("/crash/conf")?
-                                    .sync_all()?;
-                                fs::sync_dir("/crash/blobs")?;
-                                fs::sync_dir("/crash")?;
-                                fs::sync_dir("/")?;
-                            }
-                            db.insert("last", b"value")?;
-                            assert_eq!(db.get("last")?.unwrap().as_ref(), b"value");
-                            if flush_last {
-                                db.flush()?;
-                            }
-                            // A plain Sim::crash drops futures, which drops Db and flushes.
-                            // Leak this bounded, worker-free instance BEFORE yielding so no
-                            // destructor can persist it during crash or later teardown.
-                            std::mem::forget(db);
-                        } else {
-                            assert_eq!(db.get("committed")?.unwrap().as_ref(), b"yes");
-                            assert_eq!(db.get("last")?.is_some(), flush_last);
-                            drop(db);
-                        }
-                        c.fetch_add(1, Ordering::SeqCst);
+            let mut builder = turmoil::Builder::new();
+            builder.rng_seed(seed).fs().sync_probability(0.0);
+            let mut sim = builder.build();
+            let phase = Arc::new(AtomicUsize::new(0));
+            let power_lost = Arc::new(AtomicBool::new(false));
+            let p = phase.clone();
+            let cut = power_lost.clone();
+            sim.host("host", move || {
+                let p = p.clone();
+                let cut = cut.clone();
+                async move {
+                    if p.load(Ordering::SeqCst) == 0 {
+                        let db = config("/crash").simulated_power_loss(cut).open()?;
+                        db.insert("committed", b"yes")?;
+                        db.insert("durable-blob", vec![19; 20_000])?;
+                        db.flush()?;
+                        assert!(fs::read_dir("/crash/blobs")?.next().is_some());
+
+                        // The small pending write remains in the log buffer.
+                        // No fixture-side sync and no leaked handles.
+                        db.insert("unflushed-control", b"must disappear")?;
+                        assert!(db.get("unflushed-control")?.is_some());
+                        p.store(1, Ordering::SeqCst);
                         std::future::pending::<()>().await;
-                        Ok(())
+                        drop(db);
+                    } else {
+                        let db = config("/crash").open()?;
+                        assert_eq!(db.get("committed")?.unwrap().as_ref(), b"yes");
+                        assert_eq!(db.get("durable-blob")?.unwrap().as_ref(), vec![19; 20_000]);
+                        assert!(db.get("unflushed-control")?.is_none());
+                        p.store(2, Ordering::SeqCst);
                     }
-                });
-                for _ in 0..10 {
-                    sim.step()?;
-                    if completed.load(Ordering::SeqCst) == 1 {
-                        break;
-                    }
+                    Ok(())
                 }
-                assert_eq!(completed.load(Ordering::SeqCst), 1);
-                sim.crash("host");
-                phase.store(1, Ordering::SeqCst);
-                sim.bounce("host");
-                for _ in 0..10 {
-                    sim.step()?;
-                    if completed.load(Ordering::SeqCst) == 2 {
-                        break;
-                    }
-                }
-                assert_eq!(completed.load(Ordering::SeqCst), 2);
+            });
+            for _ in 0..10 {
+                sim.step()?;
+                if phase.load(Ordering::SeqCst) == 1 { break; }
             }
+            assert_eq!(phase.load(Ordering::SeqCst), 1);
+            power_lost.store(true, Ordering::Release);
+            sim.crash("host");
+            sim.bounce("host");
+            for _ in 0..10 {
+                sim.step()?;
+                if phase.load(Ordering::SeqCst) == 2 { break; }
+            }
+            assert_eq!(phase.load(Ordering::SeqCst), 2);
         }
         Ok(())
     }
 
     #[test]
-    fn crash_discards_pending_blob_bytes_written_by_sled() -> turmoil::Result {
+    fn crash_recovery_discards_durable_orphan_blob() -> turmoil::Result {
         let mut builder = turmoil::Builder::new();
         builder.rng_seed(314).fs().sync_probability(0.0);
         let mut sim = builder.build();
-        let completed = Arc::new(AtomicUsize::new(0));
-        let c = completed.clone();
+        let phase = Arc::new(AtomicUsize::new(0));
+        let power_lost = Arc::new(AtomicBool::new(false));
+        let p = phase.clone();
+        let cut = power_lost.clone();
         sim.host("host", move || {
-            let c = c.clone();
+            let p = p.clone();
+            let cut = cut.clone();
             async move {
-                if c.load(Ordering::SeqCst) == 0 {
-                    let db = config("/blob-crash").open()?;
+                if p.load(Ordering::SeqCst) == 0 {
+                    let db = config("/blob-crash").simulated_power_loss(cut).open()?;
                     db.insert("committed", b"yes")?;
                     db.flush()?;
-                    fs::OpenOptions::new()
-                        .write(true)
-                        .open("/blob-crash/conf")?
-                        .sync_all()?;
-                    fs::sync_dir("/blob-crash")?;
-                    fs::sync_dir("/")?;
                     db.insert("pending-blob", vec![29; 20_000])?;
+                    p.store(1, Ordering::SeqCst);
+                    std::future::pending::<()>().await;
+                    drop(db);
+                } else {
+                    // Blob name and bytes were synced before the reference.
                     let blobs: Vec<_> =
                         fs::read_dir("/blob-crash/blobs")?.collect::<Result<_, _>>()?;
                     assert_eq!(blobs.len(), 1);
                     assert!(fs::read(blobs[0].path())?.len() > 20_000);
-                    // Persist its name, deliberately leave the actual sled-written bytes pending.
-                    fs::sync_dir("/blob-crash/blobs")?;
-                    std::mem::forget(db);
-                } else {
-                    let blobs: Vec<_> =
-                        fs::read_dir("/blob-crash/blobs")?.collect::<Result<_, _>>()?;
-                    assert_eq!(blobs.len(), 1);
-                    assert!(fs::read(blobs[0].path())?.is_empty());
                     let db = config("/blob-crash").open()?;
                     assert_eq!(db.get("committed")?.unwrap().as_ref(), b"yes");
                     assert!(db.get("pending-blob")?.is_none());
                     assert!(fs::read_dir("/blob-crash/blobs")?.next().is_none());
-                    drop(db);
+                    p.store(2, Ordering::SeqCst);
                 }
-                c.fetch_add(1, Ordering::SeqCst);
-                std::future::pending::<()>().await;
                 Ok(())
             }
         });
         for _ in 0..10 {
             sim.step()?;
-            if completed.load(Ordering::SeqCst) == 1 {
-                break;
-            }
+            if phase.load(Ordering::SeqCst) == 1 { break; }
         }
-        assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert_eq!(phase.load(Ordering::SeqCst), 1);
+        power_lost.store(true, Ordering::Release);
         sim.crash("host");
         sim.bounce("host");
         for _ in 0..10 {
             sim.step()?;
-            if completed.load(Ordering::SeqCst) == 2 {
-                break;
-            }
+            if phase.load(Ordering::SeqCst) == 2 { break; }
         }
-        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert_eq!(phase.load(Ordering::SeqCst), 2);
         Ok(())
     }
 

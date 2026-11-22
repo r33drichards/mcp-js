@@ -2788,14 +2788,20 @@ impl Engine {
         // Attach the shared keyed artifact store so `artifact(key, mime, bytes)`
         // is available to the script; whatever it emits is filed on the
         // execution record after the run (regardless of final status).
-        let artifact_state = match registry.artifacts_tree() {
-            Ok(tree) => Some(ArtifactState::new(
-                ArtifactStore::new(tree),
-                Some(id.clone()),
-            )),
-            Err(e) => {
-                tracing::warn!("artifact store unavailable for execution {}: {}", id, e);
-                None
+        // The blocking worker must not touch the host's artifact tree. Host-owned
+        // execution leaves the artifact API uninstalled until it has an owner bridge.
+        let artifact_state = if host_console_writer.is_some() {
+            None
+        } else {
+            match registry.artifacts_tree() {
+                Ok(tree) => Some(ArtifactState::new(
+                    ArtifactStore::new(tree),
+                    Some(id.clone()),
+                )),
+                Err(e) => {
+                    tracing::warn!("artifact store unavailable for execution {}: {}", id, e);
+                    None
+                }
             }
         };
 
@@ -2991,6 +2997,7 @@ impl Engine {
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
+                            .maybe_host_console_writer(host_console_writer)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
                             .maybe_artifact_state(ast),

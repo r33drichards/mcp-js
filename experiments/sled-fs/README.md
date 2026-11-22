@@ -72,14 +72,14 @@ this isolated workspace. Its lockfile pins Turmoil and records the full closure.
 
 ## Crash and determinism limits
 
-Turmoil 0.7.2 `Sim::crash` calls `rt.crash()` **before** discarding pending FS
-operations. That drops futures, and sled `Log::drop` flushes. The crash tests
-therefore explicitly `mem::forget` the bounded Db instance before yielding.
-There are no background flushers/workers that can later persist it. The old
-instance is never used again; a fresh Db performs recovery. This leaks a small
-amount of memory per test; it is a test technique, not a production crash API.
-Do not use normal Db drop as a crash. A reusable crash-safe ownership mechanism
-and invalidation of outstanding handles remain future work.
+Turmoil 0.7.2 `Sim::crash` drops the runtime before discarding pending
+filesystem operations. In the real JS scenario controller and the isolated
+storage regression, a per-incarnation power-loss flag is set immediately
+before the crash, preventing sled's log destructor from flushing. A fresh
+opener gets a new flag. The regression proves both survival of an explicitly
+flushed blob and loss of an unflushed control write. Some older isolated
+fault fixtures still retain bounded handles rather than exercise destructor
+behavior. Do not use normal Db drop as a power-loss simulation.
 The multi-node fixture also retains one bounded Arc per host incarnation through
 teardown: dropping sled after Turmoil removes a host context can access an
 unset scoped context. These leaked test handles are never reused; this is not
@@ -114,11 +114,12 @@ actual writes.
 
 The opt-in Turmoil backend now fsyncs newly written config bytes and syncs
 newly created blob/journal directory entries (including parent directories)
-before a durable cluster write can be acknowledged. The crash fixture tests
-that guarantee both with and without redundant fixture-side sync. The default
-std backend is unchanged. Blob roundtrips are clean-reopen tests, not proof that
-flushed blob values survive crashes. Snapshot rename/delete ordering, blob
-references, and interrupted writes still need a separate durability study.
+before a durable cluster write can be acknowledged. Before publishing a blob reference, sled also syncs the blob contents and its
+directory entry. The crash fixture checks recovery without fixture-side
+sync, and verifies that recovery removes a durable blob orphaned by an
+unflushed reference. The default std backend is unchanged. Snapshot
+rename/delete ordering and interrupted writes still need a separate
+durability study.
 
 ## Source provenance and review
 

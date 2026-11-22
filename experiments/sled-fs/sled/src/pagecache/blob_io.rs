@@ -90,12 +90,17 @@ pub(crate) fn write_blob<T: Serialize>(
     io_fail!(config, "write_blob write kind_byte");
     f.write_all(kind_buf)?;
     io_fail!(config, "write_blob write buf");
-    f.write_all(&data)
-        .map(|r| {
-            trace!("successfully wrote blob at {:?}", path);
-            r
-        })
-        .map_err(|e| e.into())
+    f.write_all(&data)?;
+    // A durable journal record must never point to an unsynced blob.
+    // Keep the original std backend behavior; the simulated filesystem
+    // models file contents and directory entries as separate writes.
+    #[cfg(feature = "turmoil-fs")]
+    {
+        f.sync_all()?;
+        crate::fs::sync_dir(config.get_path().join("blobs"))?;
+    }
+    trace!("successfully wrote blob at {:?}", path);
+    Ok(())
 }
 
 pub(crate) fn gc_blobs(config: &Config, stable_lsn: Lsn) -> Result<()> {

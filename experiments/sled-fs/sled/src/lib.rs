@@ -92,8 +92,10 @@
     trivial_casts,
     trivial_numeric_casts,
     unsafe_code,
-    unused_qualifications
 )]
+// New rustc versions put additional std items into scope, making untouched
+// upstream sled qualifications redundant. This fork is built as a path crate.
+#![warn(unused_qualifications)]
 #![deny(
     // over time, consider enabling the commented-out lints below
     clippy::cast_lossless,

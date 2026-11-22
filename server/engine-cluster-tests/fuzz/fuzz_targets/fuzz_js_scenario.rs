@@ -7,7 +7,7 @@
 //! iterations, at most two faults, and bounded fault windows, so one exec
 //! stays near the CI runner's budget.
 #![no_main]
-use engine_cluster_tests::scenario::{Assertion, CrashTarget, Fault, Op, Program, Recovery, Scenario, Step, Topology, Workload};
+use engine_cluster_tests::scenario::{Assertion, Fault, Op, Program, Recovery, Scenario, Step, Topology, Workload};
 use libfuzzer_sys::fuzz_target;
 
 struct Rng(u64);
@@ -47,6 +47,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             })
             .chain(std::iter::once((b'0' + (s as u8)) as char))
+            .chain("-{i}".chars())
             .collect();
         steps.push(Step::Write {
             path: format!("/data/fuzz-{}", s),
@@ -54,13 +55,13 @@ fuzz_target!(|data: &[u8]| {
         });
     }
 
-    // 0-2 faults drawn from partition shapes, heal, and leader crash.
+    // The modeled runner cannot reopen a fresh JS engine after a crash.
+    // Exercise only network faults and start after the initial election.
     let mut faults: Vec<Fault> = Vec::new();
     let fault_count = r.below(3);
-    let mut at = 500 + r.below(400);
+    let mut at = 700 + r.below(400);
     for _ in 0..fault_count {
-        let kind = r.below(3);
-        let fault = match kind {
+        let fault = match r.below(2) {
             0 => Fault::Partition {
                 at_ms: at,
                 groups: match r.below(3) {
@@ -69,11 +70,7 @@ fuzz_target!(|data: &[u8]| {
                     _ => vec![vec!["n0".into(), "n1".into()], vec!["n2".into()]],
                 },
             },
-            1 => Fault::HealAll { at_ms: at },
-            _ => Fault::Crash {
-                at_ms: at,
-                node: CrashTarget::CurrentLeader,
-            },
+            _ => Fault::HealAll { at_ms: at },
         };
         faults.push(fault);
         at += 800 + r.below(800);
@@ -111,5 +108,5 @@ fuzz_target!(|data: &[u8]| {
     // Serialize -> parse: the same path a saved artifact replays through.
     let json = scenario.to_json();
     let parsed = Scenario::from_json(&json).expect("generated scenario parses");
-    let _result = parsed.run_and_dump("fuzz-scenario"); // assertions run inside the runner
+    parsed.assert_fuzz_case(&format!("fuzz-scenario-{}-{seed}", std::process::id()));
 });

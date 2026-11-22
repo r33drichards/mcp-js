@@ -110,10 +110,9 @@ where
 {
     let shared = Rc::new(RefCell::new(HashMap::<String, Arc<ClusterNode>>::new()));
     let restarts = Rc::new(RefCell::new(HashMap::<String, watch::Sender<()>>::new()));
-    let run_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
+    // Declare the directory first so the simulated hosts and sled handles
+    // are dropped before it, including when the scenario panics.
+    let db_root = tempfile::tempdir().expect("create peer simulation directory");
     let mut sim = turmoil::Builder::new()
         .rng_seed(seed)
         .enable_random_order()
@@ -151,7 +150,7 @@ where
         let shared = shared.clone();
         // Durable store: the same path is reopened after a crash, so committed
         // state survives the restart like a real process restart would.
-        let db_path = std::env::temp_dir().join(format!("mcp-turmoil-{run_id}-{name}"));
+        let db_path = db_root.path().join(name);
         let (tx, rx) = watch::channel(());
         restarts.borrow_mut().insert(name.to_owned(), tx);
         sim.host(name, move || {

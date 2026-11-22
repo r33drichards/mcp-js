@@ -20,7 +20,9 @@ use server::engine::Engine;
 use server::engine::execution::ExecutionRegistry;
 use server::engine::fs::FsConfig;
 use server::engine::fs_store::FsStore;
-use server::engine::fs_labels::{CaId, RefLogEntry};
+use server::engine::fs_labels::CaId;
+#[cfg(feature = "real-sled")]
+use server::engine::fs_labels::RefLogEntry;
 use server::engine::fs_labels::LabelStore;
 use server::engine::opa::{EvalMode, PolicyChain};
 use server::engine::parse_ca_hex;
@@ -185,17 +187,28 @@ impl Program {
     /// substituted with the iteration index.
     pub fn render_js(&self, i: usize) -> String {
         let mut body = String::new();
+        let iteration = i.to_string();
         for step in &self.0 {
             match step {
                 Step::Write { path, bytes } => {
-                    let bytes = bytes.replace("{i}", &i.to_string());
-                    body.push_str(&format!(
-                        "  await fs.writeFile(\"{path}\", \"{bytes}\");\n"
-                    ));
+                    let path = serde_json::to_string(path).expect("path serializes");
+                    let bytes = serde_json::to_string(&bytes.replace("{i}", &iteration))
+                        .expect("payload serializes");
+                    body.push_str(&format!("  await fs.writeFile({path}, {bytes});\n"));
                 }
             }
         }
         format!("(async () => {{\n{body}}})()")
+    }
+
+    fn apply_model(&self, model: &mut Model, i: usize) {
+        let iteration = i.to_string();
+        for Step::Write { path, bytes } in &self.0 {
+            model.insert(
+                path.clone(),
+                bytes.replace("{i}", &iteration).into_bytes(),
+            );
+        }
     }
 }
 
@@ -265,6 +278,16 @@ impl Scenario {
         result.dump(self, name);
         result
     }
+
+    /// Run fuzz inputs through the same assertions without writing successful
+    /// iterations to disk. A failure keeps its replay artifacts and panics.
+    pub fn assert_fuzz_case(&self, name: &str) {
+        let mut result = run_scenario(self);
+        if result.status.is_err() {
+            result.dump(self, name);
+            result.expect_status("all assertions passed");
+        }
+    }
 }
 
 /// Replay a persisted scenario artifact; a failure replays without fuzzing.
@@ -318,6 +341,31 @@ impl Outcome {
 
 /// Independent expected state: files that acknowledged operations wrote.
 pub type Model = BTreeMap<String, Vec<u8>>;
+
+// Only CAS calls with a genuinely unknown result may explain a head newer
+// than the last acknowledged publication. A definitive conflict cannot.
+type UnresolvedCas = BTreeMap<String, usize>;
+
+fn legal_final_head(head: Option<&str>, acked: &[String], unresolved: &UnresolvedCas) -> bool {
+    head == acked.last().map(String::as_str)
+        || head.is_some_and(|head| unresolved.contains_key(head))
+}
+
+fn model_at_head(
+    program: Option<&Program>,
+    model: &Model,
+    acked: &[String],
+    unresolved: &UnresolvedCas,
+    head: &str,
+) -> Model {
+    let mut expected = model.clone();
+    if acked.last().map(String::as_str) != Some(head) {
+        if let (Some(program), Some(iteration)) = (program, unresolved.get(head)) {
+            program.apply_model(&mut expected, *iteration);
+        }
+    }
+    expected
+}
 
 // ------------------------------------------------------------------ runner
 
@@ -405,14 +453,9 @@ fn now_ms(start: tokio::time::Instant) -> u64 {
 }
 
 
-fn engine_with_cluster(node: Arc<ClusterNode>, tag: &str) -> (Arc<Engine>, Arc<FsStore>) {
-    let registry = ExecutionRegistry::new(
-        std::env::temp_dir()
-            .join(format!("mcp-scenario-eng-{tag}-{}-{}", std::process::id(), RUN_ID.with(|c| c.borrow().clone())))
-            .to_str()
-            .unwrap(),
-    )
-    .expect("registry");
+fn engine_with_cluster(node: Arc<ClusterNode>, path: &std::path::Path) -> (Arc<Engine>, Arc<FsStore>) {
+    let registry = ExecutionRegistry::new(path.to_str().expect("registry path is UTF-8"))
+        .expect("registry");
     let fs_config = FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
     let store = Arc::new(FsStore::in_memory());
     let labels = LabelStore::in_memory().with_cluster(node);
@@ -785,9 +828,10 @@ fn run_scenario(scenario: &Scenario) -> ScenarioResult { real::run_scenario(scen
 /// Ordinary sled control: the original scenario runner remains unchanged.
 #[cfg(not(feature = "real-sled"))]
 fn run_scenario(scenario: &Scenario) -> ScenarioResult {
-    RUN_ID.with(|c| {
-        *c.borrow_mut() = format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-    });
+    let root = match tempfile::tempdir() {
+        Ok(root) => root,
+        Err(error) => return blank(Err(format!("scenario storage directory: {error}"))),
+    };
     let shared: Nodes = Rc::new(RefCell::new(HashMap::new()));
     let restarts: Restarts = Rc::new(RefCell::new(HashMap::new()));
     let max_fault = scenario.faults.iter().map(|f| f.at_ms()).max().unwrap_or(0);
@@ -828,6 +872,7 @@ fn run_scenario(scenario: &Scenario) -> ScenarioResult {
         };
         let shared = shared.clone();
         let restart_tx = restarts.clone();
+        let db_path = root.path().join(name);
         sim.host(name, move || {
             let shared = shared.clone();
             let config = config.clone();
@@ -836,15 +881,11 @@ fn run_scenario(scenario: &Scenario) -> ScenarioResult {
             restarts_map.insert(name.to_owned(), tx);
             drop(restarts_map);
             let mut rx = rx;
+            let db_path = db_path.clone();
             async move {
                 loop {
                     // Same restart pattern as the peer simulator: reopen the
                     // durable sled path so committed state survives crashes.
-                    let db_path = std::env::temp_dir().join(format!(
-                        "mcp-scenario-sled-{name}-{}-{}",
-                        std::process::id(),
-                        RUN_ID.with(|c| c.borrow().clone())
-                    ));
                     let db = {
                         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
                         let mut reported = false;
@@ -903,7 +944,8 @@ fn run_scenario(scenario: &Scenario) -> ScenarioResult {
         });
     }
     let sc = scenario.clone();
-    sim.client("observer", async move { run_client(sc, shared, restarts).await });
+    let registry_path = root.path().join("execution-registry");
+    sim.client("observer", async move { run_client(sc, shared, restarts, registry_path).await });
     if let Err(e) = sim.run() {
         return blank(Err(format!("turmoil simulation failed: {e}")));
     }
@@ -912,7 +954,6 @@ fn run_scenario(scenario: &Scenario) -> ScenarioResult {
 
 thread_local! {
     static LAST_RESULT: RefCell<Option<ScenarioResult>> = const { RefCell::new(None) };
-    static RUN_ID: RefCell<String> = RefCell::new(String::new());
 }
 
 fn store_result(r: ScenarioResult) {
@@ -925,7 +966,12 @@ fn take_result() -> ScenarioResult {
         .unwrap_or_else(|| blank(Err("scenario client never completed".into())))
 }
 
-async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil::Result {
+async fn run_client(
+    sc: Scenario,
+    shared: Nodes,
+    restarts: Restarts,
+    registry_path: std::path::PathBuf,
+) -> turmoil::Result {
     let start = tokio::time::Instant::now();
     let mut events: Vec<ScenarioEvent> = Vec::new();
     let mut acked: Vec<String> = Vec::new();
@@ -933,7 +979,7 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
     let mut failed: Vec<String> = Vec::new();
     let mut model: Model = BTreeMap::new();
     let mut crashed: Vec<String> = Vec::new();
-    let mut attempted: Vec<String> = Vec::new();
+    let mut unresolved = UnresolvedCas::new();
 
     // Election boundary: wait for a leader and record it.
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -963,7 +1009,7 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
         Arc::new(LabelStore::in_memory().with_cluster(nodes[&follower].clone()));
     let op_node = sc.workload.op.resolve_node(&leader);
     let (op_engine, fs_store) = match nodes.get(&op_node) {
-        Some(n) => engine_with_cluster(n.clone(), "op"),
+        Some(n) => engine_with_cluster(n.clone(), &registry_path),
         None => {
             store_result(blank(Err(format!("workload node {op_node} missing"))));
             return Ok(());
@@ -1075,26 +1121,35 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
                     Outcome::Failed { error: e }
                 }
                 JsResult::Head(h) => {
-                    attempted.push(h.clone());
-                    let Some(ca) = parse_ca_hex(&h) else { failed.push(format!("op{op_id}:bad-ca-hex")); ops_done += 1; op_start = tokio::time::Instant::now() + Duration::from_millis(sc.workload.every_ms); continue; };
-                    let expect = observer_store.resolve("main").await.ok().flatten();
-                    match observer_store.cas("main", expect, ca, None).await {
-                        Ok(true) => {
-                            acked.push(h.clone());
-                            if let Op::RunJs { program, .. } = &sc.workload.op {
-                                for step in &program.0 {
-                                    if let Step::Write { path, bytes } = step {
-                                        model.insert(path.clone(), bytes.replace("{i}", &i.to_string()).into_bytes());
-                                    }
-                                }
+                    match parse_ca_hex(&h) {
+                        None => {
+                            let error = "JS returned an invalid snapshot head".to_owned();
+                            failed.push(format!("op{op_id}:{error}"));
+                            Outcome::Failed { error }
+                        }
+                        Some(ca) => match observer_store.resolve("main").await {
+                            Err(error) => {
+                                let error = format!("resolve before CAS: {error}");
+                                failed.push(format!("op{op_id}:{error}"));
+                                Outcome::Failed { error }
                             }
-                            Outcome::Acked { head: h }
-                        }
-                        Ok(false) => Outcome::Conflict,
-                        Err(_) => {
-                            unknown.push(format!("op{op_id}"));
-                            Outcome::Unknown
-                        }
+                            Ok(expect) => match observer_store.cas("main", expect, ca, None).await {
+                                Ok(true) => {
+                                    acked.push(h.clone());
+                                    unresolved.clear();
+                                    if let Op::RunJs { program, .. } = &sc.workload.op {
+                                        program.apply_model(&mut model, i);
+                                    }
+                                    Outcome::Acked { head: h }
+                                }
+                                Ok(false) => Outcome::Conflict,
+                                Err(_) => {
+                                    unknown.push(format!("op{op_id}"));
+                                    unresolved.insert(h, i);
+                                    Outcome::Unknown
+                                }
+                            },
+                        },
                     }
                 }
             };
@@ -1133,7 +1188,6 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
     // publishes within the recovery budget. Every retry has a distinct JS
     // write and operation ID; no timeout is interpreted as non-commit.
     let mut fresh_write_acked = false;
-    let mut fresh_attempted_iteration = None;
     if sc.asserts.contains(&Assertion::FreshWriteSucceeds) {
         let target = sc.workload.op.resolve_node(&leader);
         let deadline = tokio::time::Instant::now()
@@ -1154,18 +1208,19 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
             } else if let Op::RunJs { program, .. } = &sc.workload.op {
                 match run_js(&op_engine, &program.render_js(iteration)).await {
                     JsResult::Head(head) => {
-                        fresh_attempted_iteration = Some(iteration);
-                        attempted.push(head.clone());
                         match parse_ca_hex(&head) {
                             None => Outcome::Failed { error: "fresh JS returned invalid head".into() },
                             Some(ca) => match observer_store.resolve("main").await {
-                                Err(_) => Outcome::Unknown,
+                                Err(error) => Outcome::Failed { error: format!("resolve before fresh CAS: {error}") },
                                 Ok(expect) => {
                                     fresh_head_advanced = expect.as_ref() != Some(&ca);
                                     match observer_store.cas("main", expect, ca, None).await {
                                         Ok(true) => Outcome::Acked { head },
                                         Ok(false) => Outcome::Conflict,
-                                        Err(_) => Outcome::Unknown,
+                                        Err(_) => {
+                                            unresolved.insert(head, iteration);
+                                            Outcome::Unknown
+                                        },
                                     }
                                 },
                             },
@@ -1184,11 +1239,9 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
                     // not a fresh snapshot publication.
                     fresh_write_acked = fresh_head_advanced;
                     acked.push(head.clone());
+                    unresolved.clear();
                     if let Op::RunJs { program, .. } = &sc.workload.op {
-                        for step in &program.0 {
-                            let Step::Write { path, bytes } = step;
-                            model.insert(path.clone(), bytes.replace("{i}", &iteration.to_string()).into_bytes());
-                        }
+                        program.apply_model(&mut model, iteration);
                     }
                 }
                 Outcome::Unknown => unknown.push(format!("op{op_id}")),
@@ -1204,38 +1257,34 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
     // set: the last acked head, or the head of a final unresolved operation
     // (an unknown outcome may have committed; it is only reconciled by
     // observation, never assumed).
-    let nodes = shared.borrow().clone();
     let mut final_heads: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut no_convergence: Option<String> = None;
     let deadline = tokio::time::Instant::now() + Duration::from_millis(sc.recovery.deadline_ms);
     loop {
         final_heads.clear();
-        for name in ["n0", "n1", "n2"] {
-            let head = match nodes.get(name) {
-                Some(n) => {
-                    let s = LabelStore::in_memory().with_cluster(n.clone());
-                    s.resolve("main").await.ok().flatten().map(|c| to_hex(&c))
-                }
-                None => None,
+        let nodes = shared.borrow().clone();
+        let mut errors = BTreeMap::new();
+        for &name in &HOSTS[..3] {
+            let read = match nodes.get(name) {
+                Some(node) => LabelStore::in_memory().with_cluster(node.clone())
+                    .resolve("main").await.map(|head| head.map(|c| to_hex(&c))),
+                None => Err(format!("host {name} absent")),
             };
-            final_heads.insert(name.to_string(), head);
+            match read {
+                Ok(head) => { final_heads.insert(name.to_owned(), head); }
+                Err(error) => { errors.insert(name, error.to_string()); }
+            }
         }
-        let heads: Vec<Option<String>> = final_heads.values().cloned().collect();
-        let first = heads.first().cloned().flatten();
-        let all_equal = heads.iter().all(|h| h.as_ref() == first.as_ref());
-        // Legal final head: nothing published, or any head an operation
-        // actually produced (an unknown outcome may have committed; it is
-        // reconciled by observation, never assumed).
-        let legal = first.is_none()
-            || attempted.iter().any(|h| Some(h.as_str()) == first.as_deref());
-        if all_equal && legal {
+        let first = final_heads.values().next().and_then(Option::as_deref);
+        let all_equal = final_heads.values().all(|h| h.as_deref() == first);
+        if errors.is_empty() && all_equal && legal_final_head(first, &acked, &unresolved) {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
             // Record and continue: the event log and artifacts must survive a
             // failed convergence so the scenario replays and diagnoses.
             no_convergence = Some(format!(
-                "replicas did not converge within recovery deadline: {final_heads:?} acked={acked:?} attempted={attempted:?} unknown={unknown:?}"
+                "replicas did not converge within recovery deadline: {final_heads:?} reads={errors:?} acked={acked:?} unresolved={unresolved:?}"
             ));
             break;
         }
@@ -1250,26 +1299,21 @@ async fn run_client(sc: Scenario, shared: Nodes, restarts: Restarts) -> turmoil:
     for assertion in &sc.asserts {
         let at = now_ms(start);
         let name = format!("{assertion:?}");
-        let reconcile = {
-            let mut m: Model = BTreeMap::new();
-            if let Op::RunJs { program, .. } = &sc.workload.op {
-                for step in &program.0 {
-                    if let Step::Write { path, bytes } = step {
-                        m.insert(path.clone(), bytes.replace("{i}", &fresh_attempted_iteration.unwrap_or_else(|| sc.workload.count.saturating_sub(1)).to_string()).into_bytes());
-                    }
-                }
-            }
-            m
+        let program = match &sc.workload.op {
+            Op::RunJs { program, .. } => Some(program),
+            Op::RunJsUnmodeled { .. } => None,
         };
         let passed = if *assertion == Assertion::NoUnexpectedJsFailure {
             failed.is_empty()
         } else if *assertion == Assertion::FreshWriteSucceeds {
             fresh_write_acked
+        } else if *assertion == Assertion::ReplicasConvergeAfterRecovery {
+            no_convergence.is_none()
         } else {
-            check_assertion(assertion, &observer_store, &fs_store, &final_heads, &acked, &unknown, &model, &reconcile).await
+            check_assertion(assertion, &observer_store, &fs_store, &final_heads, &acked, &model, &unresolved, program).await
         };
         events.push(ScenarioEvent::Assert { at_ms: at, name: name.clone(), passed });
-        if !passed {
+        if !passed && status.is_ok() {
             status = Err(format!("assertion failed: {name}"));
         }
     }
@@ -1284,9 +1328,9 @@ async fn check_assertion(
     fs_store: &Arc<FsStore>,
     final_heads: &BTreeMap<String, Option<String>>,
     acked: &[String],
-    _unknown: &[String],
     model: &Model,
-    reconcile: &Model,
+    unresolved: &UnresolvedCas,
+    program: Option<&Program>,
 ) -> bool {
     match assertion {
         Assertion::AckedCommitsInLegalHistory => {
@@ -1300,26 +1344,17 @@ async fn check_assertion(
             let final_head = final_heads.values().next().cloned().flatten();
             acked.iter().all(|h| tos.contains(h) || final_head.as_deref() == Some(h.as_str()))
         }
-        Assertion::ReplicasConvergeAfterRecovery => {
-            let heads: Vec<Option<&String>> = final_heads.values().map(|h| h.as_ref()).collect();
-            heads.windows(2).all(|w| w[0] == w[1])
-        }
+        Assertion::ReplicasConvergeAfterRecovery => unreachable!("checked against replica reads"),
         Assertion::PublishedSnapshotMatchesModel => {
-            // The published head's content must match the independent model.
             let final_head = match final_heads.values().next().cloned().flatten() {
                 Some(h) => h,
-                // Nothing published: the model must also be empty.
                 None => return model.is_empty(),
             };
-            for (path, expected) in model {
-                let actual = read_file_at(fs_store, &final_head, path).await;
-                match actual {
-                    Some(bytes) if bytes == *expected => {},
-                    // A final unknown op that committed is reconciled by
-                    // observation: its content matches what it would have
-                    // written.
-                    Some(bytes) if bytes == *reconcile.get(path).unwrap_or(&bytes) => {},
-                    _ => return false,
+            for (path, expected) in model_at_head(program, model, acked, unresolved, &final_head) {
+                if read_file_at(fs_store, &final_head, &path).await.as_deref()
+                    != Some(expected.as_slice())
+                {
+                    return false;
                 }
             }
             true
@@ -1335,5 +1370,88 @@ impl Drop for ScenarioHost {
         self.console_bridge.revoke();
         self._pump.abort();
         self._console_pump.abort();
+    }
+}
+
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+
+    #[test]
+    fn js_write_preserves_path_and_payload() {
+        let path = "/data/a\"\\\nfile";
+        let payload = "value-\"\\\r\n-{i}";
+        let program = Program(vec![Step::Write { path: path.into(), bytes: payload.into() }]);
+        let js = program.render_js(7);
+        let args = js.lines().nth(1).unwrap().trim()
+            .strip_prefix("await fs.writeFile(").unwrap().strip_suffix(");").unwrap();
+        let args: (String, String) = serde_json::from_str(&format!("[{args}]")).unwrap();
+        assert_eq!(args, (path.to_string(), payload.replace("{i}", "7")));
+        let mut model = Model::new();
+        program.apply_model(&mut model, 7);
+        assert_eq!(model[path], args.1.into_bytes());
+    }
+
+    #[test]
+    fn final_head_is_latest_ack_or_later_unknown() {
+        let acked = vec!["stale".into(), "latest".into()];
+        let unresolved = UnresolvedCas::from([("uncertain".into(), 3)]);
+        assert!(legal_final_head(Some("latest"), &acked, &unresolved));
+        assert!(legal_final_head(Some("uncertain"), &acked, &unresolved));
+        for illegal in [None, Some("stale"), Some("conflicted")] {
+            assert!(!legal_final_head(illegal, &acked, &unresolved));
+        }
+        assert!(legal_final_head(None, &[], &unresolved));
+    }
+
+    #[cfg(not(feature = "real-sled"))]
+    #[tokio::test]
+    async fn host_owned_workers_do_not_write_artifacts_or_bypass_revoked_console() {
+        use server::engine::console::HostConsoleBridge;
+        use server::engine::heap_storage::{AnyHeapStorage, FileHeapStorage};
+
+        server::engine::initialize_v8();
+        for stateful in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let registry_path = dir.path().join("registry");
+            let registry = Arc::new(ExecutionRegistry::new(registry_path.to_str().unwrap()).unwrap());
+            let (bridge, pump) = HostConsoleBridge::new(registry.clone());
+            let local_pump = tokio::spawn(pump);
+            let mut engine = if stateful {
+                let heap_path = dir.path().join("heap");
+                let heap = AnyHeapStorage::File(FileHeapStorage::new(heap_path.to_str().unwrap()));
+                Engine::new_stateful(heap, None, None, 64 << 20, 10, 1)
+            } else {
+                Engine::new_stateless(64 << 20, 10, 1)
+            };
+            engine = engine.with_execution_registry(registry.clone())
+                .with_host_console_bridge(bridge.clone());
+
+            for revoked in [false, true] {
+                if revoked {
+                    bridge.revoke();
+                }
+                let id = engine.run_js(
+                    "if (typeof artifact !== 'undefined') throw Error('host artifact API was installed'); console.log('owner console');",
+                ).execute().await.unwrap();
+                let info = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let info = engine.get_execution(id.clone()).unwrap();
+                        if !matches!(info.status.as_str(), "running" | "pending" | "queued") {
+                            break info;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }).await.unwrap();
+                if !revoked {
+                    assert_eq!(info.status, "completed", "{:?}", info.error);
+                }
+                let page = registry.get_console_output(&id, None, None, None, None).unwrap();
+                assert_eq!(page.data.contains("owner console"), !revoked, "stateful={stateful}");
+            }
+            local_pump.abort();
+            let _ = local_pump.await;
+        }
     }
 }

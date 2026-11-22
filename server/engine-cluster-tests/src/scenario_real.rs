@@ -3,7 +3,7 @@
 use super::*;
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Clone)]
 enum HostAction {
@@ -114,13 +114,16 @@ pub(super) fn run_scenario(sc: &Scenario) -> ScenarioResult {
     let finished = Rc::new(Cell::new(false));
     let max_fault = sc.faults.iter().map(Fault::at_ms).max().unwrap_or(0);
     let total_secs = 60 + max_fault / 1000 + sc.recovery.deadline_ms / 1000;
-    let mut sim = turmoil::Builder::new()
+    let mut builder = turmoil::Builder::new();
+    builder.fs().sync_probability(0.0);
+    let mut sim = builder
         .rng_seed(sc.seed)
         .enable_random_order()
         .min_message_latency(Duration::from_millis(1))
         .max_message_latency(Duration::from_millis(3))
         .simulation_duration(Duration::from_secs(total_secs))
         .build();
+    let mut crash_flags = BTreeMap::new();
     for (i, name) in ["n0", "n1", "n2"].into_iter().enumerate() {
         let peers: Vec<_> = ["n0", "n1", "n2"]
             .into_iter()
@@ -145,13 +148,16 @@ pub(super) fn run_scenario(sc: &Scenario) -> ScenarioResult {
             learner: false,
         };
         let opened = Arc::new(AtomicU64::new(0));
+        let crash_flag = Rc::new(RefCell::new(Arc::new(AtomicBool::new(false))));
+        crash_flags.insert(name, crash_flag.clone());
         sim.host(name, move || {
             let cfg = cfg.clone();
             let opened = opened.clone();
+            let crash_flag = crash_flag.borrow().clone();
             async move {
                 // Turmoil gives each named host its own persistent simulated FS.
                 let db = sled::Config::new().path("/scenario-db")
-                    .flush_every_ms(None).open()?;
+                    .flush_every_ms(None).simulated_power_loss(crash_flag).open()?;
                 let generation = opened.fetch_add(1, Ordering::SeqCst) + 1;
                 let node = ClusterNode::new(cfg, db.clone()).with_peer_rpc(Arc::new(SimRpc));
                 let host = Arc::new(ScenarioHost::new_with_generation(node.clone(), db, generation));
@@ -193,25 +199,39 @@ pub(super) fn run_scenario(sc: &Scenario) -> ScenarioResult {
         observer_finished.set(true);
         Ok(())
     });
+    let mut result = blank(Err("real-I/O scenario exceeded controller step budget".into()));
     for _ in 0..200_000 {
         let next = { control.borrow_mut().pending.pop_front() };
         if let Some((seq, action)) = next {
             match action {
-                HostAction::Crash(name) => sim.crash(name.as_str()),
-                HostAction::Bounce(name) => sim.bounce(name.as_str()),
+                HostAction::Crash(name) => {
+                    crash_flags[name.as_str()].borrow().store(true, Ordering::Release);
+                    sim.crash(name.as_str());
+                }
+                HostAction::Bounce(name) => {
+                    *crash_flags[name.as_str()].borrow_mut() = Arc::new(AtomicBool::new(false));
+                    sim.bounce(name.as_str());
+                }
             }
             control.borrow_mut().done = seq;
         }
         if finished.get() {
-            return take_result();
+            result = take_result();
+            break;
         }
-        if let Err(e) = sim.step() {
-            return blank(Err(format!("real-I/O simulation failed: {e}")));
+        if let Err(error) = sim.step() {
+            result = blank(Err(format!("real-I/O simulation failed: {error}")));
+            break;
         }
     }
-    blank(Err(
-        "real-I/O scenario exceeded controller step budget".into()
-    ))
+
+    // Drop host-owned sled handles while Turmoil still supplies their FS
+    // context. This is teardown of the finished simulation, not recovery.
+    for (name, flag) in crash_flags {
+        flag.borrow().store(true, Ordering::Release);
+        sim.crash(name);
+    }
+    result
 }
 
 async fn current_leader() -> Option<(String, u64)> {
@@ -229,7 +249,7 @@ async fn publish(
     iteration: usize,
     op_id: u64,
     acked: &mut Vec<String>,
-    attempted: &mut Vec<String>,
+    unresolved: &mut UnresolvedCas,
     unknown: &mut Vec<String>,
     failed: &mut Vec<String>,
     model: &mut Model,
@@ -262,7 +282,6 @@ async fn publish(
             };
         }
     };
-    attempted.push(head.clone());
     let Some(ca) = parse_ca_hex(&head) else {
         failed.push(format!("op{op_id}:bad-ca-hex"));
         return Outcome::Failed {
@@ -283,20 +302,16 @@ async fn publish(
     match client.cas("main", expect, ca).await {
         Ok(true) => {
             acked.push(head.clone());
+            unresolved.clear();
             if let Op::RunJs { program, .. } = &sc.workload.op {
-                for step in &program.0 {
-                    let Step::Write { path, bytes } = step;
-                    model.insert(
-                        path.clone(),
-                        bytes.replace("{i}", &iteration.to_string()).into_bytes(),
-                    );
-                }
+                program.apply_model(model, iteration);
             }
             Outcome::Acked { head }
         }
         Ok(false) => Outcome::Conflict,
         Err(_) => {
             unknown.push(format!("op{op_id}"));
+            unresolved.insert(head, iteration);
             Outcome::Unknown
         }
     }
@@ -308,7 +323,7 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
     let mut acked = Vec::new();
     let mut unknown = Vec::new();
     let mut failed = Vec::new();
-    let mut attempted = Vec::new();
+    let mut unresolved = UnresolvedCas::new();
     let mut model: Model = BTreeMap::new();
     let mut crashed = Vec::new();
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -364,7 +379,7 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
                 iteration,
                 op_id,
                 &mut acked,
-                &mut attempted,
+                &mut unresolved,
                 &mut unknown,
                 &mut failed,
                 &mut model,
@@ -486,7 +501,7 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
                 iteration,
                 op_id,
                 &mut acked,
-                &mut attempted,
+                &mut unresolved,
                 &mut unknown,
                 &mut failed,
                 &mut model,
@@ -524,9 +539,7 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
         }
         let head = final_heads.values().next().and_then(Option::as_ref);
         let equal = final_heads.values().all(|other| other.as_ref() == head);
-        let legal =
-            head.is_none() && acked.is_empty() || head.is_some_and(|h| attempted.contains(h));
-        if all_resolved && equal && legal {
+        if all_resolved && equal && legal_final_head(head.map(String::as_str), &acked, &unresolved) {
             converged = true;
             break;
         }
@@ -569,9 +582,13 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
                     None => model.is_empty(),
                     Some(head) => {
                         let mut matches = true;
-                        for (path, expected) in &model {
+                        let program = match &sc.workload.op {
+                            Op::RunJs { program, .. } => Some(program),
+                            Op::RunJsUnmodeled { .. } => None,
+                        };
+                        for (path, expected) in model_at_head(program, &model, &acked, &unresolved, &head) {
                             if client
-                                .read_file(&head, path)
+                                .read_file(&head, &path)
                                 .await
                                 .ok()
                                 .flatten()

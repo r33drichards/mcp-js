@@ -7,11 +7,12 @@ edition = "2024"
 members = ["fuzz"]
 
 [features]
-real-sled = ["turmoil/unstable-fs"]
+real-sled = ["turmoil/unstable-fs", "sled/turmoil-fs"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 sled = "0.34"
 deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "986c8b20c87024cc335cf18f6d14d55c0719a394" }
 tokio = { version = "1", features = ["full"] }
@@ -20,3 +21,6 @@ server = { path = ".." }
 
 [dev-dependencies]
 turmoil = "0.7.2"
+
+[patch.crates-io]
+sled = { path = "../../experiments/sled-fs/sled" }

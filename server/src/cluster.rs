@@ -1914,15 +1914,7 @@ impl ClusterNode {
     /// Scan all keys with the given prefix from the replicated data tree.
     /// Returns (key, value) pairs sorted lexicographically.
     pub fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, String> {
-        let data_tree = self.db.open_tree("data").map_err(|e| e.to_string())?;
-        let mut results = Vec::new();
-        for item in data_tree.scan_prefix(prefix.as_bytes()) {
-            let (key, value) = item.map_err(|e| e.to_string())?;
-            let key_str = String::from_utf8_lossy(&key).to_string();
-            let val_str = String::from_utf8_lossy(&value).to_string();
-            results.push((key_str, val_str));
-        }
-        Ok(results)
+        self.scan_prefix_window(prefix, false, None)
     }
 
     /// Return the current status of this node.

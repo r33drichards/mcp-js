@@ -212,6 +212,8 @@ pub struct Inner {
     pub version: (usize, usize),
     tmp_path: PathBuf,
     pub(crate) global_error: Arc<Atomic<Error>>,
+    #[cfg(feature = "turmoil-fs")]
+    pub(crate) power_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(feature = "event_log")]
     /// an event log for concurrent debugging
     pub event_log: Arc<event_log::EventLog>,
@@ -237,6 +239,8 @@ impl Default for Inner {
             flush_every_ms: Some(500),
             idgen_persist_interval: 1_000_000,
             global_error: Arc::new(Atomic::default()),
+            #[cfg(feature = "turmoil-fs")]
+            power_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "event_log")]
             event_log: Arc::new(crate::event_log::EventLog::default()),
         }
@@ -400,6 +404,20 @@ impl Config {
         }
         let m = Arc::make_mut(&mut self.0);
         m.flush_every_ms = every_ms;
+        self
+    }
+
+    /// Install a controller-owned flag for this database incarnation.
+    ///
+    /// Set it immediately before crashing the simulated host, so sled's
+    /// destructors cannot turn pending writes into durable ones. Reopen with
+    /// a new, clear flag after the crash.
+    #[cfg(feature = "turmoil-fs")]
+    pub fn simulated_power_loss(
+        mut self,
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Arc::make_mut(&mut self.0).power_lost = flag;
         self
     }
 
@@ -752,6 +770,10 @@ impl Config {
     /// an asynchronous IO operation.
     #[doc(hidden)]
     pub fn global_error(&self) -> Result<()> {
+        #[cfg(feature = "turmoil-fs")]
+        if self.power_lost.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::Io(std::io::Error::other("simulated power loss")));
+        }
         let guard = pin();
         let ge = self.global_error.load(Acquire, &guard);
         if ge.is_null() {
