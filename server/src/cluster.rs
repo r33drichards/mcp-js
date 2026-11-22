@@ -794,6 +794,14 @@ impl ClusterNode {
             .collect()
     }
 
+    /// Fault-injection hook for simulation/fuzz/replay harnesses (scheduler-runner
+    /// model_replay and the cluster regressions): when set, every durable write
+    /// fails and the node stops itself. Never set in production.
+    pub fn sim_storage_failure(&self, fail: bool) {
+        self.fail_flush
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn shutdown(&self) {
         self.shutdown.cancel();
     }

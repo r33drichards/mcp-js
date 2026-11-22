@@ -60,6 +60,10 @@ pub struct Worker {
     admission_bearer: String,
     client: reqwest::Client,
     execution_gate: tokio::sync::Mutex<()>,
+    /// Fault-injection hook for scheduler-runner admission replay: when set,
+    /// worker flushes fail. Never set in production.
+    #[cfg(test)]
+    fail_flush: std::sync::atomic::AtomicBool,
 }
 
 /// An owned, non-cloneable launch capability. No reconstruction from a receipt.
@@ -113,6 +117,8 @@ impl Worker {
         }
         Ok(Arc::new(Self {
             execution_gate: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            fail_flush: std::sync::atomic::AtomicBool::new(false),
             config,
             db,
             incarnation: format!("{:032x}", rand::random::<u128>()),
@@ -127,7 +133,17 @@ impl Worker {
         }))
     }
     fn flush(&self) -> Result<(), String> {
+        #[cfg(test)]
+        if self.fail_flush.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("injected worker flush failure".to_string());
+        }
         self.db.flush().map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_flush_failure(&self) {
+        self.fail_flush
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     /// Reserve before the network operation. Any uncertain/cancelled attempt remains
     /// consumed locally across restart, even if it never obtained quorum admission.
