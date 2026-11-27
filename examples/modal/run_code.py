@@ -19,10 +19,11 @@ def request(base_url, token, path, body=None):
     if body is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode()
-    req = Request(base_url.rstrip("/") + path, data, headers)
+    url = base_url.rstrip("/") + path
     deadline = time.monotonic() + STARTUP_RETRY_SECONDS
     timeout = 60
     while True:
+        req = Request(url, data, headers)
         try:
             with urlopen(req, timeout=timeout) as response:
                 return json.load(response)
