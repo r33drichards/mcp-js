@@ -3,12 +3,14 @@
 Deploy the published `mcp-js` Docker image once, then submit JavaScript
 whenever you need it. Use the same terminal for both steps. When the
 interpreter is idle, Modal can stop its container while keeping the endpoint
-available. The next request starts the container again.
+available. The next request starts the container again. The walkthrough
+uses the same stateful pattern as Modal’s interpreter example, with V8
+running the snippets. [Original Modal example](https://modal.com/docs/examples/simple_code_interpreter).
 
-## 1. Deploy the interpreter
+## 1. Set up the Modal CLI
 
-You need a Modal account and Python 3.10 or later for the local CLI. Install
-the CLI and sign in.
+Open a Bash terminal. You need a Modal account and Python 3.10 or later.
+Create a virtual environment, install the CLI, and sign in.
 
 ```sh
 python -m venv .venv
@@ -17,7 +19,28 @@ python -m pip install 'modal>=1.6.4'
 modal setup
 ```
 
-Save the deployment script as `deploy_interpreter.sh`.
+`modal setup` signs this terminal’s CLI into your Modal workspace so it can
+create the app and manage volumes. Keep the virtual environment active for
+the remaining steps. [Modal setup guide](https://modal.com/docs/guide).
+
+## 2. Deploy the interpreter
+
+Save the complete script below as `deploy_interpreter.sh`. It uses the
+published image’s entrypoint and sets up three volumes.
+
+| Path in the container | What it holds |
+| --- | --- |
+| `/data` | V8 heap snapshots and the records that tie those snapshots to session names. |
+| `/workspace` | Files your JavaScript can read and write through the filesystem policy. |
+| `/policies` | The Rego files the server loads at startup. |
+
+The script creates the policy volume first so it can upload the rules before
+deployment. `MCP_V8_POLICIES_JSON` points the interpreter at those files.
+The server evaluates the policies in-process. The deployment flags tell
+Modal to start the image on port 8080, allow scale-to-zero, and run at most
+one replica. [Modal Servers](https://modal.com/docs/guide/servers) ·
+[Modal Volumes](https://modal.com/docs/guide/volumes) ·
+[mcp-v8 policy evaluation](../concepts/policies.md#opa-vs-embedded-regorus).
 
 ```bash
 #!/usr/bin/env bash
@@ -105,23 +128,26 @@ bash deploy_interpreter.sh
 ```
 
 Modal prints an HTTPS URL and the deploy command exits. Copy that URL into
-`MCP_JS_URL` in the next step. Modal runs the stock image’s entrypoint
-directly, so the container only needs the published image. The script also
-uploads three Rego policy files using the local Modal CLI. The server
-evaluates them in-process, so there is no separate OPA service to deploy.
+`MCP_JS_URL` in the next step. To inspect the server’s mounts and autoscaling
+settings, run this command.
 
-## 2. Run JavaScript
+```sh
+modal server info mcp-js-code-interpreter/Server
+```
 
-In the same terminal, create a
-[Modal Proxy Token](https://modal.com/docs/guide/webhook-proxy-auth) for the
-HTTP endpoint. You can reuse one you already have for the environment.
+## 3. Authenticate and run JavaScript
+
+In the same terminal, create a Modal Proxy Token for the HTTP endpoint. You can reuse one you already have for the environment.
 
 ```sh
 modal workspace proxy-tokens create --name mcp-js-interpreter
 ```
 
-Set the URL from deployment and combine the proxy token ID and secret with
-a dot between them. Keep the token private.
+The CLI displays a proxy token ID beginning with `wk-` and a secret
+beginning with `ws-`. Set the URL from deployment, then paste the ID and
+secret joined by a dot when prompted. Bash reads the token without echoing
+it. The client passes it in the HTTP `Authorization` header. Keep the token
+private. [Modal proxy authentication](https://modal.com/docs/guide/webhook-proxy-auth).
 
 ```sh
 export MCP_JS_URL='https://YOUR-DEPLOYED-URL.modal.run'
@@ -197,8 +223,11 @@ if __name__ == "__main__":
     main()
 ```
 
-Run three separate commands. The first request might take longer while
-Modal starts the container.
+Run the commands in order. Each command submits a snippet with
+`POST /api/exec`, then uses the returned ID to poll for completion and read
+console output. The first request might take longer while Modal starts
+the container. [Asynchronous execution](../concepts/async-execution.md) ·
+[HTTP API reference](../reference/http-api.md).
 
 ```sh
 python run_code.py 'globalThis.x = 10'
@@ -206,14 +235,17 @@ python run_code.py 'globalThis.y = 5'
 python run_code.py 'console.log(x + y)'
 ```
 
-The first two commands produce no output. The third prints `15`. A new
-session has its own heap, so this command exits with a reference error.
+The first command sets `x`. The second restores the same heap and sets
+`y`. The third restores both values and prints `15`. All three use
+the default session name `tutorial`. Try the same read under a new name.
+It exits with a reference error because that session starts with a fresh
+heap. [Sessions and heap snapshots](../concepts/sessions-and-heaps.md).
 
 ```sh
 python run_code.py --session fresh 'console.log(x + y)'
 ```
 
-## Read and write the workspace volume
+## 4. Read and write files on the workspace volume
 
 The deploy script mounts `mcp-js-interpreter-workspace` at `/workspace`.
 The separate `/data` volume holds interpreter state, while `/policies`
@@ -233,15 +265,16 @@ python run_code.py 'console.log(await fs.readdir("/workspace"))'
 python run_code.py 'console.log(await fs.readFile("/workspace/reports/summary.txt", "utf8"))'
 ```
 
-The directory listing includes `reports`, and the final command prints
-`hello from Modal`. The rule uses the `/workspace/` prefix so a sibling
-such as `/workspace-other` stays outside the grant. It also rejects any
+The first command creates a subdirectory. The second writes a file there.
+The third lists the volume root and includes `reports`. The fourth reads the
+file as UTF-8 and prints `hello from Modal`. The rule uses the `/workspace/`
+prefix so a sibling such as `/workspace-other` stays outside the grant. It also rejects any
 `..` path component. Rego checks the supplied path before filesystem access,
 and the OS can still follow symlinks. Keep the dedicated workspace volume
 free of symlinks that point outside it. See
 [filesystem policy inputs and path handling](../concepts/filesystem.md).
 
-## Fetch data and import a module
+## 5. Fetch data and import a module
 
 The `mcp.fetch` rule permits HTTPS GET requests to `example.com` on its
 default port. Changing the method to POST or the host to another domain
@@ -250,6 +283,10 @@ causes a policy denial.
 ```sh
 python run_code.py 'console.log((await fetch("https://example.com/")).status)'
 ```
+
+The command prints the HTTP status from the upstream site. The policy
+checks the request fields before the server sends it. To allow your own
+API, edit the host in `fetch.rego` and add path or method conditions as needed. [Fetch policy examples](../how-to/fetch.md).
 
 To load an external module, the deployment enables
 `MCP_V8_ALLOW_EXTERNAL_MODULES` and the `mcp.modules` policy permits one
@@ -261,35 +298,35 @@ python run_code.py 'import escape from "https://cdn.jsdelivr.net/npm/escape-html
 
 The import example prints `&lt;tag&gt;`. To grant another capability, add
 its Rego file to the deployment script’s upload list and register it under
-the matching key in `policies`. For input fields and recipes for other
-capabilities, see [Security policies](../how-to/policies.md).
+the matching key in `policies`. [External module imports](../how-to/module-imports.md) ·
+[Recipes for other capabilities](../how-to/policies.md) ·
+[Policy input fields](../concepts/policies.md#per-category-input-documents).
 
 After editing a policy, rerun the deployment script and confirm the
 redeploy. A newly started server loads the uploaded rules. Keep the
 policy files on their separate volume so the workspace rule cannot modify
 them.
 
-## What happens when the app goes idle
+## 6. Check scale-to-zero and stop the app
 
-- **The endpoint stays deployed.** `--min-containers 0` lets Modal stop the
-  container after roughly 60 seconds without requests. An authenticated
-  request starts a new container when needed. `--max-containers 1` keeps
-  one server process writing to the state volume at a time. See
-  [Modal Servers](https://modal.com/docs/guide/servers).
-- **The named session lives on the volume.** The directory heap store writes
-  V8 snapshots to `/data/heaps` and saves session records under
-  `/data/sessions`. Both directories are on the mounted Modal Volume. Modal
-  commits the volume in the background and on normal shutdown, so the
-  next container can restore committed state. A sudden interruption can
-  lose writes since the last commit. To try a cold start, wait for the
-  deployment to show zero containers and rerun the third command. See
-  [Modal Volumes](https://modal.com/docs/guide/volumes).
-- **The client talks to the interpreter over HTTP.** The server queues
-  each snippet on `POST /api/exec`. The client uses the returned
-  execution ID to poll status and read captured console output. The
-  `tutorial` session name links the three commands. See the
-  [HTTP API reference](../reference/http-api.md).
+After roughly 60 seconds without requests, Modal can stop the container.
+Wait until the deployment shows zero containers in the Modal dashboard,
+then run the read again with the default session.
 
-To remove the endpoint when you’re done, run
-`modal app stop mcp-js-code-interpreter`. The volumes remain available
-for a later deployment.
+```sh
+python run_code.py 'console.log(x + y)'
+```
+
+This request starts a container and should print `15` from the saved heap.
+Modal commits volume changes in the background and on normal shutdown.
+The new container can restore committed state. A sudden interruption can
+lose writes since the last commit. [Modal autoscaling](https://modal.com/docs/guide/servers) ·
+[Modal Volume commits](https://modal.com/docs/guide/volumes).
+
+When you’re done with the endpoint, stop the app.
+
+```sh
+modal app stop mcp-js-code-interpreter
+```
+
+The volumes remain available for a later deployment.
