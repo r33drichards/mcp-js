@@ -10,8 +10,14 @@ package mcp.filesystem
 default allow := false
 
 allow if {
-    input.operation in {"readFile", "writeFile"}
-    input.path == "/workspace/report.txt"
+    input.operation in {"readFile", "writeFile", "mkdir", "readdir"}
+    startswith(input.path, "/workspace/")
+    not ".." in split(input.path, "/")
+}
+
+allow if {
+    input.operation == "readdir"
+    input.path == "/workspace"
 }
 REGO
 

@@ -32,8 +32,14 @@ package mcp.filesystem
 default allow := false
 
 allow if {
-    input.operation in {"readFile", "writeFile"}
-    input.path == "/workspace/report.txt"
+    input.operation in {"readFile", "writeFile", "mkdir", "readdir"}
+    startswith(input.path, "/workspace/")
+    not ".." in split(input.path, "/")
+}
+
+allow if {
+    input.operation == "readdir"
+    input.path == "/workspace"
 }
 REGO
 
@@ -215,20 +221,25 @@ holds the Rego files. `MCP_V8_POLICIES_JSON` maps each capability to the
 file that controls it.
 
 Mounting a volume makes it visible to the server process. The
-`mcp.filesystem` policy grants JavaScript two operations on one file.
-Each `fs` call is checked before the server touches the filesystem.
+`mcp.filesystem` policy lets JavaScript list directories, create
+directories, and read or write files anywhere under `/workspace`,
+including subdirectories. Each `fs` call is checked before the server
+touches the filesystem.
 
 ```sh
-python run_code.py 'await fs.writeFile("/workspace/report.txt", "hello from Modal")'
-python run_code.py 'console.log(await fs.readFile("/workspace/report.txt", "utf8"))'
+python run_code.py 'await fs.mkdir("/workspace/reports", {recursive: true})'
+python run_code.py 'await fs.writeFile("/workspace/reports/summary.txt", "hello from Modal")'
+python run_code.py 'console.log(await fs.readdir("/workspace"))'
+python run_code.py 'console.log(await fs.readFile("/workspace/reports/summary.txt", "utf8"))'
 ```
 
-The second command prints `hello from Modal`. A read of
-`/workspace/private.txt` fails with a policy denial. To grant access to
-more files, list their exact absolute paths in the rule and grant only
-the operations they need. The policy matches the path supplied by the
-script. Keep allowed paths on this dedicated data volume and free of
-symlinks. See [filesystem policy inputs and path handling](../concepts/filesystem.md).
+The directory listing includes `reports`, and the final command prints
+`hello from Modal`. The rule uses the `/workspace/` prefix so a sibling
+such as `/workspace-other` stays outside the grant. It also rejects any
+`..` path component. Rego checks the supplied path before filesystem access,
+and the OS can still follow symlinks. Keep the dedicated workspace volume
+free of symlinks that point outside it. See
+[filesystem policy inputs and path handling](../concepts/filesystem.md).
 
 ## Fetch data and import a module
 
