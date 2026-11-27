@@ -101,13 +101,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: gh workflow run npm-publish.yml --repo "$GITHUB_REPOSITORY" --ref "$VERSION"
-
-      - name: Dispatch Python wheel release
-        if: steps.policy.outputs.prerelease == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            gh workflow run python-publish.yml --repo "$GITHUB_REPOSITORY" --ref "$VERSION"
-          fi
