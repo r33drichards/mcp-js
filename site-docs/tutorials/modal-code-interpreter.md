@@ -25,30 +25,24 @@ the remaining steps. [Modal setup guide](https://modal.com/docs/guide).
 
 ## 2. Deploy the interpreter
 
-Save the complete script below as `deploy_interpreter.sh`. It uses the
-published image’s entrypoint and sets up three volumes.
-
-| Path in the container | What it holds |
-| --- | --- |
-| `/data` | V8 heap snapshots and the records that tie those snapshots to session names. |
-| `/workspace` | Files your JavaScript can read and write through the filesystem policy. |
-| `/policies` | The Rego files the server loads at startup. |
-
-The script creates the policy volume first so it can upload the rules before
-deployment. `MCP_V8_POLICIES_JSON` points the interpreter at those files.
-The server evaluates the policies in-process. The deployment flags tell
-Modal to start the image on port 8080, allow scale-to-zero, and run at most
-one replica. [Modal Servers](https://modal.com/docs/guide/servers) ·
-[Modal Volumes](https://modal.com/docs/guide/volumes) ·
-[mcp-v8 policy evaluation](../concepts/policies.md#opa-vs-embedded-regorus).
+Run the commands in this section in the same Bash terminal. First make
+a local directory for the policy files. You'll upload them to Modal
+before deploying the image.
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
 policy_dir=$(mktemp -d)
-trap 'rm -rf "$policy_dir"' EXIT
+printf "Policy files: %s\n" "$policy_dir"
+```
 
+### 2.1. Give JavaScript access to the workspace
+
+Write a filesystem policy that allows reading, writing, listing, and
+creating directories under `/workspace`. The rule checks the requested
+operation and path on each call. It rejects `..` path components, and the
+separate rule for `/workspace` itself lets JavaScript list the volume root.
+[Filesystem policy inputs and path handling](../concepts/filesystem.md).
+
+```bash
 cat >"$policy_dir/filesystem.rego" <<'REGO'
 package mcp.filesystem
 
@@ -65,7 +59,16 @@ allow if {
     input.path == "/workspace"
 }
 REGO
+```
 
+### 2.2. Allow outbound fetch to one host
+
+The fetch policy permits GET requests to `https://example.com` on the
+default HTTPS port. The server evaluates the method, scheme, host, and
+port before sending a request. To use your own API, change these conditions
+to match the requests it needs. [Fetch policy examples](../how-to/fetch.md).
+
+```bash
 cat >"$policy_dir/fetch.rego" <<'REGO'
 package mcp.fetch
 
@@ -78,7 +81,15 @@ allow if {
     input.url_parsed.port == null
 }
 REGO
+```
 
+### 2.3. Allow one external module
+
+The module policy checks the resolved import URL. This rule allows a
+specific version of `escape-html` from jsDelivr. The deployment command
+also enables the external module loader. [External module imports](../how-to/module-imports.md).
+
+```bash
 cat >"$policy_dir/modules.rego" <<'REGO'
 package mcp.modules
 
@@ -88,13 +99,16 @@ allow if {
     input.resolved_url == "https://cdn.jsdelivr.net/npm/escape-html@1.0.3/+esm"
 }
 REGO
+```
 
-policies='{
-  "filesystem": {"policies": [{"url": "file:///policies/filesystem.rego"}]},
-  "fetch": {"policies": [{"url": "file:///policies/fetch.rego"}]},
-  "modules": {"policies": [{"url": "file:///policies/modules.rego"}]}
-}'
+### 2.4. Upload the policies and tell mcp-v8 where to find them
 
+Create a Modal Volume for the policy files, then copy the three local
+files to its root. The create call reuses the volume if it already
+exists. The upload replaces files with the same names so you can repeat
+this step after editing a rule. [Modal Volumes](https://modal.com/docs/guide/volumes).
+
+```bash
 python - <<'PYTHON'
 import modal
 
@@ -104,7 +118,35 @@ PYTHON
 for name in filesystem fetch modules; do
   modal volume put --force mcp-js-interpreter-policies "$policy_dir/$name.rego" "/$name.rego"
 done
+```
 
+Define the policy configuration in the shell. The paths below are inside
+the server container, where the next step mounts the policy volume at
+`/policies`. At startup, mcp-v8 reads the Rego files at these paths and
+evaluates them in-process. [mcp-v8 policy evaluation](../concepts/policies.md#opa-vs-embedded-regorus).
+
+```bash
+policies='{
+  "filesystem": {"policies": [{"url": "file:///policies/filesystem.rego"}]},
+  "fetch": {"policies": [{"url": "file:///policies/fetch.rego"}]},
+  "modules": {"policies": [{"url": "file:///policies/modules.rego"}]}
+}'
+```
+
+### 2.5. Deploy the image and mount the volumes
+
+Run `modal server deploy` with the published image. Modal uses the image’s
+entrypoint to start mcp-v8 on port 8080. The deployment allows zero warm
+containers when idle and at most one active replica writing to the volumes.
+[Modal Servers](https://modal.com/docs/guide/servers).
+
+| Path in the container | What it holds |
+| --- | --- |
+| `/data` | V8 heap snapshots and the records that tie them to session names. |
+| `/workspace` | Files JavaScript can access through the filesystem policy. |
+| `/policies` | The three Rego files you uploaded. |
+
+```bash
 modal server deploy \
   --app-name mcp-js-code-interpreter \
   --image docker.io/wholelottahoopla/mcp-js:0.22.0 \
@@ -123,13 +165,9 @@ modal server deploy \
   --env-var MCP_V8_SESSION_DB_PATH=/data/sessions
 ```
 
-```sh
-bash deploy_interpreter.sh
-```
-
-Modal prints an HTTPS URL and the deploy command exits. Copy that URL into
-`MCP_JS_URL` in the next step. To inspect the server’s mounts and autoscaling
-settings, run this command.
+Modal prints an HTTPS URL and the deploy command exits. Save the URL for
+Step 3. You can inspect the deployed server’s mounts and autoscaling
+settings with this command.
 
 ```sh
 modal server info mcp-js-code-interpreter/Server
@@ -247,7 +285,7 @@ python run_code.py --session fresh 'console.log(x + y)'
 
 ## 4. Read and write files on the workspace volume
 
-The deploy script mounts `mcp-js-interpreter-workspace` at `/workspace`.
+The deployment command mounts `mcp-js-interpreter-workspace` at `/workspace`.
 The separate `/data` volume holds interpreter state, while `/policies`
 holds the Rego files. `MCP_V8_POLICIES_JSON` maps each capability to the
 file that controls it.
@@ -297,13 +335,13 @@ python run_code.py 'import escape from "https://cdn.jsdelivr.net/npm/escape-html
 ```
 
 The import example prints `&lt;tag&gt;`. To grant another capability, add
-its Rego file to the deployment script’s upload list and register it under
+its Rego file to the upload list in Step 2.4 and register it under
 the matching key in `policies`. [External module imports](../how-to/module-imports.md) ·
 [Recipes for other capabilities](../how-to/policies.md) ·
 [Policy input fields](../concepts/policies.md#per-category-input-documents).
 
-After editing a policy, rerun the deployment script and confirm the
-redeploy. A newly started server loads the uploaded rules. Keep the
+After editing a policy, repeat Steps 2.4 and 2.5 and confirm the redeploy.
+A newly started server loads the uploaded rules. Keep the
 policy files on their separate volume so the workspace rule cannot modify
 them.
 
