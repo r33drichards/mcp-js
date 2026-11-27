@@ -53,7 +53,8 @@ policies='{
 python - <<'PYTHON'
 import modal
 
-modal.Volume.objects.create("mcp-js-interpreter-policies", allow_existing=True)
+for name in ("state", "workspace", "policies"):
+    modal.Volume.objects.create(f"mcp-js-interpreter-{name}", allow_existing=True)
 PYTHON
 
 for name in filesystem fetch modules; do

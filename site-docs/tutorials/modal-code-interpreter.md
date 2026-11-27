@@ -101,18 +101,20 @@ allow if {
 REGO
 ```
 
-### 2.4. Upload the policies and tell mcp-v8 where to find them
+### 2.4. Create the volumes and upload the policies
 
-Create a Modal Volume for the policy files, then copy the three local
-files to its root. The create call reuses the volume if it already
-exists. The upload replaces files with the same names so you can repeat
-this step after editing a rule. [Modal Volumes](https://modal.com/docs/guide/volumes).
+Create the three Modal Volumes for session state, workspace files, and
+Rego policies. The create calls reuse existing volumes. Then copy the
+three local Rego files to the root of the policy volume. The upload
+replaces policy files with the same names so you can repeat this step
+after editing a rule. [Modal Volumes](https://modal.com/docs/guide/volumes).
 
 ```bash
 python - <<'PYTHON'
 import modal
 
-modal.Volume.objects.create("mcp-js-interpreter-policies", allow_existing=True)
+for name in ("state", "workspace", "policies"):
+    modal.Volume.objects.create(f"mcp-js-interpreter-{name}", allow_existing=True)
 PYTHON
 
 for name in filesystem fetch modules; do
@@ -204,7 +206,7 @@ import json
 import os
 import time
 from functools import partial
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -214,8 +216,25 @@ def request(base_url, token, path, body=None):
     if body is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode()
-    with urlopen(Request(base_url.rstrip("/") + path, data, headers), timeout=60) as response:
-        return json.load(response)
+    req = Request(base_url.rstrip("/") + path, data, headers)
+    try:
+        with urlopen(req, timeout=60) as response:
+            return json.load(response)
+    except HTTPError as error:
+        with error:
+            body = error.read(4096).decode("utf-8", errors="replace").strip()
+        detail = body
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(payload, dict):
+                detail = payload.get("error") or payload.get("detail") or body
+        message = f"HTTP {error.code} {error.reason}"
+        if detail:
+            message += f": {detail}"
+        raise RuntimeError(message) from error
 
 
 def run_js(call, code, *, session="tutorial"):

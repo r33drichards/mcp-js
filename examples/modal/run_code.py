@@ -5,7 +5,7 @@ import json
 import os
 import time
 from functools import partial
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -15,8 +15,25 @@ def request(base_url, token, path, body=None):
     if body is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode()
-    with urlopen(Request(base_url.rstrip("/") + path, data, headers), timeout=60) as response:
-        return json.load(response)
+    req = Request(base_url.rstrip("/") + path, data, headers)
+    try:
+        with urlopen(req, timeout=60) as response:
+            return json.load(response)
+    except HTTPError as error:
+        with error:
+            body = error.read(4096).decode("utf-8", errors="replace").strip()
+        detail = body
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(payload, dict):
+                detail = payload.get("error") or payload.get("detail") or body
+        message = f"HTTP {error.code} {error.reason}"
+        if detail:
+            message += f": {detail}"
+        raise RuntimeError(message) from error
 
 
 def run_js(call, code, *, session="tutorial"):
