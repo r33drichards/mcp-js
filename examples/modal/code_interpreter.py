@@ -21,10 +21,10 @@ def request(base_url, token, path, body=None):
         return json.load(response)
 
 
-def run_js(call, code):
+def run_js(call, code, *, session="tutorial"):
     execution = call(
         "/api/exec",
-        {"code": code, "session": "tutorial", "execution_timeout_secs": 5},
+        {"code": code, "session": session, "execution_timeout_secs": 5},
     )
     path = f"/api/executions/{execution['execution_id']}"
     deadline = time.monotonic() + 20

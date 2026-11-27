@@ -22,6 +22,10 @@ start with [Install](../install/overview.md).
   JS SDK over gRPC from the sandbox, deploy it to Railway behind Keycloak auth,
   and connect Claude Code.
 
+- [Run a stateful JavaScript interpreter on Modal](modal-code-interpreter.md) —
+  launch the published image in a Modal Sandbox and run JavaScript snippets
+  that share state through a named session.
+
 _More end-to-end use cases are on the way._
 
 ## Scheduler and HTTP functions
