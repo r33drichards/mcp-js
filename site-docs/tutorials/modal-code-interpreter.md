@@ -345,7 +345,56 @@ A newly started server loads the uploaded rules. Keep the
 policy files on their separate volume so the workspace rule cannot modify
 them.
 
-## 6. Check scale-to-zero and stop the app
+## 6. Connect an MCP client
+
+The same deployed server exposes an MCP endpoint at `/mcp`. In an MCP
+client that supports custom HTTP headers, enter these settings. Use the
+server URL and proxy token from Step 3. [mcp-v8 HTTP transport](../how-to/transports.md) ·
+[Modal proxy authentication](https://modal.com/docs/guide/webhook-proxy-auth).
+
+| Setting | Value |
+| --- | --- |
+| Transport | Streamable HTTP |
+| URL | The deployed HTTPS URL followed by `/mcp` |
+| HTTP header | `Authorization: Bearer wk-ID.ws-SECRET` |
+
+To try the connection from the same terminal, use MCP Inspector with Node.js
+and npm installed. First list the tools. The response should include
+`run_js`. [MCP Inspector CLI](https://github.com/modelcontextprotocol/inspector/blob/main/clients/cli/README.md).
+
+```sh
+npx --yes @modelcontextprotocol/inspector --cli "${MCP_JS_URL%/}/mcp" \
+  --transport http \
+  --header "Authorization: Bearer $MCP_JS_TOKEN" \
+  --method tools/list
+```
+
+In your MCP client, select the `run_js` tool and pass the following
+arguments.
+
+```json
+{"code": "console.log(6 * 7)"}
+```
+
+The server runs the code asynchronously. If your client reports an
+`execution_id`, call `get_execution` with that ID until the status is
+`completed`, then call `get_execution_output` with the same ID. The
+`data` field should contain `42`. If your client reports an MCP task
+instead, use the client’s task controls to retrieve the result. The same
+filesystem, fetch, and module policies apply to code sent through MCP.
+[mcp-v8 tool reference](../reference/mcp-tools.md) ·
+[MCP tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks).
+
+For a stateful MCP sequence, take the `heap` returned in the completed
+execution result and pass it as the `heap` argument to the next `run_js`
+call. The REST example uses a named
+session to look up that heap automatically. [Sessions and heap snapshots](../concepts/sessions-and-heaps.md).
+
+Modal’s FastMCP tutorial also shows how to explore a remote server with
+Inspector. In this deployment the published mcp-v8 image already serves
+the MCP endpoint. [Modal’s MCP server example](https://modal.com/docs/examples/mcp_server_stateless).
+
+## 7. Check scale-to-zero and stop the app
 
 After roughly 60 seconds without requests, Modal can stop the container.
 Wait until the deployment shows zero containers in the Modal dashboard,
