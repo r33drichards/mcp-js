@@ -2,10 +2,15 @@
 """Run bounded TLC checks and export normalized generated traces for Rust replay."""
 import argparse, hashlib, json, pathlib, re, subprocess, tempfile
 ROOT = pathlib.Path(__file__).resolve().parent
-# Official v1.8.0 release asset, verified against GitHub's published SHA-256 digest.
-SHA = 'fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713'
-p = argparse.ArgumentParser(); p.add_argument('--jar', required=True); p.add_argument('--out', default=str(ROOT/'generated')); p.add_argument('--deep', action='store_true'); args=p.parse_args()
-jar=pathlib.Path(args.jar).resolve(); assert hashlib.sha256(jar.read_bytes()).hexdigest()==SHA, 'Unexpected TLC binary: pin/check the tool before changing this checksum'
+# Keep supporting the previously verified v1.8.0 release binary.
+RELEASE_SHA = 'fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713'
+p = argparse.ArgumentParser(); p.add_argument('--jar', required=True); p.add_argument('--out', default=str(ROOT/'generated')); p.add_argument('--deep', action='store_true')
+p.add_argument('--jar-sha256', default=RELEASE_SHA, help='Expected SHA-256 from the pinned TLC build')
+args = p.parse_args()
+jar = pathlib.Path(args.jar).resolve()
+jar_sha256 = hashlib.sha256(jar.read_bytes()).hexdigest()
+if jar_sha256 != args.jar_sha256:
+    p.error('Unexpected TLC binary: checksum does not match the pinned tool')
 out=pathlib.Path(args.out).resolve(); out.mkdir(parents=True,exist_ok=True)
 steps,faults=(16,3) if args.deep else (12,2)
 ops=['tick','acquire','propose','commit','ack','lose_ack','send','deliver_post','finish','deliver_done','deliver_done_lost_ack','drop','duplicate','partition','heal','elect','crash','restart']
@@ -37,4 +42,4 @@ run('diagnostic_stale_start',invariant='NoStaleAdmissionDiagnostic')
 run('diagnostic_duplicate_delivery',invariant='NoDuplicateAdmissionDiagnostic')
 run('mutant_replay',replay=True)
 run('mutant_index_ack',index=True)
-(out/'summary.json').write_text(json.dumps({'tlc_sha256':SHA,'model_sha256':hashlib.sha256((ROOT/'RunnerOwnership.tla').read_bytes()).hexdigest(),'seed':1,'max_steps':steps,'max_faults':faults,'cases':summary},indent=2)+'\n')
+(out/'summary.json').write_text(json.dumps({'tlc_sha256':jar_sha256,'model_sha256':hashlib.sha256((ROOT/'RunnerOwnership.tla').read_bytes()).hexdigest(),'seed':1,'max_steps':steps,'max_faults':faults,'cases':summary},indent=2)+'\n')

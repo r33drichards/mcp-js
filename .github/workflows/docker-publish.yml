@@ -67,7 +67,7 @@ jobs:
             curl --fail --silent --show-error --location --retry 3 \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/$1"
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases$1"
           }
 
           is_release=false
@@ -82,15 +82,19 @@ jobs:
             # Pin the concrete tag rather than passing "latest" so the
             # Dockerfile's download layer is keyed by version and the GHA
             # layer cache cannot serve a stale binary after a new release.
-            release=$(release_api latest)
+            release=$(release_api /latest)
             if ! tag=$(node scripts/release-policy.mjs docker-assets stable <<< "$release"); then
               # An npm-only release can become GitHub Latest before server
               # binaries exist. PR checks never publish, so they may validate
               # the Dockerfile using the next complete stable release. Main
               # and manual refreshes must not move published tags backwards.
               [ "$EVENT_NAME" = pull_request ] || exit 1
-              tag=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-                | node scripts/release-policy.mjs docker-pr-fallback)
+              # An empty page makes the policy helper fail the search.
+              for ((page = 1; ; page++)); do
+                releases=$(release_api "?per_page=100&page=$page")
+                tag=$(node scripts/release-policy.mjs docker-pr-page <<< "$releases")
+                if [ -n "$tag" ]; then break; fi
+              done
               echo "Using complete stable release $tag for PR validation only"
             fi
           fi
@@ -110,7 +114,7 @@ jobs:
             # A requested version is exact: never substitute other bytes
             # under its image tag, even if the release is incomplete.
             encoded_tag=$(jq -rn --arg tag "$tag" '$tag|@uri')
-            release=$(release_api "tags/$encoded_tag")
+            release=$(release_api "/tags/$encoded_tag")
             packaged_tag=$(node scripts/release-policy.mjs docker-assets explicit <<< "$release")
             [ "$packaged_tag" = "$tag" ] || { echo "release tag mismatch" >&2; exit 1; }
           fi

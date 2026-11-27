@@ -44,16 +44,19 @@ export function dockerAssetTag(release, stableOnly) {
   return tag;
 }
 
-export function findDockerPrRelease(pages) {
-  // gh --paginate --slurp returns one array per page in GitHub's order.
-  for (const release of pages.flat()) {
+function findDockerPrRelease(releases) {
+  if (!Array.isArray(releases)) throw new Error('Expected a page of GitHub releases');
+  if (releases.length === 0) {
+    throw new Error('No stable release has both Linux server binaries for Docker PR validation');
+  }
+  for (const release of releases) {
     try {
       return dockerAssetTag(release, true);
     } catch {
       // Skip drafts, prereleases, and releases whose upload is not complete.
     }
   }
-  throw new Error('No stable release has both Linux server binaries for Docker PR validation');
+  return null;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -63,15 +66,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.stdout.write(`${selected}\n`);
     process.exit(0);
   }
-  if (mode === 'docker-pr-fallback') {
+  if (mode === 'docker-pr-page') {
     const selected = findDockerPrRelease(JSON.parse(readFileSync(0, 'utf8')));
-    process.stdout.write(`${selected}\n`);
+    if (selected) process.stdout.write(`${selected}\n`);
     process.exit(0);
   }
   let policy;
   if (mode === 'classify') policy = classifyRelease(tag);
   else if (mode === 'docker' && ['true', 'false'].includes(release)) {
     policy = dockerReleasePolicy(tag, event, release === 'true');
-  } else throw new Error('Usage: release-policy.mjs classify TAG | docker TAG EVENT true|false | docker-assets stable|explicit | docker-pr-fallback');
+  } else throw new Error('Usage: release-policy.mjs classify TAG | docker TAG EVENT true|false | docker-assets stable|explicit | docker-pr-page');
   process.stdout.write(`${JSON.stringify(policy)}\n`);
 }
