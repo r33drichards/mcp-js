@@ -23,6 +23,59 @@ Save the deployment script as `deploy_interpreter.sh`.
 #!/usr/bin/env bash
 set -euo pipefail
 
+policy_dir=$(mktemp -d)
+trap 'rm -rf "$policy_dir"' EXIT
+
+cat >"$policy_dir/filesystem.rego" <<'REGO'
+package mcp.filesystem
+
+default allow := false
+
+allow if {
+    input.operation in {"readFile", "writeFile"}
+    input.path == "/workspace/report.txt"
+}
+REGO
+
+cat >"$policy_dir/fetch.rego" <<'REGO'
+package mcp.fetch
+
+default allow := false
+
+allow if {
+    input.method == "GET"
+    input.url_parsed.scheme == "https"
+    input.url_parsed.host == "example.com"
+    input.url_parsed.port == null
+}
+REGO
+
+cat >"$policy_dir/modules.rego" <<'REGO'
+package mcp.modules
+
+default allow := false
+
+allow if {
+    input.resolved_url == "https://cdn.jsdelivr.net/npm/escape-html@1.0.3/+esm"
+}
+REGO
+
+policies='{
+  "filesystem": {"policies": [{"url": "file:///policies/filesystem.rego"}]},
+  "fetch": {"policies": [{"url": "file:///policies/fetch.rego"}]},
+  "modules": {"policies": [{"url": "file:///policies/modules.rego"}]}
+}'
+
+python - <<'PYTHON'
+import modal
+
+modal.Volume.objects.create("mcp-js-interpreter-policies", allow_existing=True)
+PYTHON
+
+for name in filesystem fetch modules; do
+  modal volume put --force mcp-js-interpreter-policies "$policy_dir/$name.rego" "/$name.rego"
+done
+
 modal server deploy \
   --app-name mcp-js-code-interpreter \
   --image docker.io/wholelottahoopla/mcp-js:0.22.0 \
@@ -31,6 +84,10 @@ modal server deploy \
   --max-containers 1 \
   --scaledown-window 60 \
   --volume mcp-js-interpreter-state:/data \
+  --volume mcp-js-interpreter-workspace:/workspace \
+  --volume mcp-js-interpreter-policies:/policies \
+  --env-var "MCP_V8_POLICIES_JSON=$policies" \
+  --env-var MCP_V8_ALLOW_EXTERNAL_MODULES=true \
   --env-var PORT=8080 \
   --env-var MCP_V8_HEAP_STORE=dir \
   --env-var MCP_V8_HEAP_DIR=/data/heaps \
@@ -43,7 +100,9 @@ bash deploy_interpreter.sh
 
 Modal prints an HTTPS URL and the deploy command exits. Copy that URL into
 `MCP_JS_URL` in the next step. Modal runs the stock image’s entrypoint
-directly, so the container only needs the published image.
+directly, so the container only needs the published image. The script also
+uploads three Rego policy files using the local Modal CLI. The server
+evaluates them in-process, so there is no separate OPA service to deploy.
 
 ## 2. Run JavaScript
 
@@ -148,6 +207,57 @@ session has its own heap, so this command exits with a reference error.
 python run_code.py --session fresh 'console.log(x + y)'
 ```
 
+## Read and write the workspace volume
+
+The deploy script mounts `mcp-js-interpreter-workspace` at `/workspace`.
+The separate `/data` volume holds interpreter state, while `/policies`
+holds the Rego files. `MCP_V8_POLICIES_JSON` maps each capability to the
+file that controls it.
+
+Mounting a volume makes it visible to the server process. The
+`mcp.filesystem` policy grants JavaScript two operations on one file.
+Each `fs` call is checked before the server touches the filesystem.
+
+```sh
+python run_code.py 'await fs.writeFile("/workspace/report.txt", "hello from Modal")'
+python run_code.py 'console.log(await fs.readFile("/workspace/report.txt", "utf8"))'
+```
+
+The second command prints `hello from Modal`. A read of
+`/workspace/private.txt` fails with a policy denial. To grant access to
+more files, list their exact absolute paths in the rule and grant only
+the operations they need. The policy matches the path supplied by the
+script. Keep allowed paths on this dedicated data volume and free of
+symlinks. See [filesystem policy inputs and path handling](../concepts/filesystem.md).
+
+## Fetch data and import a module
+
+The `mcp.fetch` rule permits HTTPS GET requests to `example.com` on its
+default port. Changing the method to POST or the host to another domain
+causes a policy denial.
+
+```sh
+python run_code.py 'console.log((await fetch("https://example.com/")).status)'
+```
+
+To load an external module, the deployment enables
+`MCP_V8_ALLOW_EXTERNAL_MODULES` and the `mcp.modules` policy permits one
+exact URL. The module loader checks this separately from `fetch()`.
+
+```sh
+python run_code.py 'import escape from "https://cdn.jsdelivr.net/npm/escape-html@1.0.3/+esm"; console.log(escape("<tag>"))'
+```
+
+The import example prints `&lt;tag&gt;`. To grant another capability, add
+its Rego file to the deployment script’s upload list and register it under
+the matching key in `policies`. For input fields and recipes for other
+capabilities, see [Security policies](../how-to/policies.md).
+
+After editing a policy, rerun the deployment script and confirm the
+redeploy. A newly started server loads the uploaded rules. Keep the
+policy files on their separate volume so the workspace rule cannot modify
+them.
+
 ## What happens when the app goes idle
 
 - **The endpoint stays deployed.** `--min-containers 0` lets Modal stop the
@@ -170,5 +280,5 @@ python run_code.py --session fresh 'console.log(x + y)'
   [HTTP API reference](../reference/http-api.md).
 
 To remove the endpoint when you’re done, run
-`modal app stop mcp-js-code-interpreter`. The state volume remains available
+`modal app stop mcp-js-code-interpreter`. The volumes remain available
 for a later deployment.
