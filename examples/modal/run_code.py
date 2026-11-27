@@ -1,14 +1,12 @@
-"""Run a stateful JavaScript interpreter from a stock image on Modal."""
+"""Submit JavaScript to a running Modal interpreter."""
 
+import argparse
 import json
+import os
 import time
 from functools import partial
+from urllib.error import URLError
 from urllib.request import Request, urlopen
-
-import modal
-
-IMAGE = "docker.io/wholelottahoopla/mcp-js:0.22.0"
-PORT = 8080
 
 
 def request(base_url, token, path, body=None):
@@ -43,37 +41,21 @@ def run_js(call, code, *, session="tutorial"):
 
 
 def main():
-    app = modal.App.lookup("mcp-js-code-interpreter", create_if_missing=True)
-    sandbox = modal.Sandbox.create(
-        app=app,
-        image=modal.Image.from_registry(IMAGE),
-        env={
-            "PORT": str(PORT),
-            "MCP_V8_HEAP_STORE": "dir",
-            "MCP_V8_HEAP_DIR": "/data/heaps",
-            "MCP_V8_SESSION_DB_PATH": "/data/sessions",
-        },
-        readiness_probe=modal.Probe.with_tcp(PORT),
-        block_network=True,
-        timeout=180,
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("code", help="JavaScript source")
+    parser.add_argument("--session", default="tutorial", help="Session name")
+    args = parser.parse_args()
+
+    url = os.environ.get("MCP_JS_URL")
+    token = os.environ.get("MCP_JS_TOKEN")
+    if not url or not token:
+        parser.error("Set MCP_JS_URL and MCP_JS_TOKEN from the launcher output.")
+
+    call = partial(request, url, token)
     try:
-        sandbox.wait_until_ready()
-        creds = sandbox.create_connect_token(port=PORT)
-        call = partial(request, creds.url, creds.token)
-        run_js(call, "globalThis.x = 10")
-        run_js(call, "globalThis.y = 5")
-        run_js(call, "console.log(x + y)")
-        try:
-            run_js(call, 'throw new Error("demo error")')
-        except RuntimeError as error:
-            if "demo error" not in str(error):
-                raise
-            print(error)
-        else:
-            raise AssertionError("Expected the JavaScript error")
-    finally:
-        sandbox.terminate()
+        run_js(call, args.code, session=args.session)
+    except (RuntimeError, URLError, TimeoutError) as error:
+        parser.exit(1, f"{error}\n")
 
 
 if __name__ == "__main__":
