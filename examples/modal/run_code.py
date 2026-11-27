@@ -9,6 +9,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+STARTUP_RETRY_SECONDS = 45
+STARTUP_RETRY_INTERVAL = 1
+
+
 def request(base_url, token, path, body=None):
     headers = {"Authorization": f"Bearer {token}"}
     data = None
@@ -16,24 +20,39 @@ def request(base_url, token, path, body=None):
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode()
     req = Request(base_url.rstrip("/") + path, data, headers)
-    try:
-        with urlopen(req, timeout=60) as response:
-            return json.load(response)
-    except HTTPError as error:
-        with error:
-            body = error.read(4096).decode("utf-8", errors="replace").strip()
-        detail = body
+    deadline = time.monotonic() + STARTUP_RETRY_SECONDS
+    timeout = 60
+    while True:
         try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            pass
-        else:
-            if isinstance(payload, dict):
-                detail = payload.get("error") or payload.get("detail") or body
-        message = f"HTTP {error.code} {error.reason}"
-        if detail:
-            message += f": {detail}"
-        raise RuntimeError(message) from error
+            with urlopen(req, timeout=timeout) as response:
+                return json.load(response)
+        except HTTPError as error:
+            with error:
+                error_body = error.read(4096).decode("utf-8", errors="replace").strip()
+            try:
+                payload = json.loads(error_body)
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+
+            server_error = payload.get("error")
+            # Modal sends this response before forwarding the request to a container.
+            if (
+                error.code == 503
+                and server_error == "no upstreams available"
+                and deadline - time.monotonic() > STARTUP_RETRY_INTERVAL
+            ):
+                time.sleep(STARTUP_RETRY_INTERVAL)
+                timeout = deadline - time.monotonic()
+                if timeout > 0:
+                    continue
+
+            detail = server_error or payload.get("detail") or error_body
+            message = f"HTTP {error.code} {error.reason}"
+            if detail:
+                message += f": {detail}"
+            raise RuntimeError(message) from error
 
 
 def run_js(call, code, *, session="tutorial"):

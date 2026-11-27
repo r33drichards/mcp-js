@@ -210,6 +210,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+STARTUP_RETRY_SECONDS = 45
+STARTUP_RETRY_INTERVAL = 1
+
+
 def request(base_url, token, path, body=None):
     headers = {"Authorization": f"Bearer {token}"}
     data = None
@@ -217,24 +221,39 @@ def request(base_url, token, path, body=None):
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode()
     req = Request(base_url.rstrip("/") + path, data, headers)
-    try:
-        with urlopen(req, timeout=60) as response:
-            return json.load(response)
-    except HTTPError as error:
-        with error:
-            body = error.read(4096).decode("utf-8", errors="replace").strip()
-        detail = body
+    deadline = time.monotonic() + STARTUP_RETRY_SECONDS
+    timeout = 60
+    while True:
         try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            pass
-        else:
-            if isinstance(payload, dict):
-                detail = payload.get("error") or payload.get("detail") or body
-        message = f"HTTP {error.code} {error.reason}"
-        if detail:
-            message += f": {detail}"
-        raise RuntimeError(message) from error
+            with urlopen(req, timeout=timeout) as response:
+                return json.load(response)
+        except HTTPError as error:
+            with error:
+                error_body = error.read(4096).decode("utf-8", errors="replace").strip()
+            try:
+                payload = json.loads(error_body)
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+
+            server_error = payload.get("error")
+            # Modal sends this response before forwarding the request to a container.
+            if (
+                error.code == 503
+                and server_error == "no upstreams available"
+                and deadline - time.monotonic() > STARTUP_RETRY_INTERVAL
+            ):
+                time.sleep(STARTUP_RETRY_INTERVAL)
+                timeout = deadline - time.monotonic()
+                if timeout > 0:
+                    continue
+
+            detail = server_error or payload.get("detail") or error_body
+            message = f"HTTP {error.code} {error.reason}"
+            if detail:
+                message += f": {detail}"
+            raise RuntimeError(message) from error
 
 
 def run_js(call, code, *, session="tutorial"):
@@ -282,8 +301,11 @@ if __name__ == "__main__":
 
 Run the commands in order. Each command submits a snippet with
 `POST /api/exec`, then uses the returned ID to poll for completion and read
-console output. The first request might take longer while Modal starts
-the container. [Asynchronous execution](../concepts/async-execution.md) ·
+console output. When no container is ready, Modal returns HTTP 503 with
+the error `no upstreams available`. The client retries that response once
+per second for up to 45 seconds while the container starts.
+[Modal cold starts](https://modal.com/docs/guide/servers#zero-to-one-scaling) ·
+[Asynchronous execution](../concepts/async-execution.md) ·
 [HTTP API reference](../reference/http-api.md).
 
 ```sh
@@ -423,7 +445,8 @@ then run the read again with the default session.
 python run_code.py 'console.log(x + y)'
 ```
 
-This request starts a container and should print `15` from the saved heap.
+This request starts a container. Once the container is ready, the client
+prints `15` from the saved heap.
 Modal commits volume changes in the background and on normal shutdown.
 The new container can restore committed state. A sudden interruption can
 lose writes since the last commit. [Modal autoscaling](https://modal.com/docs/guide/servers) ·
