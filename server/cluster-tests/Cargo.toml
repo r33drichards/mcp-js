@@ -22,5 +22,9 @@ async-trait = "0.1"
 hex = "0.4"
 mcp-metadata-store = { path = "../metadata-store", default-features = false }
 
+[dev-dependencies]
+tempfile = "3"
+turmoil = "0.7.2"
+
 [profile.dev]
 debug = "line-tables-only"

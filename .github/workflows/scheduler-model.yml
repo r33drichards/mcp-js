@@ -25,18 +25,16 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Download pinned TLC (checksum verified by checker)
-        run: >-
-          curl --fail --location --retry 3 -H 'Accept: application/octet-stream'
-          https://api.github.com/repos/tlaplus/tlaplus/releases/assets/768714348 -o /tmp/tla2tools.jar
+      - name: Build TLC from pinned source
+        run: bash specs/runner/build_tlc.sh /tmp/tla2tools.jar
       - name: Generate bounded state witnesses and counterexamples
         env:
           DEEP: ${{ inputs.deep }}
         run: |
-          args=()
+          args=(--jar /tmp/tla2tools.jar --jar-sha256 "$(cat /tmp/tla2tools.jar.sha256)")
           if [ "$DEEP" = true ]; then args+=(--deep); fi
-          python3 specs/runner/check.py --jar /tmp/tla2tools.jar --out /tmp/runner-model/ownership "${args[@]}"
-          python3 specs/runner/check_admission.py --jar /tmp/tla2tools.jar --out /tmp/runner-model/admission "${args[@]}"
+          python3 specs/runner/check.py --out /tmp/runner-model/ownership "${args[@]}"
+          python3 specs/runner/check_admission.py --out /tmp/runner-model/admission "${args[@]}"
       - name: Replay generated states against production transitions
         env:
           SCHEDULER_MODEL_TRACES: /tmp/runner-model/ownership

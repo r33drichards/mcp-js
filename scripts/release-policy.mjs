@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseReleaseTag } from '../node/scripts/release-tag.mjs';
 
@@ -29,12 +30,51 @@ export function dockerReleasePolicy(tag, event, isRelease) {
   };
 }
 
+const dockerAssetNames = ['mcp-v8-linux.gz', 'mcp-v8-linux-arm64.gz'];
+
+export function dockerAssetTag(release, stableOnly) {
+  const { tag, prerelease } = classifyRelease(release?.tag_name);
+  if (release.draft || (stableOnly && (release.prerelease || prerelease))) {
+    throw new Error(`Docker cannot package ${tag} from this release channel`);
+  }
+  const missing = dockerAssetNames.filter(name =>
+    !release.assets?.some(asset => asset.name === name && asset.state === 'uploaded' && asset.size > 0)
+  );
+  if (missing.length) throw new Error(`Release ${tag} is missing Docker assets: ${missing.join(', ')}`);
+  return tag;
+}
+
+function findDockerPrRelease(releases) {
+  if (!Array.isArray(releases)) throw new Error('Expected a page of GitHub releases');
+  if (releases.length === 0) {
+    throw new Error('No stable release has both Linux server binaries for Docker PR validation');
+  }
+  for (const release of releases) {
+    try {
+      return dockerAssetTag(release, true);
+    } catch {
+      // Skip drafts, prereleases, and releases whose upload is not complete.
+    }
+  }
+  return null;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [mode, tag, event, release] = process.argv.slice(2);
+  if (mode === 'docker-assets' && ['stable', 'explicit'].includes(tag)) {
+    const selected = dockerAssetTag(JSON.parse(readFileSync(0, 'utf8')), tag === 'stable');
+    process.stdout.write(`${selected}\n`);
+    process.exit(0);
+  }
+  if (mode === 'docker-pr-page') {
+    const selected = findDockerPrRelease(JSON.parse(readFileSync(0, 'utf8')));
+    if (selected) process.stdout.write(`${selected}\n`);
+    process.exit(0);
+  }
   let policy;
   if (mode === 'classify') policy = classifyRelease(tag);
   else if (mode === 'docker' && ['true', 'false'].includes(release)) {
     policy = dockerReleasePolicy(tag, event, release === 'true');
-  } else throw new Error('Usage: release-policy.mjs classify TAG | docker TAG EVENT true|false');
+  } else throw new Error('Usage: release-policy.mjs classify TAG | docker TAG EVENT true|false | docker-assets stable|explicit | docker-pr-page');
   process.stdout.write(`${JSON.stringify(policy)}\n`);
 }

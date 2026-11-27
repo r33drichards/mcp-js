@@ -23,6 +23,21 @@ mod tests {
         )
     }
 
+    #[test]
+    fn unbounded_prefix_scan_reports_invalid_utf8() {
+        let node = node();
+        let data = node.db.open_tree("data").unwrap();
+        data.insert(b"prefix/ok", b"val").unwrap();
+        assert_eq!(node.scan_prefix("prefix/").unwrap(), vec![("prefix/ok".into(), "val".into())]);
+
+        data.insert(b"prefix/bad-value", &[0xff]).unwrap();
+        assert!(node.scan_prefix("prefix/").is_err());
+        data.remove(b"prefix/bad-value").unwrap();
+
+        data.insert(b"prefix/\xff", b"val").unwrap();
+        assert!(node.scan_prefix("prefix/").is_err());
+    }
+
     #[tokio::test]
     async fn replaced_claim_must_not_report_committed() {
         let node = node();

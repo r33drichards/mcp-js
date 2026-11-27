@@ -11,6 +11,9 @@ use std::sync::{
 };
 
 use deno_core::{JsRuntime, OpState, op2, v8};
+use tokio::sync::mpsc;
+
+use super::execution::ExecutionRegistry;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -48,7 +51,8 @@ impl ProcessExitState {
 /// Per-execution console output state, stored in deno_core's `OpState`.
 /// Buffers console output bytes and persists them in fixed-size pages.
 pub struct ConsoleLogState {
-    tree: mcp_metadata_store::RuntimeTree,
+    tree: Option<mcp_metadata_store::RuntimeTree>,
+    host_writer: Option<HostConsoleWriter>,
     page_size: usize,
     error: RefCell<Option<String>>,
     seq: AtomicU64,
@@ -73,7 +77,8 @@ impl ConsoleLogState {
             INLINE_PAGE_SIZE
         };
         Self {
-            tree,
+            tree: Some(tree),
+            host_writer: None,
             page_size,
             error: RefCell::new(None),
             seq: AtomicU64::new(0),
@@ -93,13 +98,29 @@ impl ConsoleLogState {
         state
     }
 
+    /// Host-owned console: pages are routed through the owning host's pump
+    /// instead of being written from the V8 thread.
+    pub fn new_with_host(writer: HostConsoleWriter) -> Self {
+        Self {
+            tree: None,
+            host_writer: Some(writer),
+            page_size: INLINE_PAGE_SIZE,
+            error: RefCell::new(None),
+            seq: AtomicU64::new(0),
+            buffer: RefCell::new(Vec::with_capacity(INLINE_PAGE_SIZE)),
+            stderr_tree: None,
+            stderr_seq: AtomicU64::new(0),
+            stderr_buffer: RefCell::new(Vec::new()),
+        }
+    }
+
     fn write_buffer(
-        tree: &mcp_metadata_store::RuntimeTree,
+        &self,
+        tree: Option<&mcp_metadata_store::RuntimeTree>,
         seq: &AtomicU64,
         buffer: &RefCell<Vec<u8>>,
         data: &[u8],
         error: &RefCell<Option<String>>,
-        page_size: usize,
     ) {
         if error.borrow().is_some() {
             return;
@@ -107,13 +128,20 @@ impl ConsoleLogState {
         let mut buffer = buffer.borrow_mut();
         let mut remaining = data;
         while !remaining.is_empty() {
-            let count = (page_size - buffer.len()).min(remaining.len());
+            let count = (self.page_size - buffer.len()).min(remaining.len());
             buffer.extend_from_slice(&remaining[..count]);
             remaining = &remaining[count..];
-            if buffer.len() == page_size {
-                let page = std::mem::replace(&mut *buffer, Vec::with_capacity(page_size));
+            if buffer.len() == self.page_size {
+                let page = std::mem::replace(&mut *buffer, Vec::with_capacity(self.page_size));
                 let index = seq.fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = tree.insert(index.to_be_bytes(), page) {
+                let res = match (&self.host_writer, tree) {
+                    (Some(w), _) => w.write_page(index, page),
+                    (None, Some(tree)) => tree
+                        .insert(index.to_be_bytes(), page)
+                        .map_err(|e| e.to_string()),
+                    (None, None) => Err("no console sink for this execution".to_string()),
+                };
+                if let Err(e) = res {
                     *error.borrow_mut() = Some(e);
                     break;
                 }
@@ -123,26 +151,12 @@ impl ConsoleLogState {
 
     /// Append bytes to the stdout buffer, persisting full pages.
     pub fn write(&self, data: &[u8]) {
-        Self::write_buffer(
-            &self.tree,
-            &self.seq,
-            &self.buffer,
-            data,
-            &self.error,
-            self.page_size,
-        );
+        self.write_buffer(self.tree.as_ref(), &self.seq, &self.buffer, data, &self.error);
     }
 
     pub fn write_stderr(&self, data: &[u8]) {
         if let Some(tree) = &self.stderr_tree {
-            Self::write_buffer(
-                tree,
-                &self.stderr_seq,
-                &self.stderr_buffer,
-                data,
-                &self.error,
-                self.page_size,
-            );
+            self.write_buffer(Some(tree), &self.stderr_seq, &self.stderr_buffer, data, &self.error);
         } else {
             self.write(data);
         }
@@ -153,7 +167,8 @@ impl ConsoleLogState {
     }
 
     fn flush_buffer(
-        tree: &mcp_metadata_store::RuntimeTree,
+        &self,
+        tree: Option<&mcp_metadata_store::RuntimeTree>,
         seq: &AtomicU64,
         buffer: &RefCell<Vec<u8>>,
         error: &RefCell<Option<String>>,
@@ -165,7 +180,14 @@ impl ConsoleLogState {
         if !buffer.is_empty() {
             let page: Vec<u8> = buffer.drain(..).collect();
             let seq = seq.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = tree.insert(seq.to_be_bytes(), page) {
+            let res = match (&self.host_writer, tree) {
+                (Some(w), _) => w.write_page(seq, page),
+                (None, Some(tree)) => tree
+                    .insert(seq.to_be_bytes(), page)
+                    .map_err(|e| e.to_string()),
+                (None, None) => Err("no console sink for this execution".to_string()),
+            };
+            if let Err(e) = res {
                 *error.borrow_mut() = Some(e);
             }
         }
@@ -173,14 +195,75 @@ impl ConsoleLogState {
 
     /// Flush any remaining buffered bytes (call on execution end).
     pub fn flush(&self) -> Result<(), String> {
-        Self::flush_buffer(&self.tree, &self.seq, &self.buffer, &self.error);
+        self.flush_buffer(self.tree.as_ref(), &self.seq, &self.buffer, &self.error);
         if let Some(tree) = &self.stderr_tree {
-            Self::flush_buffer(tree, &self.stderr_seq, &self.stderr_buffer, &self.error);
+            self.flush_buffer(Some(tree), &self.stderr_seq, &self.stderr_buffer, &self.error);
         }
         match self.error.borrow().as_ref() {
             Some(e) => Err(format!("console persistence failed: {e}")),
             None => Ok(()),
         }
+    }
+}
+
+/// DB-free worker client. The owner-host pump alone opens and writes console trees.
+#[derive(Clone)]
+pub struct HostConsoleWriter {
+    tx: mpsc::UnboundedSender<ConsolePage>,
+    alive: Arc<AtomicBool>,
+    execution_id: String,
+}
+
+struct ConsolePage {
+    execution_id: String,
+    seq: u64,
+    bytes: Vec<u8>,
+    reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+}
+
+pub struct HostConsoleBridge {
+    tx: mpsc::UnboundedSender<ConsolePage>,
+    alive: Arc<AtomicBool>,
+}
+
+impl HostConsoleBridge {
+    pub fn new(registry: Arc<ExecutionRegistry>) -> (Arc<Self>, impl std::future::Future<Output = ()>) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ConsolePage>();
+        let alive = Arc::new(AtomicBool::new(true));
+        let service = Arc::new(Self { tx, alive: alive.clone() });
+        let pump = async move {
+            while let Some(page) = rx.recv().await {
+                let result = if alive.load(Ordering::SeqCst) {
+                    registry.write_console_page(&page.execution_id, page.seq, &page.bytes)
+                } else {
+                    Err("console owner generation revoked".to_string())
+                };
+                let _ = page.reply.send(result);
+            }
+        };
+        (service, pump)
+    }
+
+    pub fn for_execution(&self, execution_id: String) -> HostConsoleWriter {
+        HostConsoleWriter {
+            tx: self.tx.clone(),
+            alive: self.alive.clone(),
+            execution_id,
+        }
+    }
+
+    pub fn revoke(&self) { self.alive.store(false, Ordering::SeqCst); }
+}
+
+impl HostConsoleWriter {
+    pub fn write_page(&self, seq: u64, bytes: Vec<u8>) -> Result<(), String> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err("console owner generation revoked".to_string());
+        }
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.tx.send(ConsolePage { execution_id: self.execution_id.clone(), seq, bytes, reply })
+            .map_err(|_| "console owner stopped".to_string())?;
+        response.recv().map_err(|_| "console owner stopped".to_string())?
     }
 }
 

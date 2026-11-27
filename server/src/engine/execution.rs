@@ -117,6 +117,29 @@ impl ExecutionRegistry {
         })
     }
 
+    /// Reuse a host-owned sled database instead of opening a second path.
+    /// The caller guarantees exclusive ownership for this host incarnation.
+    pub fn from_db(db: sled::Db) -> Result<Self, String> {
+        // Host-owned mode: no registry-level payload store. Blobs live in the
+        // host-owned SledHeapStorage/FsStore; console pages stay inline in the
+        // ex:<id> trees.
+        Ok(Self {
+            executions: Arc::new(DashMap::new()),
+            db: Some(db),
+            remote: None,
+            payloads: None,
+            persistence_errors: Arc::new(DashMap::new()),
+        })
+    }
+
+    /// Append one WAL console page on the owning host, never from a V8 worker.
+    pub fn write_console_page(&self, id: &str, seq: u64, bytes: &[u8]) -> Result<(), String> {
+        let tree = self.tree(&format!("ex:{}", id))?;
+        tree.insert(seq.to_be_bytes(), bytes)
+            .map_err(|e| format!("Failed to write console page: {}", e))?;
+        Ok(())
+    }
+
     pub fn from_store(store: Arc<dyn MetadataStore>) -> Result<Self, String> {
         Ok(Self {
             executions: Arc::new(DashMap::new()),

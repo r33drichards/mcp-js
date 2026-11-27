@@ -43,7 +43,30 @@ const path = require('node:path');
 const command = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.MOCK_CALLS, JSON.stringify({ command, args }) + '\n');
-if (command === 'curl') process.stdout.write(JSON.stringify({ tag_name: process.env.LATEST_TAG }));
+const asset = name => ({ name, state: 'uploaded', size: 1024 });
+const release = (tag_name, incomplete = false, fields = {}) => ({
+  tag_name, draft: false, prerelease: false,
+  assets: [asset('mcp-v8-linux.gz'), ...(incomplete ? [] : [asset('mcp-v8-linux-arm64.gz')])],
+  ...fields,
+});
+if (command === 'curl') {
+  const url = new URL(args.at(-1));
+  const page = url.searchParams.get('page');
+  if (page) {
+    const incomplete = process.env.NO_COMPLETE_RELEASE === 'true';
+    const pages = [
+      [release('v0.24.0', false, { draft: true }), release('v0.23.0', true),
+       release('v0.23.0-rc.3'), release('v0.23.0-rc.2', false, { prerelease: true })],
+      [release('v0.22.0', incomplete)],
+    ];
+    process.stdout.write(JSON.stringify(pages[Number(page) - 1] ?? []));
+  } else {
+    const latest = url.pathname.endsWith('/releases/latest');
+    const tag = latest ? process.env.LATEST_TAG : decodeURIComponent(url.pathname.split('/').at(-1));
+    process.stdout.write(JSON.stringify(release(tag,
+      process.env[latest ? 'LATEST_INCOMPLETE' : 'EXPLICIT_INCOMPLETE'] === 'true')));
+  }
+}
 if (command === 'git' && args[0] === 'rev-parse') process.stdout.write(process.env.TAG_SHA + '\n');
 if (command === 'git' && args[0] === 'merge-base' && process.env.NOT_ON_MAIN === 'true') process.exit(1);
 `;
@@ -168,6 +191,46 @@ for (const [name, values] of [
     const result = runStep('docker-publish.yml', 'Resolve release to package', values);
     assert.notEqual(result.status, 0);
     assert.deepEqual(result.output, {});
+  });
+}
+
+test('PR validates against a complete stable release when GitHub Latest is npm-only', () => {
+  const result = runStep('docker-publish.yml', 'Resolve release to package', {
+    EVENT_NAME: 'pull_request', LATEST_TAG: 'v0.23.0', LATEST_INCOMPLETE: 'true',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.output, {
+    tag: 'v0.22.0', is_release: 'false', source_sha: workflowSha, push_latest: 'false',
+    stable_aliases: 'false', publish_mcp: 'false',
+  });
+  assert.ok(result.calls.every(call => call.command === 'curl'));
+  assert.deepEqual(result.calls.map(call => call.args.at(-1)), [
+    'https://api.github.com/repos/example/mcp-js/releases/latest',
+    'https://api.github.com/repos/example/mcp-js/releases?per_page=100&page=1',
+    'https://api.github.com/repos/example/mcp-js/releases?per_page=100&page=2',
+  ]);
+});
+
+test('PR fails with a useful explanation when no complete stable release exists', () => {
+  const result = runStep('docker-publish.yml', 'Resolve release to package', {
+    EVENT_NAME: 'pull_request', LATEST_TAG: 'v0.23.0', LATEST_INCOMPLETE: 'true',
+    NO_COMPLETE_RELEASE: 'true',
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /No stable release has both Linux server binaries/);
+  assert.deepEqual(result.output, {});
+});
+
+for (const [name, values] of [
+  ['main refresh', { EVENT_NAME: 'push', LATEST_INCOMPLETE: 'true' }],
+  ['explicit release', { EVENT_NAME: 'workflow_dispatch', INPUT_VERSION: 'v0.23.0', EXPLICIT_INCOMPLETE: 'true' }],
+]) {
+  test(`Docker never substitutes for an incomplete ${name}`, () => {
+    const result = runStep('docker-publish.yml', 'Resolve release to package', values);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /missing Docker assets: mcp-v8-linux-arm64\.gz/);
+    assert.deepEqual(result.output, {});
+    assert.ok(!result.calls.some(call => call.command === 'curl' && new URL(call.args.at(-1)).search));
   });
 }
 

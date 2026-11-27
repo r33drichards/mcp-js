@@ -70,7 +70,7 @@ use self::artifacts::{
     Artifact, ArtifactMeta, ArtifactState, ArtifactStore, UploadGrant, UploadGrants,
     UploadReservation,
 };
-use self::console::ConsoleLogState;
+use self::console::{ConsoleLogState, HostConsoleBridge, HostConsoleWriter};
 use self::execution::{
     ConsoleOutputPage, ExecutionId, ExecutionInfo, ExecutionRegistry, ExecutionSummary,
 };
@@ -1025,6 +1025,7 @@ pub struct ExecutionConfig<'a> {
     pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
     pub console_tree: Option<mcp_metadata_store::RuntimeTree>,
     pub console_error_tree: Option<mcp_metadata_store::RuntimeTree>,
+    pub host_console_writer: Option<HostConsoleWriter>,
     pub process_exit_state: Option<&'a console::ProcessExitState>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub bootstrap_script: Option<&'a str>,
@@ -1055,6 +1056,7 @@ impl<'a> ExecutionConfig<'a> {
             mcp_headers: None,
             subprocess_config: None,
             console_tree: None,
+            host_console_writer: None,
             console_error_tree: None,
             process_exit_state: None,
             module_loader_config: None,
@@ -1109,6 +1111,11 @@ impl<'a> ExecutionConfig<'a> {
 
     pub fn console_tree(mut self, tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
         self.console_tree = Some(tree.into());
+        self
+    }
+
+    pub fn maybe_host_console_writer(mut self, writer: Option<HostConsoleWriter>) -> Self {
+        self.host_console_writer = writer;
         self
     }
 
@@ -1213,6 +1220,7 @@ pub fn execute_stateless(
         mcp_headers,
         subprocess_config,
         console_tree,
+        host_console_writer,
         console_error_tree,
         process_exit_state,
         module_loader_config,
@@ -1228,7 +1236,7 @@ pub fn execute_stateless(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut extensions = Vec::new();
-        if console_tree.is_some() || process_exit_state.is_some() {
+        if console_tree.is_some() || host_console_writer.is_some() || process_exit_state.is_some() {
             extensions.push(console::create_extension());
         }
         if fetch_config.is_some() {
@@ -1283,7 +1291,9 @@ pub fn execute_stateless(
         let rt = isolate_runtime()?;
 
         // Put console log state in OpState.
-        if let Some(tree) = console_tree {
+        if let Some(writer) = host_console_writer {
+            runtime.op_state().borrow_mut().put(ConsoleLogState::new_with_host(writer));
+        } else if let Some(tree) = console_tree {
             let console_state = match console_error_tree {
                 Some(stderr_tree) => ConsoleLogState::new_with_stderr(tree, stderr_tree),
                 None => ConsoleLogState::new(tree),
@@ -1505,6 +1515,7 @@ pub fn execute_stateful(
         mcp_headers,
         subprocess_config,
         console_tree,
+        host_console_writer,
         console_error_tree,
         process_exit_state,
         module_loader_config,
@@ -1553,7 +1564,7 @@ pub fn execute_stateful(
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
         let mut extensions = Vec::new();
-        if console_tree.is_some() || process_exit_state.is_some() {
+        if console_tree.is_some() || host_console_writer.is_some() || process_exit_state.is_some() {
             extensions.push(console::create_extension());
         }
         if fetch_config.is_some() {
@@ -1609,7 +1620,9 @@ pub fn execute_stateful(
         let rt = isolate_runtime()?;
 
         // Put console log state in OpState.
-        if let Some(tree) = console_tree {
+        if let Some(writer) = host_console_writer {
+            runtime.op_state().borrow_mut().put(ConsoleLogState::new_with_host(writer));
+        } else if let Some(tree) = console_tree {
             let console_state = match console_error_tree {
                 Some(stderr_tree) => ConsoleLogState::new_with_stderr(tree, stderr_tree),
                 None => ConsoleLogState::new(tree),
@@ -1906,6 +1919,7 @@ pub struct Engine {
     fs_config: Option<Arc<fs::FsConfig>>,
     /// Execution registry for async execution tracking and console output.
     execution_registry: Option<Arc<ExecutionRegistry>>,
+    host_console_bridge: Option<Arc<HostConsoleBridge>>,
     /// Module loader configuration controlling external module access and OPA auditing.
     module_loader_config: Arc<module_loader::ModuleLoaderConfig>,
     /// MCP client manager for programmatic tool calling from JS.
@@ -2130,6 +2144,7 @@ impl Engine {
             net_tcp_config: None,
             fs_config: None,
             execution_registry: None,
+            host_console_bridge: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
                 hooks: None,
@@ -2183,6 +2198,7 @@ impl Engine {
             net_tcp_config: None,
             fs_config: None,
             execution_registry: None,
+            host_console_bridge: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
                 hooks: None,
@@ -2289,6 +2305,12 @@ impl Engine {
     /// Set the execution registry for async execution tracking.
     pub fn with_execution_registry(mut self, registry: Arc<ExecutionRegistry>) -> Self {
         self.execution_registry = Some(registry);
+        self
+    }
+
+    /// Route console pages through the owning simulated host, not V8 workers.
+    pub fn with_host_console_bridge(mut self, bridge: Arc<HostConsoleBridge>) -> Self {
+        self.host_console_bridge = Some(bridge);
         self
     }
 
@@ -2567,6 +2589,10 @@ impl Engine {
 
         let id = uuid::Uuid::new_v4().to_string();
         let console_tree = registry.register(&id)?;
+        let host_console_writer = self
+            .host_console_bridge
+            .as_ref()
+            .map(|bridge| bridge.for_execution(id.clone()));
 
         // Resolve which heap snapshot to restore. An explicit `heap` always
         // wins. Otherwise, when a `session` is given, fall back to that
@@ -2637,6 +2663,7 @@ impl Engine {
 
         let engine = self.clone();
         let id_bg = id.clone();
+        let hcw_bg = host_console_writer.clone();
         let activity = Arc::new(ExecutionActivity {
             registry: self.execution_registry.as_ref().expect("registered execution").clone(),
             id: id.clone(),
@@ -2656,6 +2683,7 @@ impl Engine {
                     tags,
                     raw_snapshot,
                     console_tree,
+                    hcw_bg,
                     mcp_headers,
                     host_tools,
                 )
@@ -2719,6 +2747,7 @@ impl Engine {
         tags: Option<HashMap<String, String>>,
         raw_snapshot: Option<Vec<u8>>,
         console_tree: mcp_metadata_store::RuntimeTree,
+        host_console_writer: Option<HostConsoleWriter>,
         mcp_headers: Option<serde_json::Value>,
         host_tools: Option<Arc<host_tools::HostToolRun>>,
     ) {
@@ -2759,14 +2788,20 @@ impl Engine {
         // Attach the shared keyed artifact store so `artifact(key, mime, bytes)`
         // is available to the script; whatever it emits is filed on the
         // execution record after the run (regardless of final status).
-        let artifact_state = match registry.artifacts_tree() {
-            Ok(tree) => Some(ArtifactState::new(
-                ArtifactStore::new(tree),
-                Some(id.clone()),
-            )),
-            Err(e) => {
-                tracing::warn!("artifact store unavailable for execution {}: {}", id, e);
-                None
+        // The blocking worker must not touch the host's artifact tree. Host-owned
+        // execution leaves the artifact API uninstalled until it has an owner bridge.
+        let artifact_state = if host_console_writer.is_some() {
+            None
+        } else {
+            match registry.artifacts_tree() {
+                Ok(tree) => Some(ArtifactState::new(
+                    ArtifactStore::new(tree),
+                    Some(id.clone()),
+                )),
+                Err(e) => {
+                    tracing::warn!("artifact store unavailable for execution {}: {}", id, e);
+                    None
+                }
             }
         };
 
@@ -2785,6 +2820,7 @@ impl Engine {
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
                 let ct = console_tree;
+                let hcw = host_console_writer;
                 let mlc = self.module_loader_config.clone();
                 let mc = host_tools
                     .clone()
@@ -2824,6 +2860,7 @@ impl Engine {
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
+                            .maybe_host_console_writer(hcw)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
                             .maybe_artifact_state(ast),
@@ -2960,6 +2997,7 @@ impl Engine {
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
+                            .maybe_host_console_writer(host_console_writer)
                             .module_loader_config(&mlc)
                             .maybe_mcp_config(mc.as_ref())
                             .maybe_artifact_state(ast),
