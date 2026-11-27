@@ -26,10 +26,25 @@ After preparing the package as described below:
 uv pip install ./python
 ```
 
-Or install a built wheel. There is no published PyPI release yet. Native wheels
-are platform-specific; the currently tested target is Linux x86_64. The wheel
-is tagged `linux_x86_64`, not `manylinux`: broad distribution compatibility is
-not claimed. macOS native builds are supported by the tooling but unverified.
+Stable releases built by the Python release workflow include a Linux x86-64
+wheel in their GitHub release assets. Install the downloaded wheel with
+`python -m pip install ./mcp_js-*.whl`. The wheel filename identifies its
+manylinux compatibility. Local builds produce a platform-specific wheel.
+macOS native builds are supported by the tooling and are unverified.
+
+## Publish from GitHub Actions
+
+The [Python release workflow](../.github/workflows/python-publish.yml) builds,
+repairs, and smoke-tests the wheel, then attaches it to the stable GitHub
+release. A manual run on a branch builds a wheel for testing.
+
+To enable PyPI publishing, register a PyPI Trusted Publisher for `mcp-js`
+with owner `r33drichards`, repository `mcp-js`, workflow
+`python-publish.yml`, and environment `pypi`. Use a pending publisher for
+the first release if the project has yet to be created. Set the GitHub
+repository variable `PUBLISH_PYTHON_TO_PYPI` to `true`. The next stable release
+can then publish the wheel to PyPI, where users can install it with
+`python -m pip install mcp-js`.
 
 ## Build-time preparation (maintainers only)
 

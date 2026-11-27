@@ -1,0 +1,95 @@
+name: Release Python wheel
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native build and wheel tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev patchelf pkg-config libssl-dev
+          python -m pip install build auditwheel twine
+          cargo install uniffi --version 0.32.0 --locked --features cli
+      - name: Build Python-loadable UniFFI library
+        env:
+          CARGO_TARGET_DIR: target/python-uniffi
+        run: cargo build --locked -p mcp-v8-uniffi-python --release
+      - name: Build and repair wheel
+        run: |
+          python scripts/prepare-python-package.py \
+            --library target/python-uniffi/release/libmcp_v8_uniffi.so
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            sed -i "s/^version = .*/version = \"${GITHUB_REF_NAME#v}\"/" python/pyproject.toml
+          fi
+          python -m build --wheel --outdir wheel-build python
+          auditwheel repair --wheel-dir dist wheel-build/*.whl
+          python -m twine check --strict dist/*.whl
+      - name: Test the installed wheel outside the checkout
+        run: |
+          python -m venv "$RUNNER_TEMP/mcp-js-wheel"
+          "$RUNNER_TEMP/mcp-js-wheel/bin/pip" install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/mcp-js-wheel/bin/python" -m unittest discover \
+            -s "$GITHUB_WORKSPACE/python/tests" -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+  attach:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-wheel
+          path: dist
+      - name: Attach the wheel to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A direct tag push builds the GitHub release in a parallel workflow.
+          for attempt in {1..60}; do
+            if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" dist/*.whl --repo "$GITHUB_REPOSITORY" --clobber
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::GitHub release $GITHUB_REF_NAME was not created"
+          exit 1
+
+  publish:
+    if: vars.PUBLISH_PYTHON_TO_PYPI == 'true'
+    needs: attach
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-wheel
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
