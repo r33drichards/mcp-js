@@ -1,4 +1,4 @@
-"""Submit JavaScript to a running Modal interpreter."""
+"""Submit JavaScript to a deployed Modal interpreter."""
 
 import argparse
 import json
@@ -15,7 +15,7 @@ def request(base_url, token, path, body=None):
     if body is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode()
-    with urlopen(Request(base_url.rstrip("/") + path, data, headers), timeout=10) as response:
+    with urlopen(Request(base_url.rstrip("/") + path, data, headers), timeout=60) as response:
         return json.load(response)
 
 
@@ -25,7 +25,7 @@ def run_js(call, code, *, session="tutorial"):
         {"code": code, "session": session, "execution_timeout_secs": 5},
     )
     path = f"/api/executions/{execution['execution_id']}"
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         result = call(path)
         status = result["status"].lower()
@@ -49,7 +49,7 @@ def main():
     url = os.environ.get("MCP_JS_URL")
     token = os.environ.get("MCP_JS_TOKEN")
     if not url or not token:
-        parser.error("Set MCP_JS_URL and MCP_JS_TOKEN from the launcher output.")
+        parser.error("Set MCP_JS_URL to the deployed URL and MCP_JS_TOKEN to wk-ID.ws-SECRET.")
 
     call = partial(request, url, token)
     try:

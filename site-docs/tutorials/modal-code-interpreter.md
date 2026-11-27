@@ -1,14 +1,14 @@
 # Run a stateful JavaScript interpreter on Modal
 
-Start a JavaScript interpreter in one terminal and send it code from
-another. Modal runs the published `mcp-js` Docker image, which contains the
-HTTP server and V8 runtime. Python runs locally to start the Sandbox and
-send requests. Modal pulls the image for you.
+Deploy the published `mcp-js` Docker image once, then submit JavaScript
+whenever you need it. Use the same terminal for both steps. When the
+interpreter is idle, Modal can stop its container while keeping the endpoint
+available. The next request starts the container again.
 
-## 1. Start the interpreter
+## 1. Deploy the interpreter
 
-In the first terminal, install the Modal SDK and sign in. You need a Modal
-account and Python 3.10 or later.
+You need a Modal account and Python 3.10 or later for the local CLI. Install
+the CLI and sign in.
 
 ```sh
 python -m venv .venv
@@ -17,70 +17,58 @@ python -m pip install 'modal>=1.6.4'
 modal setup
 ```
 
-Save this script as `deploy_interpreter.py`.
+Save the deployment script as `deploy_interpreter.sh`.
 
-```python
-"""Start the published mcp-js image in a Modal Sandbox."""
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-from shlex import quote
-
-import modal
-
-IMAGE = "docker.io/wholelottahoopla/mcp-js:0.22.0"
-PORT = 8080
-
-
-def main():
-    app = modal.App.lookup("mcp-js-code-interpreter", create_if_missing=True)
-    sandbox = modal.Sandbox.create(
-        app=app,
-        image=modal.Image.from_registry(IMAGE),
-        env={
-            "PORT": str(PORT),
-            "MCP_V8_HEAP_STORE": "dir",
-            "MCP_V8_HEAP_DIR": "/data/heaps",
-            "MCP_V8_SESSION_DB_PATH": "/data/sessions",
-        },
-        readiness_probe=modal.Probe.with_tcp(PORT),
-        block_network=True,
-        timeout=1800,
-    )
-    try:
-        sandbox.wait_until_ready()
-        creds = sandbox.create_connect_token(port=PORT)
-        print("Copy these exports into the client terminal:", flush=True)
-        print(f"export MCP_JS_URL={quote(creds.url)}", flush=True)
-        print(f"export MCP_JS_TOKEN={quote(creds.token)}", flush=True)
-        print("Press Ctrl+C here to stop the interpreter.", flush=True)
-        sandbox.wait()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        sandbox.terminate()
-
-
-if __name__ == "__main__":
-    main()
+modal server deploy \
+  --app-name mcp-js-code-interpreter \
+  --image docker.io/wholelottahoopla/mcp-js:0.22.0 \
+  --port 8080 \
+  --min-containers 0 \
+  --max-containers 1 \
+  --scaledown-window 60 \
+  --volume mcp-js-interpreter-state:/data \
+  --env-var PORT=8080 \
+  --env-var MCP_V8_HEAP_STORE=dir \
+  --env-var MCP_V8_HEAP_DIR=/data/heaps \
+  --env-var MCP_V8_SESSION_DB_PATH=/data/sessions
 ```
-
-Run it and leave this terminal open.
 
 ```sh
-python deploy_interpreter.py
+bash deploy_interpreter.sh
 ```
 
-When the listener is ready, the launcher prints two `export` commands.
-The URL points to this running Sandbox and the token authorizes HTTP
-requests to it. Keep the token private.
+Modal prints an HTTPS URL and the deploy command exits. Copy that URL into
+`MCP_JS_URL` in the next step. Modal runs the stock image’s entrypoint
+directly, so the container only needs the published image.
 
 ## 2. Run JavaScript
 
-Open a second terminal in the same directory and paste the two `export`
-commands from the launcher. Save the following as `run_code.py`. This
-script uses only the Python standard library.
+In the same terminal, create a
+[Modal Proxy Token](https://modal.com/docs/guide/webhook-proxy-auth) for the
+HTTP endpoint. You can reuse one you already have for the environment.
+
+```sh
+modal workspace proxy-tokens create --name mcp-js-interpreter
+```
+
+Set the URL from deployment and combine the proxy token ID and secret with
+a dot between them. Keep the token private.
+
+```sh
+export MCP_JS_URL='https://YOUR-DEPLOYED-URL.modal.run'
+read -rs -p 'Modal proxy token (wk-ID.ws-SECRET): ' MCP_JS_TOKEN
+echo
+export MCP_JS_TOKEN
+```
+
+Save this client as `run_code.py`. It uses the Python standard library.
 
 ```python
-"""Submit JavaScript to a running Modal interpreter."""
+"""Submit JavaScript to a deployed Modal interpreter."""
 
 import argparse
 import json
@@ -97,7 +85,7 @@ def request(base_url, token, path, body=None):
     if body is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode()
-    with urlopen(Request(base_url.rstrip("/") + path, data, headers), timeout=10) as response:
+    with urlopen(Request(base_url.rstrip("/") + path, data, headers), timeout=60) as response:
         return json.load(response)
 
 
@@ -107,7 +95,7 @@ def run_js(call, code, *, session="tutorial"):
         {"code": code, "session": session, "execution_timeout_secs": 5},
     )
     path = f"/api/executions/{execution['execution_id']}"
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         result = call(path)
         status = result["status"].lower()
@@ -131,7 +119,7 @@ def main():
     url = os.environ.get("MCP_JS_URL")
     token = os.environ.get("MCP_JS_TOKEN")
     if not url or not token:
-        parser.error("Set MCP_JS_URL and MCP_JS_TOKEN from the launcher output.")
+        parser.error("Set MCP_JS_URL to the deployed URL and MCP_JS_TOKEN to wk-ID.ws-SECRET.")
 
     call = partial(request, url, token)
     try:
@@ -144,8 +132,8 @@ if __name__ == "__main__":
     main()
 ```
 
-Run three separate commands. Each sends JavaScript to the same named
-session, even though each invocation starts a new local Python process.
+Run three separate commands. The first request might take longer while
+Modal starts the container.
 
 ```sh
 python run_code.py 'globalThis.x = 10'
@@ -153,37 +141,34 @@ python run_code.py 'globalThis.y = 5'
 python run_code.py 'console.log(x + y)'
 ```
 
-The first two commands produce no console output. The third prints `15`.
-A different session starts with an empty heap, so this command exits with
-a reference error.
+The first two commands produce no output. The third prints `15`. A new
+session has its own heap, so this command exits with a reference error.
 
 ```sh
 python run_code.py --session fresh 'console.log(x + y)'
 ```
 
-Press Ctrl+C in the launch terminal when you're done. The launcher
-terminates the Sandbox and its saved state is deleted. The Sandbox also
-expires after 30 minutes.
+## What happens when the app goes idle
 
-## How it works
+- **The endpoint stays deployed.** `--min-containers 0` lets Modal stop the
+  container after roughly 60 seconds without requests. An authenticated
+  request starts a new container when needed. `--max-containers 1` keeps
+  one server process writing to the state volume at a time. See
+  [Modal Servers](https://modal.com/docs/guide/servers).
+- **The named session lives on the volume.** The directory heap store writes
+  V8 snapshots to `/data/heaps` and saves session records under
+  `/data/sessions`. Both directories are on the mounted Modal Volume. Modal
+  commits the volume in the background and on normal shutdown, so the
+  next container can restore committed state. A sudden interruption can
+  lose writes since the last commit. To try a cold start, wait for the
+  deployment to show zero containers and rerun the third command. See
+  [Modal Volumes](https://modal.com/docs/guide/volumes).
+- **The client talks to the interpreter over HTTP.** The server queues
+  each snippet on `POST /api/exec`. The client uses the returned
+  execution ID to poll status and read captured console output. The
+  `tutorial` session name links the three commands. See the
+  [HTTP API reference](../reference/http-api.md).
 
-1. **The launcher starts the image.** The image entrypoint runs
-   `mcp-v8` on port 8080. Once the TCP readiness probe passes, the launcher
-   requests a URL and bearer token. Modal checks the token before forwarding
-   each request. The Sandbox blocks outbound network access. See
-   [Modal Sandbox Connect Tokens](https://modal.com/docs/guide/sandbox-networking#connecting-to-sandboxes-with-http-and-websockets).
-2. **The client runs one snippet.** `POST /api/exec` queues the snippet and
-   returns an execution ID. The client polls `GET /api/executions/{id}`,
-   then reads `GET /api/executions/{id}/output` for the captured console
-   output. If execution fails, the client prints the error and exits with
-   status 1. This example reads one page of output. See the
-   [HTTP API reference](../reference/http-api.md) for pagination.
-3. **The server saves state by session name.** After a successful run, the
-   directory heap store saves the V8 heap under `/data/heaps`. The session
-   records under `/data/sessions` identify which snapshot to restore on the
-   next call. That is how the third command reads `x` and `y`.
-
-This follows the same stateful pattern as
-[Modal’s Python interpreter example](https://modal.com/docs/examples/simple_code_interpreter).
-The server replaces the Python worker, and the named V8 heap replaces its
-shared globals dictionary.
+To remove the endpoint when you’re done, run
+`modal app stop mcp-js-code-interpreter`. The state volume remains available
+for a later deployment.
