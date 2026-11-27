@@ -59,7 +59,7 @@
 <line x1="450" y1="410" x2="510" y2="410" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
 <rect x="60" y="505" width="840" height="80" rx="6" fill="#0f172a"/><rect x="60" y="505" width="840" height="80" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
 <text x="80" y="530" fill="#e2e8f0" font-size="12">run_and_dump artifacts - deterministic replay - minimize</text>
-<text x="80" y="550" fill="#64748b" font-size="9">scenario.json (exact seed + faults) and result.json (status, acked/attempted/unknown/failed, full event log)</text>
+<text x="80" y="550" fill="#64748b" font-size="9">scenario.json (seed + faults), result.json (status + heads), events.json (full event log)</text>
 <text x="80" y="568" fill="#64748b" font-size="9">replay: cargo test --features scenario --test scenario_js &lt;name&gt; -- --nocapture - minimize faults/topology/program until smallest failing case</text>
 <line x1="705" y1="470" x2="705" y2="505" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
 <line x1="255" y1="470" x2="255" y2="505" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>

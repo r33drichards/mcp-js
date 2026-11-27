@@ -546,6 +546,66 @@ fn unavailable_replicas_do_not_count_as_converged() {
 }
 
 #[test]
+fn partition_current_leader_targets_the_replacement_after_a_crash() {
+    use engine_cluster_tests::scenario::ScenarioEvent;
+
+    let result = Scenario {
+        seed: 42,
+        topology: Topology {
+            voters: ["n0", "n1", "n2"].map(str::to_owned).to_vec(),
+            clients: vec!["observer".into()],
+        },
+        workload: Workload {
+            every_ms: 250,
+            count: 0,
+            op: Op::RunJs {
+                node: "leader".into(),
+                program: Program(vec![]),
+            },
+        },
+        faults: vec![
+            Fault::Crash {
+                at_ms: 900,
+                node: CrashTarget::CurrentLeader,
+            },
+            Fault::Partition {
+                at_ms: 1_500,
+                groups: vec![
+                    vec!["current_leader".into()],
+                    vec!["n0".into(), "n1".into(), "n2".into(), "observer".into()],
+                ],
+            },
+        ],
+        recovery: Recovery {
+            stop_workload: true,
+            heal_all: true,
+            restart_crashed: true,
+            deadline_ms: 3_000,
+        },
+        asserts: vec![],
+    }
+    .run_and_dump("real-sled-partition-replacement-leader");
+
+    let crashed = result
+        .events
+        .iter()
+        .find_map(|event| match event {
+            ScenarioEvent::Crash { node, .. } => Some(node),
+            _ => None,
+        })
+        .expect("initial leader did not crash");
+    let isolated = result
+        .events
+        .iter()
+        .find_map(|event| match event {
+            ScenarioEvent::Partition { a, b, .. } if b == "observer" => Some(a),
+            _ => None,
+        })
+        .expect("no leader was partitioned from the observer");
+    assert_ne!(isolated, crashed, "partition targeted the crashed leader");
+}
+
+#[test]
 fn scheduled_crash_interrupts_in_flight_js_publication() {
     use engine_cluster_tests::scenario::ScenarioEvent;
     let result = Scenario {

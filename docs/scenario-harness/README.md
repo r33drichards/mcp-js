@@ -46,11 +46,13 @@ code did X under a real fs fault".
 
 ## Failure artifacts: replay and minimize
 
-Every run writes a replayable artifact via Scenario::run_and_dump:
-`<dir>/scenario.json` (the exact scenario, seed included) and
-`<dir>/result.json` (status, acked/attempted/unknown/failed heads, and the
-full ScenarioEvent log: Election, Invoke, Respond, Crash, Partition, HealAll,
-Restart, Assert). Reproduce any failure byte-for-byte:
+Each call to `Scenario::run_and_dump` writes three replay files:
+
+- `<dir>/scenario.json` contains the exact scenario and seed.
+- `<dir>/result.json` contains `status`, `acked`, `unknown`, `failed`, and `final_heads`.
+- `<dir>/events.json` contains the full `ScenarioEvent` log.
+
+Replay a failing fixture with:
 
     cargo test --manifest-path experiments/sled-fs/Cargo.toml --locked \
         --features scenario --test scenario_js <test_name> -- --nocapture

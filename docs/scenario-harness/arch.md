@@ -40,8 +40,9 @@ flowchart TB
 The runner is the single entry point: `Scenario::run_and_dump(name)`
 calls `run_scenario`, which under `feature = "real-sled"` delegates to
 `scenario_real::run_scenario`, otherwise to the modeled runner. Both return
-a `ScenarioResult` (status, acked / attempted / unknown / failed heads,
-events) and both drive the same assertion list.
+a `ScenarioResult` and drive the same assertion list. The artifact writer
+stores `status`, `acked`, `unknown`, `failed`, and `final_heads` in
+`result.json` and the result's `events` in `events.json`.
 
 ## 2. Scenario schema and semantics
 
@@ -59,8 +60,8 @@ events) and both drive the same assertion list.
   snapshots, and publishes the shared label CAS.
 - `Fault::Crash { at_ms, node: CrashTarget }` (`Node(name)` or
   `CurrentLeader`), `Fault::Partition { groups }` (groups may name
-  `"current_leader"`; the sitting leader is excluded from any group that
-  does not contain it), `Fault::HealAll`.
+  `"current_leader"`; the real runner polls the voters at fault time and
+  keeps the resolved leader in the group containing that token), `Fault::HealAll`.
 - `Recovery { stop_workload, heal_all, restart_crashed, deadline_ms }`.
 - Assertion ids: `FreshWriteSucceeds`, `AckedCommitsInLegalHistory`,
   `ReplicasConvergeAfterRecovery`, `PublishedSnapshotMatchesModel`.
@@ -105,7 +106,9 @@ Key points:
   `turmoil::partition`/`repair` (network faults, not process faults).
 - **Leader resolution.** `CrashTarget::CurrentLeader` and
   `Partition["current_leader"]` resolve by polling
-  `ScenarioHostClient::status()` across the voters at fault time.
+  `ScenarioHostClient::status()` across the voters at fault time. The
+  highest-term leader reported by the voters is selected. A partition with
+  `"current_leader"` fails the scenario if no voter reports a leader.
 - **Publication vs fault race.** While an op is in flight, the observer
   runs `tokio::select!` biased between the next fault deadline and the
   publication future - so a scheduled crash lands mid-publication rather
@@ -217,7 +220,7 @@ paths, faults surface through the real sled code paths. Named proofs:
 
 ```mermaid
 flowchart LR
-    RUN["run_and_dump(name)"] --> ART["artifacts dir:<br/>scenario.json (seed + exact faults)<br/>result.json (status, heads, full event log)"]
+    RUN["run_and_dump(name)"] --> ART["artifacts dir:<br/>scenario.json (seed + exact faults)<br/>result.json (status, heads)<br/>events.json (full event log)"]
     ART --> REPLAY["deterministic replay:<br/>cargo test --manifest-path experiments/sled-fs/Cargo.toml --locked --features scenario --test scenario_js <test> -- --nocapture"]
     REPLAY --> MIN{"assertion still fails?"}
     MIN -->|"yes"| MIN2["minimize: drop one fault at a time,<br/>shrink topology to minimum voters,<br/>shrink JS program"]

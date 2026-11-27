@@ -37,7 +37,7 @@ async fn apply_fault(
     crashed: &mut Vec<String>,
     events: &mut Vec<ScenarioEvent>,
     start: tokio::time::Instant,
-) {
+) -> Result<(), String> {
     let at = now_ms(start);
     match fault {
         Fault::Crash { node, .. } => {
@@ -68,16 +68,30 @@ async fn apply_fault(
             let chosen = groups
                 .iter()
                 .position(|g| g.iter().any(|h| h == "current_leader"));
+            let sitting_leader = if chosen.is_some() {
+                let (name, _) = current_leader()
+                    .await
+                    .ok_or_else(|| format!("no leader available for partition scheduled at {at}ms"))?;
+                Some(name)
+            } else {
+                None
+            };
+            let at = now_ms(start);
             let mut resolved = Vec::<Vec<String>>::new();
             for (gi, group) in groups.iter().enumerate() {
                 let mut names = Vec::new();
                 for name in group {
                     let name = if name == "current_leader" {
-                        leader.to_owned()
+                        sitting_leader
+                            .as_ref()
+                            .expect("leader resolved for partition")
+                            .clone()
                     } else {
                         name.clone()
                     };
-                    if chosen.is_some_and(|i| i != gi && name == leader) {
+                    if chosen.is_some_and(|i| i != gi)
+                        && sitting_leader.as_deref() == Some(name.as_str())
+                    {
                         continue;
                     }
                     if !names.contains(&name) {
@@ -107,6 +121,7 @@ async fn apply_fault(
             }
         }
     }
+    Ok(())
 }
 
 pub(super) fn run_scenario(sc: &Scenario) -> ScenarioResult {
@@ -235,12 +250,17 @@ pub(super) fn run_scenario(sc: &Scenario) -> ScenarioResult {
 }
 
 async fn current_leader() -> Option<(String, u64)> {
-    for name in ["n0", "n1", "n2"] {
-        if let Ok((Role::Leader, term)) = ScenarioHostClient::new(name).status().await {
-            return Some((name.to_owned(), term));
-        }
-    }
-    None
+    let names = ["n0", "n1", "n2"];
+    let [n0, n1, n2] = names.map(ScenarioHostClient::new);
+    let (s0, s1, s2) = tokio::join!(n0.status(), n1.status(), n2.status());
+    names
+        .into_iter()
+        .zip([s0, s1, s2])
+        .filter_map(|(name, status)| match status {
+            Ok((Role::Leader, term)) => Some((name.to_owned(), term)),
+            _ => None,
+        })
+        .max_by_key(|(_, term)| *term)
 }
 
 async fn publish(
@@ -351,11 +371,11 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
     let mut ops_done = 0usize;
     let mut op_id = 0u64;
     let mut op_start = start + Duration::from_millis(600);
-    loop {
+    let fault_error = 'workload: loop {
         let next_fault = faults.first().map(Fault::at_ms);
         let next_op = (ops_done < sc.workload.count).then_some(op_start);
         let fault_first = match (next_fault, next_op) {
-            (None, None) => break,
+            (None, None) => break None,
             (Some(_), None) => true,
             (None, Some(_)) => false,
             (Some(ft), Some(ot)) => ft <= ot.duration_since(start).as_millis() as u64,
@@ -363,7 +383,11 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
         if fault_first {
             let fault = faults.remove(0);
             tokio::time::sleep_until(start + Duration::from_millis(fault.at_ms())).await;
-            apply_fault(fault, &leader, &control, &mut crashed, &mut events, start).await;
+            if let Err(error) =
+                apply_fault(fault, &leader, &control, &mut crashed, &mut events, start).await
+            {
+                break 'workload Some(error);
+            }
         } else {
             tokio::time::sleep_until(op_start).await;
             let iteration = ops_done;
@@ -392,7 +416,11 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
                         biased;
                         _ = tokio::time::sleep_until(due) => {
                             let fault = faults.remove(0);
-                            apply_fault(fault, &leader, &control, &mut crashed, &mut events, start).await;
+                            if let Err(error) =
+                                apply_fault(fault, &leader, &control, &mut crashed, &mut events, start).await
+                            {
+                                break 'workload Some(error);
+                            }
                         }
                         outcome = &mut publication => break outcome,
                     }
@@ -409,7 +437,7 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
             ops_done += 1;
             op_start = tokio::time::Instant::now() + Duration::from_millis(sc.workload.every_ms);
         }
-    }
+    };
     // Recovery is controller-driven: no soft shutdown or cross-host DB opener.
     if sc.recovery.heal_all {
         for a in 0..HOSTS.len() {
@@ -613,7 +641,7 @@ async fn run_client(sc: &Scenario, control: Rc<RefCell<Control>>) -> ScenarioRes
         }
     }
     ScenarioResult {
-        status,
+        status: fault_error.map_or(status, Err),
         events,
         acked,
         unknown,

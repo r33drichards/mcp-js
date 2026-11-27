@@ -1904,6 +1904,7 @@ dependencies = [
  "serde_json",
  "server",
  "sled",
+ "tempfile",
  "tokio",
  "turmoil",
 ]

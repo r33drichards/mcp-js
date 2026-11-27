@@ -104,6 +104,5 @@ fuzz_target!(|data: &[u8]| {
         ],
     };
     let replay = Scenario::from_json(&scenario.to_json()).expect("generated scenario parses");
-    let result = replay.run_and_dump("fuzz-js-unmodeled");
-    result.expect_status("all assertions passed");
+    replay.assert_fuzz_case(&format!("fuzz-js-unmodeled-{}-{seed}", std::process::id()));
 });

@@ -25,9 +25,12 @@ branch; an arbitrary hand-written scenario is not output-bounded by this runner.
 Do not use untrusted raw sources as fixtures without reviewing output behavior.
 
 Run: `cargo +nightly fuzz run --manifest-path server/engine-cluster-tests/fuzz/Cargo.toml fuzz_js_unmodeled -- -max_len=64 -max_total_time=300 -timeout=120`.
-On failure, `server/engine-cluster-tests/fuzz/target/scenario-artifacts/fuzz-js-unmodeled/scenario.json` records the source and seed. Re-run the scenario using
-`replay_file(path)` or the fixture runner; preserve the libFuzzer crash input
-and artifact before the next iteration overwrites that directory. LibFuzzer
+On failure, the scenario is saved under
+`target/scenario-artifacts/fuzz-js-unmodeled-<pid>-<seed>/scenario.json`
+relative to the fuzz process's working directory. The same directory contains
+`events.json` and `result.json`. Successful iterations skip artifact writes.
+Keep the libFuzzer crash input and use `replay_file(path)` or the fixture runner
+to replay the saved scenario. LibFuzzer
 can minimize its own input; promote a minimized serialized scenario into a
 checked-in fixture. The runner currently does not enforce a console-output
 quota or wall-clock watchdog outside the engine; do not claim those bounds.

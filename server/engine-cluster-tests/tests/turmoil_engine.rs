@@ -89,14 +89,8 @@ async fn exchange<Req: Serialize, Resp: DeserializeOwned>(
     }).await.ok().flatten()
 }
 
-fn engine_with_cluster(node: Arc<ClusterNode>, tag: &str) -> Arc<Engine> {
-    let registry = ExecutionRegistry::new(
-        std::env::temp_dir()
-            .join(format!("mcp-turmoil-eng-{tag}-{}", std::process::id()))
-            .to_str()
-            .unwrap(),
-    )
-    .expect("registry");
+fn engine_with_cluster(node: Arc<ClusterNode>, registry_path: &std::path::Path) -> Arc<Engine> {
+    let registry = ExecutionRegistry::new(registry_path.to_str().unwrap()).expect("registry");
     let fs_config = FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
     let store = Arc::new(FsStore::in_memory());
     let labels = LabelStore::in_memory().with_cluster(node);
@@ -109,18 +103,6 @@ fn engine_with_cluster(node: Arc<ClusterNode>, tag: &str) -> Arc<Engine> {
 }
 
 type Nodes = Rc<RefCell<HashMap<String, Arc<ClusterNode>>>>;
-
-fn temp_sled(tag: &str) -> sled::Db {
-    let dir = std::env::temp_dir().join(format!(
-        "mcp-turmoil-sled-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    sled::Config::new().path(dir).open().expect("sled")
-}
 
 /// Poll an engine execution to terminal status; return the resulting fs CA hex.
 async fn run_js_to_fs(engine: &Engine, code: &str) -> Option<String> {
@@ -152,6 +134,7 @@ fn js_file_output_pushes_label_through_raft_under_partition() {
         server::engine::initialize_v8();
     });
 
+    let storage = tempfile::tempdir().expect("simulation storage");
     let shared: Nodes = Rc::new(RefCell::new(HashMap::new()));
     let mut sim = turmoil::Builder::new()
         .rng_seed(21)
@@ -188,12 +171,14 @@ fn js_file_output_pushes_label_through_raft_under_partition() {
             learner: false,
         };
         let shared = shared.clone();
+        let db_path = storage.path().join(name);
         sim.host(name, move || {
+            let db_path = db_path.clone();
             let shared = shared.clone();
             let config = config.clone();
             async move {
-                let node =
-                    ClusterNode::new(config, temp_sled(name)).with_peer_rpc(Arc::new(SimRpc));
+                let db = sled::Config::new().path(db_path).open().expect("sled");
+                let node = ClusterNode::new(config, db).with_peer_rpc(Arc::new(SimRpc));
                 let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
                 shared.borrow_mut().insert(name.to_owned(), node.clone());
                 node.start_background_tasks().expect("start loops");
@@ -215,6 +200,7 @@ fn js_file_output_pushes_label_through_raft_under_partition() {
             }
         });
     }
+    let registry_path = storage.path().join("execution-registry");
     sim.client("observer", async move {
         tokio::time::sleep(Duration::from_millis(600)).await;
         let nodes = shared.borrow().clone();
@@ -236,7 +222,7 @@ fn js_file_output_pushes_label_through_raft_under_partition() {
         // Engines: the leader's engine runs the JS and mounts "main"; the
         // follower's engine pushes the resulting head through its own
         // (forwarding) cluster node.
-        let leader_engine = engine_with_cluster(nodes[leader].clone(), "leader");
+        let leader_engine = engine_with_cluster(nodes[leader].clone(), &registry_path);
         let follower_store =
             Arc::new(LabelStore::in_memory().with_cluster(nodes[follower].clone()));
 
