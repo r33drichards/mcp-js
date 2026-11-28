@@ -95,3 +95,62 @@ jobs:
           name: fuzz-corpus-${{ matrix.target }}
           path: server/fuzz/corpus/${{ matrix.target }}/
           if-no-files-found: ignore
+
+  cluster-fuzz:
+    name: Fuzz Cluster Network
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'fuzz')
+    runs-on: [self-hosted, railway]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: server/engine-cluster-tests/fuzz
+            target: fuzz_js_cluster
+          - crate: server/engine-cluster-tests/fuzz
+            target: fuzz_js_scenario
+          - crate: server/engine-cluster-tests/fuzz
+            target: fuzz_js_unmodeled
+          - crate: server/cluster-tests/fuzz
+            target: peer_network
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Install cargo-fuzz
+        run: nix develop .#fuzz --command bash -c "cargo install cargo-fuzz"
+
+      - name: Build fuzz target (${{ matrix.target }})
+        run: nix develop .#fuzz --command bash -c "cd ${{ matrix.crate }} && cargo fuzz build --sanitizer=address ${{ matrix.target }}"
+
+      - name: Run fuzzer (${{ matrix.target }})
+        env:
+          ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5:allocator_may_return_null=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/server/fuzz/lsan-suppressions.txt:print_suppressions=0
+        run: |
+          nix develop .#fuzz --command bash -c \
+            "cd ${{ matrix.crate }} && cargo fuzz run --sanitizer=address ${{ matrix.target }} \
+              -- -fork=1 -max_total_time=300 -rss_limit_mb=8192 -max_len=64 -timeout=120"
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: |
+            ${{ matrix.crate }}/artifacts/
+            ${{ matrix.crate }}/target/scenario-artifacts/
+          if-no-files-found: ignore
+
+      - name: Upload corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: ${{ matrix.crate }}/corpus/${{ matrix.target }}/
+          if-no-files-found: ignore

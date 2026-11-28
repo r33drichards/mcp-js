@@ -57,12 +57,14 @@ production tests outside the bounded model. External side effects are not modele
 
 ## Reproduce
 
-Use the same SHA-256-pinned official TLC jar as `check.py` (see README):
+Build the pinned TLC JAR and use its recorded SHA-256.
+[TLC setup](README.md#reproduce-and-inspect)
 
 ```sh
-python3 specs/runner/check_admission.py --jar /tmp/tla2tools.jar --out /tmp/admission
+tlc_sha256=$(cat /tmp/tla2tools.jar.sha256)
+python3 specs/runner/check_admission.py --jar /tmp/tla2tools.jar --jar-sha256 "$tlc_sha256" --out /tmp/admission
 SCHEDULER_ADMISSION_TRACES=/tmp/admission cargo test --locked --manifest-path scheduler-runner/Cargo.toml --lib admission_replay -- --nocapture
-python3 specs/runner/check_admission.py --jar /tmp/tla2tools.jar --out /tmp/admission-deep --deep
+python3 specs/runner/check_admission.py --jar /tmp/tla2tools.jar --jar-sha256 "$tlc_sha256" --out /tmp/admission-deep --deep
 SCHEDULER_ADMISSION_TRACES=/tmp/admission-deep cargo test --locked --manifest-path scheduler-runner/Cargo.toml --lib admission_replay -- --nocapture
 python3 specs/runner/admission_mutations.py
 ```

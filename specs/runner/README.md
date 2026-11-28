@@ -87,23 +87,22 @@ reach an action/state; they are not safety failures.
 
 ## Reproduce and inspect
 
-Requires Java 21, Python 3, and the repository Rust toolchain. Download TLC from
-its official release; `check.py` verifies its SHA-256 before execution. The pinned
-release asset currently identifies itself as TLC 2026.11.15.002146 (bc1b506),
-SHA-256 `fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713`.
-GitHub release asset `749260120` publishes the same digest as the downloaded jar.
-The prior rolling asset was replaced upstream. Both fast models were regenerated
-with this pin and retained their safety state counts; committed historical
-summaries retain the checksum of the tool that originally produced them.
-A changed upstream asset fails closed; review a new pin rather than bypass it.
+Requires Git, Java 21, Ant, Python 3, `sha256sum`, and the repository Rust
+toolchain. TLA+ publishes v1.8.0 as a rolling prerelease and replaces its JAR.
+The build script checks out the fixed TLC source commit
+`bc1b506bdcad80bb518bf3776a9161c34ff0fc4c`, which produced the previously
+verified JAR. The script records the SHA-256 of the JAR built for each run.
+Both checkers verify that digest before execution. Historical summaries
+retain the digest of the JAR that produced them.
 
 ```bash
-curl --fail --location -H 'Accept: application/octet-stream' https://api.github.com/repos/tlaplus/tlaplus/releases/assets/768714348 -o /tmp/tla2tools.jar
-python3 specs/runner/check.py --jar /tmp/tla2tools.jar --out /tmp/runner-model
+bash specs/runner/build_tlc.sh /tmp/tla2tools.jar
+tlc_sha256=$(cat /tmp/tla2tools.jar.sha256)
+python3 specs/runner/check.py --jar /tmp/tla2tools.jar --jar-sha256 "$tlc_sha256" --out /tmp/runner-model
 SCHEDULER_MODEL_TRACES=/tmp/runner-model cargo test --locked --manifest-path scheduler-runner/Cargo.toml --lib model_replay -- --nocapture
 python3 specs/runner/mutations.py
 # Deeper bounded exploration, same deterministic replay:
-python3 specs/runner/check.py --jar /tmp/tla2tools.jar --out /tmp/runner-model-deep --deep
+python3 specs/runner/check.py --jar /tmp/tla2tools.jar --jar-sha256 "$tlc_sha256" --out /tmp/runner-model-deep --deep
 SCHEDULER_MODEL_TRACES=/tmp/runner-model-deep cargo test --locked --manifest-path scheduler-runner/Cargo.toml --lib model_replay -- --nocapture
 ```
 

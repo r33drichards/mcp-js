@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="620" viewBox="0 0 960 620" font-family="JetBrains Mono, ui-monospace, Menlo, monospace">
+<defs>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+</defs>
+<rect width="960" height="620" fill="#020617"/><rect width="960" height="620" fill="url(#grid)"/>
+<text x="30" y="36" fill="#e2e8f0" font-size="15">one scenario, end to end (real-sled track)</text>
+<line x1="60" y1="90" x2="900" y2="90" stroke="#334155" stroke-width="2"/>
+<text x="60" y="80" fill="#64748b" font-size="9">simulated time</text>
+<circle cx="120" cy="90" r="5" fill="#34d399"/><text x="95" y="115" fill="#6ee7b7" font-size="10">t=0</text>
+<text x="80" y="132" fill="#64748b" font-size="8">leader elected</text>
+<text x="80" y="144" fill="#475569" font-size="8">Election{leader,term}</text>
+<circle cx="300" cy="90" r="5" fill="#22d3ee"/><text x="270" y="115" fill="#67e8f9" font-size="10">workload</text>
+<text x="230" y="132" fill="#64748b" font-size="8">Invoke{op_id,node}</text>
+<text x="230" y="144" fill="#475569" font-size="8">every 250ms x count</text>
+<circle cx="480" cy="90" r="5" fill="#fb7185"/><text x="440" y="115" fill="#fda4af" font-size="10">t=fault.at_ms</text>
+<text x="405" y="132" fill="#64748b" font-size="8">Crash{CurrentLeader}</text>
+<text x="405" y="144" fill="#475569" font-size="8">controller Sim::crash</text>
+<circle cx="640" cy="90" r="5" fill="#fbbf24"/><text x="600" y="115" fill="#fcd34d" font-size="10">partition / heal</text>
+<text x="590" y="132" fill="#64748b" font-size="8">turmoil::partition</text>
+<text x="590" y="144" fill="#475569" font-size="8">groups resolved incl. leader</text>
+<circle cx="820" cy="90" r="5" fill="#a78bfa"/><text x="770" y="115" fill="#c4b5fd" font-size="10">recovery</text>
+<text x="750" y="132" fill="#64748b" font-size="8">heal_all - restart_crashed</text>
+<text x="750" y="144" fill="#475569" font-size="8">deadline_ms budget</text>
+<line x1="120" y1="96" x2="300" y2="96" stroke="#34d399" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="300" y1="96" x2="480" y2="96" stroke="#22d3ee" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="480" y1="96" x2="640" y2="96" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="640" y1="96" x2="820" y2="96" stroke="#fbbf24" stroke-width="1" stroke-dasharray="3,3"/>
+<rect x="60" y="180" width="390" height="130" rx="6" fill="#0f172a"/><rect x="60" y="180" width="390" height="130" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+<text x="80" y="205" fill="#6ee7b7" font-size="12">Workload op: RunJs on the leader</text>
+<text x="80" y="225" fill="#64748b" font-size="9">observer - ScenarioHostClient.run_js(program)</text>
+<text x="80" y="243" fill="#64748b" font-size="9">program.render_js(i): write /data/iteration-{i}</text>
+<text x="80" y="261" fill="#64748b" font-size="9">then snapshot as candidate, publish_cas main</text>
+<text x="80" y="286" fill="#475569" font-size="8">host executes real JS in V8; snapshot + shared-label</text>
+<text x="80" y="299" fill="#475569" font-size="8">publication are explicit separate production actions</text>
+<rect x="510" y="180" width="390" height="130" rx="6" fill="#0f172a"/><rect x="510" y="180" width="390" height="130" rx="6" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+<text x="530" y="205" fill="#fda4af" font-size="12">Fault fires mid-flight (select! biased)</text>
+<text x="530" y="225" fill="#64748b" font-size="9">publication future races the fault deadline</text>
+<text x="530" y="243" fill="#64748b" font-size="9">outcomes: Acked - Conflict - Unknown - Failed</text>
+<text x="530" y="261" fill="#64748b" font-size="9">timeout is NOT interpreted as non-commit</text>
+<text x="530" y="286" fill="#475569" font-size="8">uncertain heads are reconciled against resolve(main)</text>
+<text x="530" y="299" fill="#475569" font-size="8">before any ack is counted</text>
+<rect x="60" y="350" width="390" height="120" rx="6" fill="#0f172a"/><rect x="60" y="350" width="390" height="120" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="80" y="375" fill="#c4b5fd" font-size="12">Crash + exclusive fresh reopen</text>
+<text x="80" y="395" fill="#64748b" font-size="9">host's sled Db dropped on Sim::crash</text>
+<text x="80" y="413" fill="#64748b" font-size="9">Sim::bounce reopens the same on-disk store</text>
+<text x="80" y="431" fill="#64748b" font-size="9">new incarnation tag = generation + 1</text>
+<text x="80" y="456" fill="#475569" font-size="8">pre-crash console/blob writers fail closed against</text>
+<text x="80" y="469" fill="#475569" font-size="8">the reopened generation</text>
+<rect x="510" y="350" width="390" height="120" rx="6" fill="#0f172a"/><rect x="510" y="350" width="390" height="120" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="530" y="375" fill="#67e8f9" font-size="12">Assertions over recovered state</text>
+<text x="530" y="395" fill="#64748b" font-size="9">AckedCommitsInLegalHistory (Raft log check)</text>
+<text x="530" y="413" fill="#64748b" font-size="9">FreshWriteSucceeds: post-recovery ack, distinct head</text>
+<text x="530" y="431" fill="#64748b" font-size="9">ReplicasConvergeAfterRecovery + snapshot==model</text>
+<text x="530" y="456" fill="#475569" font-size="8">unavailable replicas must NOT count as converged</text>
+<text x="530" y="469" fill="#475569" font-size="8">every event lands in ScenarioEvent log</text>
+<line x1="255" y1="310" x2="255" y2="350" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="705" y1="310" x2="705" y2="350" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="450" y1="410" x2="510" y2="410" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="60" y="505" width="840" height="80" rx="6" fill="#0f172a"/><rect x="60" y="505" width="840" height="80" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+<text x="80" y="530" fill="#e2e8f0" font-size="12">run_and_dump artifacts - deterministic replay - minimize</text>
+<text x="80" y="550" fill="#64748b" font-size="9">scenario.json (seed + faults), result.json (status + heads), events.json (full event log)</text>
+<text x="80" y="568" fill="#64748b" font-size="9">replay: cargo test --features scenario --test scenario_js &lt;name&gt; -- --nocapture - minimize faults/topology/program until smallest failing case</text>
+<line x1="705" y1="470" x2="705" y2="505" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="255" y1="470" x2="255" y2="505" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+</svg>

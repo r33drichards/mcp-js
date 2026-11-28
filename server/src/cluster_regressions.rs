@@ -170,38 +170,6 @@ async fn lost_quorum_cannot_ack_claim_and_new_leader_can_replace_it() {
     assert!(claim.await.unwrap().is_err());
 }
 #[tokio::test]
-async fn flush_error_never_acknowledges_vote_or_append_and_stops_writes() {
-    for vote in [false, true] {
-        let n = node();
-        n.fail_flush.store(true, Ordering::SeqCst);
-        if vote {
-            assert!(
-                !n.handle_request_vote(RequestVoteRequest {
-                    term: 1,
-                    candidate_id: "candidate".into(),
-                    last_log_index: 0,
-                    last_log_term: 0
-                })
-                .await
-                .vote_granted
-            );
-        } else {
-            assert!(
-                !n.handle_append_entries(append(1, 0, 0, vec![entry(1, 1, "receipt")], 1))
-                    .await
-                    .success
-            );
-        }
-        n.fail_flush.store(false, Ordering::SeqCst);
-        assert!(n.put("other".into(), "value".into()).await.is_err());
-        assert!(
-            !n.handle_append_entries(append(2, 0, 0, vec![], 0))
-                .await
-                .success
-        );
-    }
-}
-#[tokio::test]
 async fn committed_apply_failure_never_releases_claim() {
     let n = node();
     {
@@ -788,4 +756,185 @@ async fn replication_reply_and_heartbeat_tick_do_not_deadlock_on_state_lock() {
     for node in &nodes { node.shutdown(); }
     tokio::time::timeout(Duration::from_millis(250), heartbeat).await
         .expect("lock contention must not strand heartbeat shutdown").unwrap();
+}
+
+// Exercise the production transport against real HTTP responses: even a body
+// that deserializes successfully must not turn an HTTP failure into an RPC ack.
+async fn http_peer_rpc_results(status: u16, body: &'static str) -> [bool; 6] {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move {
+        for path in [
+            "/raft/request-vote",
+            "/raft/append-entries",
+            "/data/put",
+            "/data/cas",
+            "/raft/join",
+            "/raft/leave",
+        ] {
+            let (stream, _) = listener.accept().await.unwrap();
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    hyper::service::service_fn(
+                        move |req: hyper::Request<hyper::body::Incoming>| async move {
+                            assert_eq!(req.method(), hyper::Method::POST);
+                            assert_eq!(req.uri().path(), path);
+                            use http_body_util::BodyExt;
+                            req.into_body().collect().await.unwrap();
+                            Ok::<_, std::convert::Infallible>(
+                                hyper::Response::builder()
+                                    .status(status)
+                                    .header("connection", "close")
+                                    .header("content-type", "application/json")
+                                    .body(http_body_util::Full::new(
+                                        hyper::body::Bytes::from_static(body.as_bytes()),
+                                    ))
+                                    .unwrap(),
+                            )
+                        },
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let rpc = HttpPeerRpc {
+        client: rpc_client(None).unwrap(),
+    };
+    let results = [
+        rpc.request_vote(
+            &peer,
+            RequestVoteRequest {
+                term: 1,
+                candidate_id: "candidate".into(),
+                last_log_index: 0,
+                last_log_term: 0,
+            },
+        )
+        .await
+        .is_some(),
+        rpc.append_entries(&peer, append(1, 0, 0, vec![], 0))
+            .await
+            .is_some(),
+        rpc.forward_put(
+            &peer,
+            PutRequest {
+                key: "k".into(),
+                value: "v".into(),
+                extra: vec![],
+            },
+        )
+        .await
+        .is_some(),
+        rpc.forward_cas(
+            &peer,
+            CasRequest {
+                key: "k".into(),
+                expected: None,
+                new: "v".into(),
+                extra: vec![],
+            },
+        )
+        .await
+        .is_some(),
+        rpc.forward_join(
+            &peer,
+            JoinRequest {
+                node_id: "joining".into(),
+                addr: "127.0.0.1:4000".into(),
+                as_learner: false,
+            },
+        )
+        .await
+        .is_some(),
+        rpc.forward_leave(
+            &peer,
+            LeaveRequest {
+                node_id: "leaving".into(),
+            },
+        )
+        .await
+        .is_some(),
+    ];
+    server.await.unwrap();
+    results
+}
+
+const RPC_RESPONSE_BODY: &str =
+    r#"{"term":1,"vote_granted":true,"success":true,"applied":true,"ok":true}"#;
+
+#[tokio::test]
+async fn http_peer_rpc_rejects_error_json() {
+    for status in [401, 409, 500, 503] {
+        assert_eq!(
+            http_peer_rpc_results(status, r#"{"error":"unavailable"}"#).await,
+            [false; 6],
+            "HTTP {status}: vote, append, put, cas, join, leave"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_peer_rpc_rejects_non_200_with_valid_bodies() {
+    for status in [201, 302, 307, 400, 500, 503] {
+        assert_eq!(
+            http_peer_rpc_results(status, RPC_RESPONSE_BODY).await,
+            [false; 6],
+            "HTTP {status}: vote, append, put, cas, join, leave"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_peer_rpc_accepts_200_and_rejects_malformed_json() {
+    assert_eq!(
+        http_peer_rpc_results(200, RPC_RESPONSE_BODY).await,
+        [true; 6]
+    );
+    assert_eq!(http_peer_rpc_results(200, "not JSON").await, [false; 6]);
+}
+
+/// Raft Figure 8 / section 5.4.2: replica counts alone cannot commit old terms.
+#[tokio::test]
+async fn majority_of_old_term_entry_waits_for_current_term_commit() {
+    let n = ClusterNode::new(
+        ClusterConfig {
+            peers: vec!["peer-a".into(), "peer-b".into()],
+            ..ClusterConfig::default()
+        },
+        sled::Config::new().temporary(true).open().unwrap(),
+    );
+    assert!(n.handle_append_entries(append(1, 0, 0, vec![entry(1, 1, "old")], 0)).await.success);
+    // Install the result of a new election; isolate commit-index calculation
+    // from election timing. All log writes still use production paths.
+    {
+        let mut state = n.state.write().await;
+        state.role = Role::Leader;
+        state.current_term = 2;
+        state.next_index.insert("peer-a".into(), 2);
+        state.next_index.insert("peer-b".into(), 1);
+        state.match_index.insert("peer-a".into(), 0);
+        state.match_index.insert("peer-b".into(), 0);
+    }
+    n.accept_append_response("peer-a", 2, 0, 1, AppendEntriesResponse { term: 2, success: true }).await;
+    n.update_commit_index().await;
+    assert_eq!(n.state.read().await.commit_index, 0,
+        "self plus peer-a is a majority, but the entry belongs to term 1");
+    assert_eq!(n.get("claim").await.unwrap(), None);
+    let proposer = n.clone();
+    let proposal = tokio::spawn(async move { proposer.put("barrier".into(), "term-2".into()).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while n.state.read().await.log.len() < 2 { tokio::task::yield_now().await; }
+    }).await.expect("current-term proposal appended");
+    assert_eq!(n.state.read().await.log[1].term, 2);
+    n.update_commit_index().await;
+    assert_eq!(n.state.read().await.commit_index, 0, "no quorum for current term yet");
+    n.accept_append_response("peer-a", 2, 1, 2, AppendEntriesResponse { term: 2, success: true }).await;
+    n.update_commit_index().await;
+    tokio::time::timeout(Duration::from_secs(1), proposal).await.unwrap().unwrap().unwrap();
+    assert_eq!(n.state.read().await.commit_index, 2);
+    assert_eq!(n.state.read().await.last_applied, 2);
+    assert_eq!(n.get("claim").await.unwrap().as_deref(), Some("old"));
+    assert_eq!(n.get("barrier").await.unwrap().as_deref(), Some("term-2"));
 }

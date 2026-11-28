@@ -4,18 +4,20 @@
 //! backed by sled. Each node runs an HTTP server for Raft RPCs and a simple
 //! data API.
 
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{stream::FuturesUnordered, StreamExt};
 use http_body_util::BodyExt;
-use hyper::{Method, Request, Response, StatusCode, body::Incoming};
+use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_RAFT_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -26,29 +28,23 @@ const MAX_RAFT_TERM: u64 = (1 << 63) - 1;
 /// Length is public; equal-length credential bytes are compared in constant time.
 pub fn bearer_matches(header: Option<&str>, token: &str) -> bool {
     use subtle::ConstantTimeEq;
-    header
-        .and_then(|h| h.strip_prefix("Bearer "))
+    header.and_then(|h| h.strip_prefix("Bearer "))
         .is_some_and(|value| bool::from(value.as_bytes().ct_eq(token.as_bytes())))
 }
 
 fn rpc_client(token: Option<&str>) -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(token) = token {
-        if token.is_empty() {
-            return Err("empty cluster credential".into());
-        }
+        if token.is_empty() { return Err("empty cluster credential".into()); }
         let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| "invalid cluster credential")?;
         value.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, value);
     }
-    reqwest::Client::builder()
-        .default_headers(headers)
+    reqwest::Client::builder().default_headers(headers)
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(5))
-        .connect_timeout(Duration::from_millis(500))
-        .build()
-        .map_err(|e| e.to_string())
+        .timeout(Duration::from_secs(5)).connect_timeout(Duration::from_millis(500))
+        .build().map_err(|e| e.to_string())
 }
 
 const APPLIED_KEY: &[u8] = b"\0raft_applied";
@@ -115,6 +111,121 @@ pub struct RequestVoteRequest {
 pub struct RequestVoteResponse {
     pub term: u64,
     pub vote_granted: bool,
+}
+
+/// Outbound Raft RPC transport. Production uses reqwest; simulations can
+/// provide a Tokio-compatible network without replacing the Raft handlers.
+pub type PeerRpcFuture<'a, T> = Pin<Box<dyn Future<Output = Option<T>> + Send + 'a>>;
+
+pub trait PeerRpc: Send + Sync {
+    fn request_vote<'a>(
+        &'a self,
+        peer: &'a str,
+        req: RequestVoteRequest,
+    ) -> PeerRpcFuture<'a, RequestVoteResponse>;
+
+    fn append_entries<'a>(
+        &'a self,
+        peer: &'a str,
+        req: AppendEntriesRequest,
+    ) -> PeerRpcFuture<'a, AppendEntriesResponse>;
+
+    /// Forward a client put to the leader over /data/put.
+    fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> PeerRpcFuture<'a, ForwardAck>;
+
+    /// Forward a client CAS to the leader over /data/cas.
+    fn forward_cas<'a>(&'a self, peer: &'a str, req: CasRequest)
+        -> PeerRpcFuture<'a, CasResponse>;
+
+    /// Forward a membership join to the leader over /raft/join.
+    fn forward_join<'a>(&'a self, peer: &'a str, req: JoinRequest)
+        -> PeerRpcFuture<'a, ForwardAck>;
+
+    /// Forward a membership leave to the leader over /raft/leave.
+    fn forward_leave<'a>(&'a self, peer: &'a str, req: LeaveRequest)
+        -> PeerRpcFuture<'a, ForwardAck>;
+}
+
+/// Acknowledgement body of forwarding endpoints that carry no payload
+/// ({"ok":true} deserializes into this; unknown fields are ignored).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForwardAck {}
+
+struct HttpPeerRpc {
+    client: reqwest::Client,
+}
+
+impl HttpPeerRpc {
+    async fn post<Req: Serialize, Resp: serde::de::DeserializeOwned>(
+        &self,
+        peer: &str,
+        path: &str,
+        req: &Req,
+    ) -> Option<Resp> {
+        let response = self.client.post(format!("http://{peer}{path}"))
+            .json(req)
+            .send().await.ok()?;
+        // Match the RPC handlers and simulated transport: only HTTP 200 is an
+        // acknowledgement. Error JSON can deserialize into ForwardAck too.
+        if response.status() != reqwest::StatusCode::OK {
+            return None;
+        }
+        response.json().await.ok()
+    }
+}
+
+impl PeerRpc for HttpPeerRpc {
+    fn request_vote<'a>(
+        &'a self,
+        peer: &'a str,
+        req: RequestVoteRequest,
+    ) -> PeerRpcFuture<'a, RequestVoteResponse> {
+        Box::pin(async move {
+            self.post(peer, "/raft/request-vote", &req).await
+        })
+    }
+
+    fn append_entries<'a>(
+        &'a self,
+        peer: &'a str,
+        req: AppendEntriesRequest,
+    ) -> PeerRpcFuture<'a, AppendEntriesResponse> {
+        Box::pin(async move {
+            self.post(peer, "/raft/append-entries", &req).await
+        })
+    }
+
+    fn forward_put<'a>(&'a self, peer: &'a str, req: PutRequest) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.post(peer, "/data/put", &req).await
+        })
+    }
+
+    fn forward_cas<'a>(
+        &'a self,
+        peer: &'a str,
+        req: CasRequest,
+    ) -> PeerRpcFuture<'a, CasResponse> {
+        Box::pin(async move {
+            self.post(peer, "/data/cas", &req).await
+        })
+    }
+
+    fn forward_join<'a>(&'a self, peer: &'a str, req: JoinRequest) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.post(peer, "/raft/join", &req).await
+        })
+    }
+
+    fn forward_leave<'a>(
+        &'a self,
+        peer: &'a str,
+        req: LeaveRequest,
+    ) -> PeerRpcFuture<'a, ForwardAck> {
+        Box::pin(async move {
+            self.post(peer, "/raft/leave", &req).await
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -326,12 +437,15 @@ pub struct ClusterNode {
     pub state: Arc<RwLock<RaftState>>,
     pub db: sled::Db,
     http_client: reqwest::Client,
+    peer_rpc: Arc<dyn PeerRpc>,
     heartbeat_notify: Arc<Notify>,
     commit_notify: Arc<Notify>,
     shutdown: CancellationToken,
     fixed_voters: Option<HashMap<String, String>>,
     rpc_bearer: Option<String>,
-    #[cfg(test)]
+    /// Fault-injection hook for simulation and fuzz harnesses: when set,
+    /// every durable write fails and the node stops itself. Never set in
+    /// production.
     fail_flush: std::sync::atomic::AtomicBool,
 }
 
@@ -462,13 +576,13 @@ impl ClusterNode {
             config,
             state: Arc::new(RwLock::new(raft_state)),
             db,
+            peer_rpc: Arc::new(HttpPeerRpc { client: http_client.clone() }),
             http_client,
             heartbeat_notify: Arc::new(Notify::new()),
             commit_notify: Arc::new(Notify::new()),
             shutdown: CancellationToken::new(),
             fixed_voters,
             rpc_bearer: None,
-            #[cfg(test)]
             fail_flush: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -526,20 +640,24 @@ impl ClusterNode {
         Ok(node)
     }
 
+    /// Install a peer transport before sharing or starting the node.
+    /// The caller must preserve the cluster credential when using fixed voters.
+    pub fn with_peer_rpc(mut self: Arc<Self>, rpc: Arc<dyn PeerRpc>) -> Arc<Self> {
+        Arc::get_mut(&mut self).expect("install peer transport before sharing").peer_rpc = rpc;
+        self
+    }
+
     pub fn has_fixed_voters(&self) -> bool {
         self.fixed_voters.is_some()
     }
 
     /// Credentials are process-local and never persisted with membership or logs.
-    pub fn new_fixed_authenticated(
-        config: ClusterConfig,
-        db: sled::Db,
-        token: String,
-    ) -> Result<Arc<Self>, String> {
+    pub fn new_fixed_authenticated(config: ClusterConfig, db: sled::Db, token: String) -> Result<Arc<Self>, String> {
         let client = rpc_client(Some(&token))?;
         let mut node = Self::new_fixed(config, db)?;
         let exclusive = Arc::get_mut(&mut node).expect("unshared new node");
         exclusive.rpc_bearer = Some(token);
+        exclusive.peer_rpc = Arc::new(HttpPeerRpc { client: client.clone() });
         exclusive.http_client = client;
         Ok(node)
     }
@@ -588,19 +706,25 @@ impl ClusterNode {
         self.await_commit(&entry).await
     }
 
-    /// Start background tasks (election timer, heartbeat sender) and the
-    /// cluster HTTP server.
-    pub async fn start(self: &Arc<Self>) {
+    /// Start Raft loops without binding an OS listener. Used by simulations
+    /// that serve the same HTTP handler over a different Tokio transport.
+    pub fn start_background_tasks(self: &Arc<Self>) -> Result<(), String> {
         if self.has_fixed_voters() && self.rpc_bearer.is_none() {
-            tracing::error!("fixed-voter networking requires a cluster credential");
-            return;
+            return Err("fixed-voter networking requires a cluster credential".into());
         }
         let node = self.clone();
         tokio::spawn(async move { node.run_election_timer().await });
-
         let node = self.clone();
         tokio::spawn(async move { node.run_heartbeat().await });
+        Ok(())
+    }
 
+    /// Start background tasks and the production cluster HTTP server.
+    pub async fn start(self: &Arc<Self>) {
+        if let Err(e) = self.start_background_tasks() {
+            tracing::error!("{e}");
+            return;
+        }
         let node = self.clone();
         tokio::spawn(async move {
             if let Err(e) = start_cluster_server(node).await {
@@ -642,8 +766,38 @@ impl ClusterNode {
     pub(crate) async fn sim_commit(self: &Arc<Self>) {
         self.update_commit_index().await;
     }
-    #[cfg(test)]
-    pub(crate) fn sim_storage_failure(&self, fail: bool) {
+    /// Apply ordering and bounds before reading/decoding values.
+    pub fn scan_prefix_window(
+        &self,
+        prefix: &str,
+        reverse: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<(String, String)>, String> {
+        if limit == Some(0) {
+            return Ok(vec![]);
+        }
+        let data = self.db.open_tree("data").map_err(|e| e.to_string())?;
+        let rows = data.scan_prefix(prefix.as_bytes());
+        let rows: Box<dyn Iterator<Item = sled::Result<(sled::IVec, sled::IVec)>>> = if reverse {
+            Box::new(rows.rev())
+        } else {
+            Box::new(rows)
+        };
+        rows.take(limit.unwrap_or(usize::MAX))
+            .map(|row| {
+                let (key, value) = row.map_err(|e| e.to_string())?;
+                Ok((
+                    String::from_utf8(key.to_vec()).map_err(|e| e.to_string())?,
+                    String::from_utf8(value.to_vec()).map_err(|e| e.to_string())?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Fault-injection hook for simulation/fuzz/replay harnesses (scheduler-runner
+    /// model_replay and the cluster regressions): when set, every durable write
+    /// fails and the node stops itself. Never set in production.
+    pub fn sim_storage_failure(&self, fail: bool) {
         self.fail_flush
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
@@ -663,7 +817,6 @@ impl ClusterNode {
     }
 
     fn durable<T>(&self, result: sled::Result<T>) -> Result<T, String> {
-        #[cfg(test)]
         let result = if self.fail_flush.load(std::sync::atomic::Ordering::SeqCst) {
             Err(sled::Error::Unsupported("injected flush failure".into()))
         } else {
@@ -702,15 +855,10 @@ impl ClusterNode {
 
     fn persist_log_entry(&self, entry: &LogEntry) -> Result<(), String> {
         let bytes = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
-        if bytes.len() > MAX_APPEND_BYTES {
-            return Err("Raft entry exceeds replication budget".into());
-        }
-        self.durable(
-            self.db
-                .open_tree("raft_log")
-                .and_then(|tree| tree.insert(entry.index.to_be_bytes(), bytes)),
-        )
-        .map(|_| ())
+        if bytes.len() > MAX_APPEND_BYTES { return Err("Raft entry exceeds replication budget".into()); }
+        self.durable(self.db.open_tree("raft_log").and_then(|tree| {
+            tree.insert(entry.index.to_be_bytes(), bytes)
+        })).map(|_| ())
     }
 
     fn truncate_log_from(&self, from_index: u64) -> Result<(), String> {
@@ -793,11 +941,7 @@ impl ClusterNode {
     async fn start_election(self: &Arc<Self>) {
         let (term, last_log_index, last_log_term, peers, voter_count) = {
             let mut state = self.state.write().await;
-            let Some(next) = state
-                .current_term
-                .checked_add(1)
-                .filter(|t| *t <= MAX_RAFT_TERM)
-            else {
+            let Some(next) = state.current_term.checked_add(1).filter(|t| *t <= MAX_RAFT_TERM) else {
                 self.shutdown.cancel();
                 return;
             };
@@ -839,19 +983,8 @@ impl ClusterNode {
                 last_log_index,
                 last_log_term,
             };
-            let client = self.http_client.clone();
-            let url = format!("http://{}/raft/request-vote", peer);
-            requests.push(async move {
-                client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .ok()?
-                    .json::<RequestVoteResponse>()
-                    .await
-                    .ok()
-            });
+            let rpc = self.peer_rpc.clone();
+            requests.push(async move { rpc.request_vote(peer, req).await });
         }
 
         while votes < majority {
@@ -870,9 +1003,7 @@ impl ClusterNode {
                 }
             };
             if let Some(resp) = response {
-                if resp.term > MAX_RAFT_TERM {
-                    continue;
-                }
+                if resp.term > MAX_RAFT_TERM { continue; }
                 let mut state = self.state.write().await;
                 if resp.term > state.current_term {
                     state.current_term = resp.term;
@@ -896,8 +1027,7 @@ impl ClusterNode {
 
         if votes >= majority {
             let mut state = self.state.write().await;
-            if self.healthy().is_ok() && state.current_term == term && state.role == Role::Candidate
-            {
+            if self.healthy().is_ok() && state.current_term == term && state.role == Role::Candidate {
                 state.role = Role::Leader;
                 state.leader_id = Some(self.config.node_id.clone());
                 let last_index = state.last_log_index();
@@ -1013,21 +1143,13 @@ impl ClusterNode {
                 0
             };
             let mut bytes = 0;
-            let entries: Vec<LogEntry> = state
-                .log
-                .iter()
-                .filter(|e| e.index >= next_idx)
-                .take(MAX_APPEND_ENTRIES)
-                .take_while(|entry| {
+            let entries: Vec<LogEntry> = state.log.iter().filter(|e| e.index >= next_idx)
+                .take(MAX_APPEND_ENTRIES).take_while(|entry| {
                     let size = serde_json::to_vec(entry).map_or(MAX_RAFT_BODY_BYTES, |b| b.len());
-                    if bytes + size > MAX_APPEND_BYTES {
-                        return false;
-                    }
+                    if bytes + size > MAX_APPEND_BYTES { return false; }
                     bytes += size;
                     true
-                })
-                .cloned()
-                .collect();
+                }).cloned().collect();
             // peer_addrs already includes self (set during initialization)
             (
                 state.current_term,
@@ -1052,26 +1174,16 @@ impl ClusterNode {
             learner_addrs: Some(current_learners),
         };
 
-        let url = format!("http://{}/raft/append-entries", peer);
-        let resp = self.http_client.post(&url).json(&req).send().await;
-
-        match resp {
-            Ok(r) => {
-                if let Ok(ae_resp) = r.json::<AppendEntriesResponse>().await {
-                    self.accept_append_response(
-                        peer,
-                        term,
-                        prev_log_index,
-                        entries.last().map_or(prev_log_index, |e| e.index),
-                        ae_resp,
-                    )
-                    .await;
-                }
-            }
-            Err(_) => {
-                // Peer unreachable, will retry on next heartbeat
-            }
+        if let Some(ae_resp) = self.peer_rpc.append_entries(peer, req).await {
+            self.accept_append_response(
+                peer,
+                term,
+                prev_log_index,
+                entries.last().map_or(prev_log_index, |e| e.index),
+                ae_resp,
+            ).await;
         }
+        // An unreachable peer is retried on the next heartbeat.
     }
 
     async fn accept_append_response(
@@ -1083,9 +1195,7 @@ impl ClusterNode {
         ae_resp: AppendEntriesResponse,
     ) {
         let mut state = self.state.write().await;
-        if ae_resp.term > MAX_RAFT_TERM {
-            return;
-        }
+        if ae_resp.term > MAX_RAFT_TERM { return; }
         if ae_resp.term > state.current_term {
             state.current_term = ae_resp.term;
             state.role = Role::Follower;
@@ -1192,13 +1302,8 @@ impl ClusterNode {
             term,
             success: false,
         };
-        if self.healthy().is_err()
-            || req.term > MAX_RAFT_TERM
-            || req.term < state.current_term
-            || req.entries.iter().any(|entry| {
-                serde_json::to_vec(entry).map_or(true, |bytes| bytes.len() > MAX_APPEND_BYTES)
-            })
-        {
+        if self.healthy().is_err() || req.term > MAX_RAFT_TERM || req.term < state.current_term
+            || req.entries.iter().any(|entry| serde_json::to_vec(entry).map_or(true, |bytes| bytes.len() > MAX_APPEND_BYTES)) {
             return reject(state.current_term);
         }
         if let Some(voters) = &self.fixed_voters {
@@ -1308,8 +1413,7 @@ impl ClusterNode {
         let mut state = self.state.write().await;
 
         if self.healthy().is_err()
-            || req.term > MAX_RAFT_TERM
-            || req.last_log_term > req.term
+            || req.term > MAX_RAFT_TERM || req.last_log_term > req.term
             || self
                 .fixed_voters
                 .as_ref()
@@ -1461,20 +1565,10 @@ impl ClusterNode {
             Some(id) => {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
-                let url = format!("http://{}/data/put", leader_addr);
                 let req = PutRequest { key, value, extra };
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_put(&leader_addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward to leader".to_string()),
                 }
             }
             None => Err("no leader elected yet".to_string()),
@@ -1531,26 +1625,38 @@ impl ClusterNode {
             if state.role != Role::Leader
                 || expected_term.is_some_and(|term| term != state.current_term)
             {
+                eprintln!("DBG-CAS-NOTLEADER node={} role={:?} term={} expected_term={:?} leader={:?}", self.config.node_id, state.role, state.current_term, expected_term, state.leader_id);
                 return Err(format!(
                     "not the leader; current leader: {:?}",
                     state.leader_id
                 ));
             }
-            // Latest value = most recent log entry for the key (covers
-            // appended-but-not-yet-committed writes), else the applied value.
-            let current = state.log.iter().rev().find_map(|e| {
-                e.extra
-                    .iter()
-                    .rev()
-                    .find(|(k, _)| k == &key)
-                    .map(|(_, v)| v.clone())
-                    .or_else(|| (e.key == key).then(|| e.value.clone()))
-            });
+            // Latest value = the newest CURRENT-TERM log entry for the key,
+            // else the last committed/applied value. Uncommitted entries from
+            // older terms must not shadow the applied value: a new leader can
+            // carry such entries in its log without ever committing them, and
+            // comparing against them wedges CAS forever (the client sees the
+            // applied value, the leader compares the stale tail). Old-term
+            // entries commit as soon as a current-term entry does.
+            let current = state
+                .log
+                .iter()
+                .rev()
+                .filter(|e| e.term == state.current_term)
+                .find_map(|e| {
+                    e.extra
+                        .iter()
+                        .rev()
+                        .find(|(k, _)| k == &key)
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| (e.key == key).then(|| e.value.clone()))
+                });
             let current = match current {
                 Some(value) => Some(value),
                 None => self.read_applied(&key)?,
             };
             if current.as_deref() != expected.as_deref() {
+                eprintln!("DBG-CAS-CONFLICT node={} term={} log_tail={:?} applied={:?} expected={:?} log_len={}", self.config.node_id, state.current_term, current, self.read_applied(&key).ok().flatten(), expected, state.log.len());
                 return Ok(false);
             }
             let entry = LogEntry {
@@ -1614,29 +1720,15 @@ impl ClusterNode {
             Some(id) => {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
-                let url = format!("http://{}/data/cas", leader_addr);
                 let req = CasRequest {
                     key,
                     expected,
                     new,
                     extra,
                 };
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward cas to leader: {}", e))?;
-                if resp.status().is_success() {
-                    let body: CasResponse = resp
-                        .json()
-                        .await
-                        .map_err(|e| format!("invalid cas response: {}", e))?;
-                    Ok(body.applied)
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_cas(&leader_addr, req).await {
+                    Some(resp) => Ok(resp.applied),
+                    None => Err("failed to forward cas to leader".to_string()),
                 }
             }
             None => Err("no leader elected yet".to_string()),
@@ -1779,19 +1871,9 @@ impl ClusterNode {
 
         match (leader_id, leader_addr) {
             (Some(_), Some(addr)) => {
-                let url = format!("http://{}/raft/join", addr);
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward join to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_join(&addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward join to leader".to_string()),
                 }
             }
             _ => Err("no leader elected yet".to_string()),
@@ -1822,19 +1904,9 @@ impl ClusterNode {
 
         match (leader_id, leader_addr) {
             (Some(_), Some(addr)) => {
-                let url = format!("http://{}/raft/leave", addr);
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .map_err(|e| format!("failed to forward leave to leader: {}", e))?;
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(format!("leader returned error: {}", body))
+                match self.peer_rpc.forward_leave(&addr, req).await {
+                    Some(_) => Ok(()),
+                    None => Err("failed to forward leave to leader".to_string()),
                 }
             }
             _ => Err("no leader elected yet".to_string()),
@@ -1855,34 +1927,6 @@ impl ClusterNode {
     /// Returns (key, value) pairs sorted lexicographically.
     pub fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, String> {
         self.scan_prefix_window(prefix, false, None)
-    }
-
-    /// Apply ordering and bounds before reading/decoding values.
-    pub fn scan_prefix_window(
-        &self,
-        prefix: &str,
-        reverse: bool,
-        limit: Option<usize>,
-    ) -> Result<Vec<(String, String)>, String> {
-        if limit == Some(0) {
-            return Ok(vec![]);
-        }
-        let data = self.db.open_tree("data").map_err(|e| e.to_string())?;
-        let rows = data.scan_prefix(prefix.as_bytes());
-        let rows: Box<dyn Iterator<Item = sled::Result<(sled::IVec, sled::IVec)>>> = if reverse {
-            Box::new(rows.rev())
-        } else {
-            Box::new(rows)
-        };
-        rows.take(limit.unwrap_or(usize::MAX))
-            .map(|row| {
-                let (key, value) = row.map_err(|e| e.to_string())?;
-                Ok((
-                    String::from_utf8(key.to_vec()).map_err(|e| e.to_string())?,
-                    String::from_utf8(value.to_vec()).map_err(|e| e.to_string())?,
-                ))
-            })
-            .collect()
     }
 
     /// Return the current status of this node.
@@ -1938,24 +1982,14 @@ async fn route(
     req: Request<Incoming>,
 ) -> Result<Response<String>, Infallible> {
     if let Some(token) = &node.rpc_bearer {
-        if !bearer_matches(
-            req.headers()
-                .get("authorization")
-                .and_then(|h| h.to_str().ok()),
-            token,
-        ) {
+        if !bearer_matches(req.headers().get("authorization").and_then(|h| h.to_str().ok()), token) {
             return Ok(error_response(401, "unauthorized cluster request"));
         }
     } else if node.has_fixed_voters() {
         return Ok(error_response(503, "cluster authentication unavailable"));
     }
-    if req
-        .headers()
-        .get("content-length")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .is_some_and(|n| n > MAX_RAFT_BODY_BYTES as u64)
-    {
+    if req.headers().get("content-length").and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok()).is_some_and(|n| n > MAX_RAFT_BODY_BYTES as u64) {
         return Ok(error_response(413, "cluster request exceeds body limit"));
     }
     // Reject all requests on a shut-down node.  The TCP listener stops
@@ -2082,6 +2116,24 @@ async fn route(
     Ok(response)
 }
 
+/// Serve one cluster HTTP connection over any Tokio-compatible transport.
+/// Production uses Tokio TCP; simulations can supply turmoil's TCP stream.
+pub async fn serve_cluster_connection<S>(
+    node: Arc<ClusterNode>,
+    stream: S,
+) -> Result<(), hyper::Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let service = hyper::service::service_fn(move |req| {
+        let node = node.clone();
+        async move { route(node, req).await }
+    });
+    hyper::server::conn::http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), service)
+        .await
+}
+
 pub async fn start_cluster_server(
     node: Arc<ClusterNode>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2089,13 +2141,8 @@ pub async fn start_cluster_server(
         return Err("fixed-voter networking requires a cluster credential".into());
     }
     let addr = if node.has_fixed_voters() {
-        node.config
-            .advertise_addr
-            .clone()
-            .unwrap_or_else(|| format!("127.0.0.1:{}", node.config.cluster_port))
-    } else {
-        format!("0.0.0.0:{}", node.config.cluster_port)
-    };
+        node.config.advertise_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{}", node.config.cluster_port))
+    } else { format!("0.0.0.0:{}", node.config.cluster_port) };
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
         "[{}] Cluster HTTP server listening on {}",
@@ -2111,15 +2158,8 @@ pub async fn start_cluster_server(
                 let (stream, _addr) = accept?;
                 let node = node.clone();
 
-                let service = hyper::service::service_fn(move |req| {
-                    let node = node.clone();
-                    async move { route(node, req).await }
-                });
-
                 tokio::spawn(async move {
-                    let conn = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), service);
-                    if let Err(err) = conn.await {
+                    if let Err(err) = serve_cluster_connection(node, stream).await {
                         tracing::warn!("Cluster HTTP connection error: {:?}", err);
                     }
                 });
