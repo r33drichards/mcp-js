@@ -40,7 +40,7 @@ jobs:
             bin_name: mcp-v8-cli-linux-arm64
             use_zigbuild: true
           - name: macOS ARM64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             bin_name: mcp-v8-cli-macos-arm64
             use_zigbuild: false
@@ -112,7 +112,7 @@ jobs:
             bin_name: mcp-v8-linux-arm64
             use_zigbuild: true
           - name: macOS ARM64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             rusty_v8_target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
