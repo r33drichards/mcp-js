@@ -1589,26 +1589,38 @@ impl ClusterNode {
             if state.role != Role::Leader
                 || expected_term.is_some_and(|term| term != state.current_term)
             {
+                eprintln!("DBG-CAS-NOTLEADER node={} role={:?} term={} expected_term={:?} leader={:?}", self.config.node_id, state.role, state.current_term, expected_term, state.leader_id);
                 return Err(format!(
                     "not the leader; current leader: {:?}",
                     state.leader_id
                 ));
             }
-            // Latest value = most recent log entry for the key (covers
-            // appended-but-not-yet-committed writes), else the applied value.
-            let current = state.log.iter().rev().find_map(|e| {
-                e.extra
-                    .iter()
-                    .rev()
-                    .find(|(k, _)| k == &key)
-                    .map(|(_, v)| v.clone())
-                    .or_else(|| (e.key == key).then(|| e.value.clone()))
-            });
+            // Latest value = the newest CURRENT-TERM log entry for the key,
+            // else the last committed/applied value. Uncommitted entries from
+            // older terms must not shadow the applied value: a new leader can
+            // carry such entries in its log without ever committing them, and
+            // comparing against them wedges CAS forever (the client sees the
+            // applied value, the leader compares the stale tail). Old-term
+            // entries commit as soon as a current-term entry does.
+            let current = state
+                .log
+                .iter()
+                .rev()
+                .filter(|e| e.term == state.current_term)
+                .find_map(|e| {
+                    e.extra
+                        .iter()
+                        .rev()
+                        .find(|(k, _)| k == &key)
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| (e.key == key).then(|| e.value.clone()))
+                });
             let current = match current {
                 Some(value) => Some(value),
                 None => self.read_applied(&key)?,
             };
             if current.as_deref() != expected.as_deref() {
+                eprintln!("DBG-CAS-CONFLICT node={} term={} log_tail={:?} applied={:?} expected={:?} log_len={}", self.config.node_id, state.current_term, current, self.read_applied(&key).ok().flatten(), expected, state.log.len());
                 return Ok(false);
             }
             let entry = LogEntry {

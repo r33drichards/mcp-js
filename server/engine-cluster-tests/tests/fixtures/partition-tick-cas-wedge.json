@@ -1,0 +1,63 @@
+{
+  "seed": 4135985201162600866,
+  "topology": {
+    "voters": [
+      "n0",
+      "n1",
+      "n2"
+    ],
+    "clients": [
+      "observer"
+    ]
+  },
+  "workload": {
+    "every_ms": 250,
+    "count": 2,
+    "op": {
+      "run_js": {
+        "node": "leader",
+        "program": [
+          {
+            "write": {
+              "path": "/data/fuzz-0",
+              "bytes": "0-{i}"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "faults": [
+    {
+      "partition": {
+        "at_ms": 909,
+        "groups": [
+          [
+            "n0"
+          ],
+          [
+            "n1",
+            "n2"
+          ]
+        ]
+      }
+    },
+    {
+      "heal_all": {
+        "at_ms": 2323
+      }
+    }
+  ],
+  "recovery": {
+    "stop_workload": true,
+    "heal_all": true,
+    "restart_crashed": true,
+    "deadline_ms": 6000
+  },
+  "asserts": [
+    "acked_commits_in_legal_history",
+    "replicas_converge_after_recovery",
+    "published_snapshot_matches_model",
+    "fresh_write_succeeds"
+  ]
+}
